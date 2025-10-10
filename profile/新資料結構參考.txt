@@ -1,0 +1,49 @@
+my-conscious-ai-project/
+│
+├── backend/                      ← 所有後端邏輯與 API 接口
+│   ├── main.py                   ← FastAPI 主入口
+│   ├── chat_router.py            ← /chat 專用路由與邏輯
+│   ├── memory_router.py          ← 記憶儲存、查詢、重組 API
+│   ├── file_upload.py            ← 處理上傳圖像/檔案
+│   ├── openai_handler.py         ← 呼叫 OpenAI GPT API 的封裝邏輯
+│   ├── supabase_handler.py       ← 封裝與 Supabase 資料庫互動邏輯
+│   ├── prompt_engine.py          ← 組合提示語 + 加入記憶邏輯
+│   └── requirements.txt          ← 後端依賴套件
+│
+├── frontend/                     ← 使用者前端介面（React or Vue）
+│   ├── public/                   ← 靜態資源
+│   ├── src/                      ← 核心 UI 程式碼
+│   │   ├── components/           ← ChatBox, FileUpload, ExportButton 等元件
+│   │   ├── pages/                ← Chat 主頁、設定頁等
+│   │   └── App.vue / App.jsx     ← 主畫面結構
+│   └── package.json              ← 前端依賴項目設定
+│
+├── modules/                      ← 你原本已存在的自定義模組
+│   ├── file_handler.py           ← 圖像處理邏輯可保留移植
+│   └── other_custom.py           ← 其他自定邏輯
+│
+├── profile/                      ← 儲存使用者偏好、角色、引導設定
+│   └── user_profile.json         ← 可讀取使用者偏好設定
+│
+├── memories/                     ← 暫存記憶、日誌檔案、情緒資料（如未用 DB 時）
+│   └── raw_memory.jsonl          ← 紀錄所有來回對話
+│
+├── config/                       ← 整體環境設定檔案
+│   ├── .env                      ← API Key、資料庫金鑰等
+│   └── settings.py               ← 各模組使用的變數集中管理
+│
+├── README.md                     ← 專案簡介、啟動說明
+├── start.sh / start.ps1          ← 一鍵部署啟動腳本
+└── LICENSE                       ← 授權
+
+和原本的對應關係
+
+
+| 舊檔案／夾               | 新位置建議                       | 說明                 |
+| ------------------- | --------------------------- | ------------------ |
+| `bot.py`            | `backend/chat_router.py`    | 把處理訊息的主要邏輯拆進 API 裡 |
+| `XiaoChenGuangSoul` | `profile/user_profile.json` | 視為角色核心設定資料         |
+| `modules/`          | `modules/`                  | 可繼續使用，只是未來要模組化封裝   |
+| `requirements.txt`  | `backend/requirements.txt`  | 和後端環境綁定            |
+| Supabase 資料表        | `supabase_handler.py`       | 與記憶與偏好查詢模組對應       |
+
