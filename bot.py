@@ -6,8 +6,8 @@ from pydantic import BaseModel
 import asyncio
 
 # 調整 sys.path 以包含 backend/ 和 models/ 資料夾
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend'))
-sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'))
 
 from backend.supabase_handler import get_supabase_client
 from backend.openai_handler import get_openai_client, generate_response
