@@ -2,7 +2,7 @@ import os
 import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import Basemoduls
 import asyncio
 
 # 調整 sys.path 以包含 backend/ 和 modules/ 資料夾
@@ -33,12 +33,12 @@ app.include_router(chat_router, prefix="/api", tags=["Chat"])
 app.include_router(memory_router, prefix="/api", tags=["Memory"])
 app.include_router(file_router, prefix="/api", tags=["File"])
 
-class ChatRequest(BaseModel):
+class ChatRequest(Basemoduls):
     user_message: str
     conversation_id: str
     user_id: str = "default_user"
 
-class ChatResponse(BaseModel):
+class ChatResponse(Basemoduls):
     assistant_message: str
     emotion_analysis: dict
     conversation_id: str
@@ -51,7 +51,7 @@ memory_system = MemorySystem(supabase, openai_client, memories_table)
 emotion_detector = EnhancedEmotionDetector()
 personality_engine = PersonalityEngine(conversation_id=None, supabase_client=supabase, memories_table=memories_table)
 
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat", response_moduls=ChatResponse)
 async def chat(request: ChatRequest):
     """處理聊天請求並整合記憶、情緒、個性邏輯"""
     try:
@@ -92,7 +92,7 @@ async def chat(request: ChatRequest):
         assistant_message = await generate_response(
             openai_client,
             messages,
-            model="gpt-4o-mini",
+            moduls="gpt-4o-mini",
             max_tokens=1000,
             temperature=0.8
         )
