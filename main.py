@@ -2,7 +2,7 @@ import os
 import sys
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import Basemodel
+from pydantic import BaseModel
 import asyncio
 
 # 調整 sys.path 以包含 backend/ 和 modules/ 資料夾
@@ -33,12 +33,12 @@ app.include_router(chat_router, prefix="/api", tags=["Chat"])
 app.include_router(memory_router, prefix="/api", tags=["Memory"])
 app.include_router(file_router, prefix="/api", tags=["File"])
 
-class ChatRequest(Basemoduls):
+class ChatRequest(BaseModel):
     user_message: str
     conversation_id: str
     user_id: str = "default_user"
 
-class ChatResponse(Basemoduls):
+class ChatResponse(BaseModel):
     assistant_message: str
     emotion_analysis: dict
     conversation_id: str
@@ -92,7 +92,7 @@ async def chat(request: ChatRequest):
         assistant_message = await generate_response(
             openai_client,
             messages,
-            moduls="gpt-4o-mini",
+            model="gpt-4o-mini",
             max_tokens=1000,
             temperature=0.8
         )
@@ -146,9 +146,9 @@ async def health_check():
 if __name__ == "__main__":
 
     import os
-    import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+import uvicorn
 
-    
-    
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)  
+   
