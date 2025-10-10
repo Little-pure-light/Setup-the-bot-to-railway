@@ -1,5 +1,6 @@
 import os
 import sys
+import json
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,6 +19,21 @@ from modules.personality_engine import PersonalityEngine
 from backend.chat_router import router as chat_router
 from backend.memory_router import router as memory_router
 from backend.file_upload import router as file_router
+
+# 嘗試載入 user_profile.json
+try:
+    profile_path = os.path.join(os.path.dirname(__file__), "profile", "user_profile.json")
+    if os.path.exists(profile_path):
+        with open(profile_path, "r", encoding="utf-8") as f:
+            user_profile = json.load(f)
+    else:
+        raise FileNotFoundError("找不到 user_profile.json")
+except Exception as e:
+    print(f"⚠️ 無法載入 user_profile.json：{e}，將使用預設設定")
+    user_profile = {
+        "name": "AI小宸光",
+        "traits": ["友善", "理解", "理性"]
+    }
 
 app = FastAPI(title="小宸光 AI 靈魂系統 Bot", version="1.0.0")
 
@@ -128,7 +144,7 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
-        print(f"❌ Chat error: {e}")
+        print(f"\u274c Chat error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/")
@@ -144,8 +160,6 @@ async def health_check():
     return {"status": "healthy"}
 
 if __name__ == "__main__":
-    
-    import uvicorn, os
+    import uvicorn
     port = int(os.getenv("PORT", 8080))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
-   
