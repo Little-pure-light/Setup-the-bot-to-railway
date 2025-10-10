@@ -5,15 +5,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import asyncio
 
-# 調整 sys.path 以包含 backend/ 和 modules/ 資料夾
+# 調整 sys.path 以包含 backend/ 和 models/ 資料夾
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend'))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modules'))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'models'))
 
 from backend.supabase_handler import get_supabase_client
 from backend.openai_handler import get_openai_client, generate_response
-from modules.memory_system import MemorySystem
-from modules.emotion_detector import EnhancedEmotionDetector
-from modules.personality_engine import PersonalityEngine
+from models.memory_system import MemorySystem
+from models.emotion_detector import EnhancedEmotionDetector
+from models.personality_engine import PersonalityEngine
 
 from backend.chat_router import router as chat_router
 from backend.memory_router import router as memory_router
