@@ -1,154 +1,84 @@
-import os
-import sys
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-import asyncio
+import uvicorn
+import os
 
-# 調整 sys.path 以包含 backend/ 和 modules/ 資料夾
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'backend'))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'modules'))
+# 模組引用（根據妳的專案結構）
+from openai_handler import generate_response
+from memory_system import memory_system
 
-from backend.supabase_handler import get_supabase_client
-from backend.openai_handler import get_openai_client, generate_response
-from modules.memory_system import MemorySystem
-from modules.emotion_detector import EnhancedEmotionDetector
-from modules.personality_engine import PersonalityEngine
+# ------------------------------------------------------
+# 🌟 FastAPI 初始化
+# ------------------------------------------------------
+app = FastAPI(
+    title="小宸光 AI 靈魂系統 API",
+    version="1.0.0",
+    description="整合情緒分析、記憶、人格模型的靈魂型 AI 系統",
+)
 
-from backend.chat_router import router as chat_router
-from backend.memory_router import router as memory_router
-from backend.file_upload import router as file_router
-
-app = FastAPI(title="小宸光 AI 靈魂系統 Bot", version="1.0.0")
-
+# ------------------------------------------------------
+# 🌐 CORS 設定（允許前端網頁或其他系統連線）
+# ------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"],  # 可改成妳的網域，例如 https://xiaochenguang.ai
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-app.include_router(chat_router, prefix="/api", tags=["Chat"])
-app.include_router(memory_router, prefix="/api", tags=["Memory"])
-app.include_router(file_router, prefix="/api", tags=["File"])
-
-class ChatRequest(BaseModel):
-    user_message: str
-    conversation_id: str
-    user_id: str = "default_user"
-
-class ChatResponse(BaseModel):
-    assistant_message: str
-    emotion_analysis: dict
-    conversation_id: str
-
-# 初始化全局依賴（參照 xiaochenguang_memories 和 emotional_states 資料表）
-supabase = get_supabase_client()
-openai_client = get_openai_client()
-memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
-memory_system = MemorySystem(supabase, openai_client, memories_table)
-emotion_detector = EnhancedEmotionDetector()
-personality_engine = PersonalityEngine(conversation_id=None, supabase_client=supabase, memories_table=memories_table)
-
-@app.post("/api/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """處理聊天請求並整合記憶、情緒、個性邏輯"""
-    try:
-        # 更新 PersonalityEngine 的 conversation_id
-        personality_engine.conversation_id = request.conversation_id
-
-        # 情緒分析
-        emotion_analysis = emotion_detector.analyze_emotion(request.user_message)
-        emotion_style = emotion_detector.get_emotion_response_style(emotion_analysis)
-
-        # 召回記憶
-        recalled_memories = await memory_system.recall_memories(request.user_message, request.conversation_id)
-        conversation_history = memory_system.get_conversation_history(request.conversation_id, limit=5)
-
-        # 構建提示語
-        system_prompt = f"""### 記憶與上下文
-{recalled_memories if recalled_memories else "（無相關記憶）"}
-
-### 最近對話歷史
-{conversation_history if conversation_history else "（這是對話開始）"}
-
-### 當前情感分析
-- 主要情緒: {emotion_analysis['dominant_emotion']}
-- 強度: {emotion_analysis['intensity']:.2f}
-- 信心度: {emotion_analysis['confidence']:.2f}
-- 回應語調: {emotion_style['tone']}
-- 同理心等級: {emotion_style['empathy_level']:.2f}
-- 能量等級: {emotion_style['energy_level']:.2f}
-
-請以小宸光的身份回應用戶，展現對應的情感理解與個性特質。
-"""
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": request.user_message}
-        ]
-
-        # 生成回應
-        assistant_message = await generate_response(
-            openai_client,
-            messages,
-            model="gpt-4o-mini",
-            max_tokens=1000,
-            temperature=0.8
-        )
-
-        # 記憶儲存（參照 xiaochenguang_memories 資料表）
-        await memory_system.save_memory(
-            request.conversation_id,
-            request.user_message,
-            assistant_message,
-            emotion_analysis,
-            ai_id=os.getenv("AI_ID", "xiaochenguang_v1")
-        )
-
-        # 儲存情緒狀態（參照 emotional_states 資料表）
-        await memory_system.save_emotional_state(
-            request.user_id,
-            emotion_analysis,
-            context=request.user_message
-        )
-
-        # 個性引擎學習
-        personality_engine.learn_from_interaction(
-            request.user_message,
-            assistant_message,
-            emotion_analysis
-        )
-        personality_engine.save_personality()
-
-        return ChatResponse(
-            assistant_message=assistant_message,
-            emotion_analysis=emotion_analysis,
-            conversation_id=request.conversation_id
-        )
-
-    except Exception as e:
-        print(f"❌ Chat error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
+# ------------------------------------------------------
+# 🏠 測試根路由
+# ------------------------------------------------------
 @app.get("/")
-async def root():
+def root():
     return {
-        "message": "小宸光 AI 靈魂系統 Bot",
+        "message": "小宸光 AI 靈魂系統 API",
         "version": "1.0.0",
         "status": "running"
     }
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
+# ------------------------------------------------------
+# 💬 聊天 API
+# ------------------------------------------------------
+@app.post("/api/chat")
+async def chat(request: Request):
+    data = await request.json()
 
+    user_message = data.get("user_message")
+    user_id = data.get("user_id", "default_user")
+    conversation_id = data.get("conversation_id", "default_conversation")
+
+    if not user_message:
+        return {"error": "Missing required field: user_message"}
+
+    # 產生 AI 回覆
+    ai_message = await generate_response(
+        client=memory_system.openai_client,
+        messages=[{"role": "user", "content": user_message}]
+    )
+
+    # 儲存情緒狀態
+    emotion = await memory_system.save_emotional_state(user_id, ai_message)
+
+    return {
+        "assistant_message": ai_message,
+        "emotion_analysis": emotion,
+        "conversation_id": conversation_id
+    }
+
+# ------------------------------------------------------
+# 💾 記憶 API
+# ------------------------------------------------------
+@app.get("/api/memory/{user_id}")
+async def get_memory(user_id: str):
+    memories = await memory_system.retrieve_user_memories(user_id)
+    return {"user_id": user_id, "memories": memories}
+
+
+# ------------------------------------------------------
+# 🚀 啟動設定（自動讀取 Railway 提供的 PORT）
+# ------------------------------------------------------
 if __name__ == "__main__":
-
-    import os
-import uvicorn
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)  
-   
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run("main:app", host="0.0.0.0", port=port)
