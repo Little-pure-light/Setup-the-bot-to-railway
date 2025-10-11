@@ -1,12 +1,14 @@
 import os
 from supabase import create_client, Client
 from dotenv import load_dotenv
+from fastapi import APIRouter, HTTPException
 
 load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
+router = APIRouter()
 _supabase_client = None
 
 def get_supabase_client() -> Client:
@@ -20,3 +22,12 @@ def get_supabase_client() -> Client:
         _supabase_client = create_client(SUPABASE_URL, SUPABASE_KEY)
     
     return _supabase_client
+
+# ✅ 新增測試用 API 路由
+@router.get("/supabase/ping")
+async def supabase_ping():
+    try:
+        client = get_supabase_client()
+        return {"message": "✅ Supabase 初始化成功", "url": SUPABASE_URL}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
