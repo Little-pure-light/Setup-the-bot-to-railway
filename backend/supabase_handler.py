@@ -1,31 +1,49 @@
-from fastapi import APIRouter
 import os
 import logging
+from fastapi import APIRouter
+from supabase import create_client, Client
+
+# Debug loggers
+logger = logging.getLogger("supabase_handler")
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+handler.setLevel(logging.DEBUG)
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 router = APIRouter()
+supabase_url = os.getenv("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_ANON_KEY")
+logger.debug(f"Loaded SUPABASE_URL: {supabase_url}")
+logger.debug(f"Loaded SUPABASE_ANON_KEY: {'FOUND' if supabase_key else 'NOT FOUND'}")
+
+supabase: Client = None
+
+try:
+    if supabase_url and supabase_key:
+        supabase = create_client(supabase_url, supabase_key)
+        logger.info("✅ Supabase client initialized successfully.")
+    else:
+        logger.warning("❌ Supabase environment variables missing.")
+except Exception as e:
+    logger.error(f"❌ Supabase client initialization failed: {e}")
 
 @router.get("/api/supabase/ping")
 async def ping_supabase():
-    logging.info("🔍 [Supabase Ping] API Called")
-
     try:
-        supabase_url = os.getenv("SUPABASE_URL")
-        supabase_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+        if not supabase:
+            logger.error("Supabase client not initialized.")
+            return {"status": "error", "detail": "Supabase client not initialized"}
 
-        if not supabase_url:
-            logging.error("❌ 環境變數 'SUPABASE_URL' 未設置")
-            return {"error": "Missing SUPABASE_URL in environment variables."}
-
-        if not supabase_key:
-            logging.error("❌ 環境變數 'SUPABASE_SERVICE_ROLE_KEY' 未設置")
-            return {"error": "Missing SUPABASE_SERVICE_ROLE_KEY in environment variables."}
-
-        logging.info(f"✅ SUPABASE_URL: {supabase_url}")
-        logging.info(f"✅ SUPABASE_SERVICE_ROLE_KEY: {supabase_key[:6]}...(隱藏其餘)")
-
-        # 模擬連接成功（你可加真連線邏輯）
-        return {"message": "Supabase environment is correctly configured."}
-
+        logger.info("Pinging Supabase...")
+        result = supabase.table("your_table_name").select("*").limit(1).execute()
+        logger.debug(f"Ping result: {result}")
+        return {"status": "success", "result": result.data}
     except Exception as e:
-        logging.exception("🔥 發生例外錯誤：")
-        return {"error": str(e)}
+        logger.error(f"❌ Error in ping_supabase: {e}")
+        return {"status": "error", "detail": str(e)}
+
+# Optional: expose client if needed in other modules
+def get_supabase_client():
+    return supabase
