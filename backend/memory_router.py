@@ -3,7 +3,8 @@ from pydantic import BaseModel
 from typing import List, Optional
 import os
 import logging
-from utils.supabase_client import supabase
+from backend.utils.supabase_client import supabase
+
 
 router = APIRouter()
 logger = logging.getLogger("memory_router")
@@ -54,3 +55,4 @@ async def get_emotional_states(user_id: str, limit: int = 10):
     except Exception as e:
         logger.exception("❌ 讀取情緒失敗")
         raise HTTPException(status_code=500, detail=str(e))
+
