@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from backend.utils.supabase_client import supabase
+from backend.supabase_handler import supabase
 import logging
 
 router = APIRouter()
@@ -30,6 +30,7 @@ async def supabase_ping():
     except Exception as e:
         logging.error(f"❌ Supabase 錯誤：{e}")
         return {"status": "error", "message": str(e)}
+
 
 
 
