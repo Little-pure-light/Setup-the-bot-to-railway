@@ -1,36 +1,23 @@
 from fastapi import APIRouter
-from backend.supabase_handler import supabase
 import logging
+from supabase import create_client, Client  # 要確保你 requirements.txt 有安裝 `supabase`
 
+# 初始化 router
 router = APIRouter()
 
-@router.get("/supabase/ping")from fastapi import APIRouter
-from utils.supabase_client import supabase
-import logging
+# Supabase 設定（替換成你的環境變數或硬編碼）
+SUPABASE_URL = "https://your-project.supabase.co"
+SUPABASE_KEY = "your-anon-or-service-role-key"
 
-router = APIRouter()
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# ping 用的 endpoint
 @router.get("/supabase/ping")
 async def supabase_ping():
     try:
-        logging.info("🔍 正在呼叫 Supabase 的 profiles 資料表")
-        response = supabase.table("profiles").select("*").limit(1).execute()
-        logging.info(f"✅ Supabase 回應：{response}")
-        return {"status": "success", "data": response}
+        # 這裡可以改成你實際想測試的 supabase 功能，例如 list tables
+        result = supabase.table("your_table_name").select("*").limit(1).execute()
+        return {"message": "Supabase 連線成功", "sample": result.data}
     except Exception as e:
-        logging.error(f"❌ Supabase 錯誤：{e}")
-        return {"status": "error", "message": str(e)}
-
-async def supabase_ping():
-    try:
-        logging.info("🔍 正在呼叫 Supabase 的 profiles 資料表")
-        response = supabase.table("profiles").select("*").limit(1).execute()
-        logging.info(f"✅ Supabase 回應：{response}")
-        return {"status": "success", "data": response}
-    except Exception as e:
-        logging.error(f"❌ Supabase 錯誤：{e}")
-        return {"status": "error", "message": str(e)}
-
-
-
-
+        logging.exception("Supabase ping error")
+        return {"error": str(e)}
