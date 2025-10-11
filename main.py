@@ -7,7 +7,7 @@ from backend.memory_router import router as memory_router
 from backend.openai_handler import router as openai_router
 from backend.file_upload import router as file_upload_router
 from backend.prompt_engine import router as prompt_router
-from backend.supabase_handler import router as supabase_router
+
 
 app = FastAPI()
 
@@ -26,7 +26,6 @@ app.include_router(memory_router, prefix="/api")
 app.include_router(openai_router, prefix="/api")
 app.include_router(file_upload_router, prefix="/api")
 app.include_router(prompt_router, prefix="/api")
-app.include_router(supabase_router, prefix="/api")
 
 # 根路由檢查是否運行中
 @app.get("/")
