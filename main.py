@@ -24,7 +24,6 @@ app.include_router(chat_router, prefix="/api")
 app.include_router(memory_router, prefix="/api")
 app.include_router(openai_router, prefix="/api")
 app.include_router(file_upload_router, prefix="/api")
-app.include_router(prompt_router, prefix="/api")
 
 # 根路由檢查是否運行中
 @app.get("/")
