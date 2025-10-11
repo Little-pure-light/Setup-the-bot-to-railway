@@ -5,7 +5,7 @@ import os
 import aiofiles
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from backend.supabase_handler import get_supabase_client
+from backend.supabase_handler import supabase
 from modules.file_handler import handle_file
 
 router = APIRouter()
@@ -53,3 +53,4 @@ async def upload_file(
     except Exception as e:
         print(f"❌ File upload error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
