@@ -1,17 +1,12 @@
-from fastapi import APIRouter
-from supabase import create_client
+# backend/supabase_handler.py
+
 import os
-from dotenv import load_dotenv
+from supabase import create_client, Client
 
-# 讀取本地或 Railway 的環境變數
-load_dotenv()
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY")
 
-# 🚀 這裡名稱要對應 Railway 的變數名稱
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_ANON_KEY")  # ✅ 關鍵修改點
+if not SUPABASE_URL or not SUPABASE_ANON_KEY:
+    raise ValueError("Missing SUPABASE_URL or SUPABASE_ANON_KEY environment variables.")
 
-# 建立 Supabase client
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# 初始化 FastAPI Router（供 main.py 使用）
-router = APIRouter()
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY)
