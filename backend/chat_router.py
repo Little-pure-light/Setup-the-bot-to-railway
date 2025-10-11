@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import os
 import logging
-from backend.supabase_handler import supabase
+from backend.supabase_client import supabase
 from backend.openai_handler import get_openai_client, generate_response
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
@@ -86,5 +86,6 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.exception("❌ Chat router exception:")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
 
 
