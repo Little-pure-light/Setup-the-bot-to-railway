@@ -85,8 +85,13 @@ async def chat(request: ChatRequest):
         )
 
     except Exception as e:
-        logger.exception("❌ Chat router exception:")
-        raise HTTPException(status_code=500, detail="Internal Server Error")
+        import traceback
+        traceback_str = traceback.format_exc()
+        print("🔥 Exception occurred:", traceback_str)
+        raise HTTPException(status_code=500, detail=traceback_str)
+
+   
+
 
 
 
