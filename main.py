@@ -1,6 +1,5 @@
 from dotenv import load_dotenv 
 load_dotenv() 
-
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 # 引入 backend 資料夾下的各個 router
@@ -10,7 +9,6 @@ from backend.openai_handler import router as openai_router
 from backend.file_upload import router as file_upload_router
 
 app = FastAPI()
-
 # 設定跨來源資源共享（CORS）
 app.add_middleware(
     CORSMiddleware,
