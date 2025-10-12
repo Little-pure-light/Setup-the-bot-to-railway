@@ -19,7 +19,8 @@ class PromptEngine:
     def __init__(self, conversation_id: str, supabase_client, memories_table: str):
         self.soul = XiaoChenGuangSoul()
         self.emotion_detector = EnhancedEmotionDetector()
-        
+        self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
+
     def build_prompt(self, user_message: str, recalled_memories: str = "", 
                     conversation_history: str = "") -> tuple[list, dict]:
         emotion_analysis = self.emotion_detector.analyze_emotion(user_message)
@@ -58,11 +59,8 @@ class PromptEngine:
 # @router.post("/api/prompt")
 # async def generate_prompt(req: PromptRequest):
 #     try:
-#         engine = PromptEngine(req.conversation_id, None, "memories")  # 這裡要補上實際的 supabase_client
+#         engine = PromptEngine(req.conversation_id, supabase_client, "memories")
 #         messages, emotions = engine.build_prompt(req.user_message)
 #         return {"messages": messages, "emotions": emotions}
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
-
-
-
