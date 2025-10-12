@@ -8,9 +8,10 @@ from backend.memory_router import router as memory_router
 from backend.openai_handler import router as openai_router
 from backend.file_upload import router as file_upload_router
 from backend.healthcheck_router import router as health_router
-app.include_router(health_router, prefix="/api")
 
 app = FastAPI()
+
+app.include_router(health_router, prefix="/api")
 
 # 設定跨來源資源共享（CORS）
 app.add_middleware(
