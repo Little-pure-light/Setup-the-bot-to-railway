@@ -29,7 +29,7 @@ async def chat(request: ChatRequest):
         memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
 
         memory_system = MemorySystem(supabase, openai_client, memories_table)
-        prompt_engine = PromptEngine(request.conversation_id, supabase, memories_table)
+        prompt_engine = PromptEngine(request.conversation_id, memories_table)
 
         recalled_memories = await memory_system.recall_memories(
             request.user_message,
@@ -87,6 +87,7 @@ async def chat(request: ChatRequest):
     except Exception as e:
         logger.exception("❌ Chat router exception:")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
 
 
 
