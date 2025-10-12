@@ -3,13 +3,11 @@ load_dotenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-
 # 引入 backend 資料夾下的各個 router
 from backend.chat_router import router as chat_router
 from backend.memory_router import router as memory_router
 from backend.openai_handler import router as openai_router
 from backend.file_upload import router as file_upload_router
-
 
 app = FastAPI()
 
