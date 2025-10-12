@@ -1,5 +1,6 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException
-from backend.supabase_handler import supabase
+from backend.supabase_handler import get_supabase
+supabase = get_supabase()
 import logging
 
 router = APIRouter()
@@ -23,3 +24,4 @@ async def upload_file(file: UploadFile = File(...)):
     except Exception as e:
         logger.error(f"Upload error: {str(e)}")
         raise HTTPException(status_code=500, detail="Upload failed")
+
