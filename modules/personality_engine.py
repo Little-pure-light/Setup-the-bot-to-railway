@@ -69,7 +69,7 @@ class PersonalityEngine:
                     "emotion_history": self.emotion_history[-50:]
                 }, ensure_ascii=False),
                 "user_message": "個性檔案更新",
-                "assistant_mes": "個性特質已儲存",
+                "assistant_message": "個性特質已儲存",
                 "created_at": datetime.now().isoformat(),
                 "platform": "Web"
             }
