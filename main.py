@@ -7,6 +7,9 @@ from backend.chat_router import router as chat_router
 from backend.memory_router import router as memory_router
 from backend.openai_handler import router as openai_router
 from backend.file_upload import router as file_upload_router
+from backend.healthcheck_router import router as health_router
+app.include_router(health_router, prefix="/api")
+
 
 app = FastAPI()
 
