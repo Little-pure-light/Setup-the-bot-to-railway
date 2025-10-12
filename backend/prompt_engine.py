@@ -7,8 +7,8 @@ from pydantic import BaseModel
 from modules.soul import XiaoChenGuangSoul
 from modules.emotion_detector import EnhancedEmotionDetector
 from modules.personality_engine import PersonalityEngine
-from backend.supabase_handler import supabase
-
+from backend.supabase_handler import get_supabase
+supabase_client = get_supabase()
 router = APIRouter()
 
 class PromptRequest(BaseModel):
@@ -64,4 +64,5 @@ class PromptEngine:
 #         return {"messages": messages, "emotions": emotions}
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
+
 
