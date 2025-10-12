@@ -21,6 +21,15 @@ class PromptEngine:
         self.emotion_detector = EnhancedEmotionDetector()
         self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
 
+    # prompt_engine.py - 只需要移除參數
+
+class PromptEngine:
+    def __init__(self, conversation_id: str, memories_table: str): # 移除 supabase_client
+        self.soul = XiaoChenGuangSoul()
+        self.emotion_detector = EnhancedEmotionDetector()
+        # 這裡直接用檔案頂部已經實例化好的 supabase_client
+        self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
+    
     def build_prompt(self, user_message: str, recalled_memories: str = "", 
                     conversation_history: str = "") -> tuple[list, dict]:
         emotion_analysis = self.emotion_detector.analyze_emotion(user_message)
@@ -64,3 +73,4 @@ class PromptEngine:
 #         return {"messages": messages, "emotions": emotions}
 #     except Exception as e:
 #         raise HTTPException(status_code=500, detail=str(e))
+
