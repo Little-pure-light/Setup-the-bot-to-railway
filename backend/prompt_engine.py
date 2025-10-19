@@ -72,7 +72,9 @@ class PromptEngine:
             
             behavior_module = await controller.get_module("behavior")
             if behavior_module and behavior_module.enabled:
-                return await behavior_module.get_personality_vector()
+                # 檢查模組是否有 get_personality_vector 方法
+                if hasattr(behavior_module, 'get_personality_vector'):
+                    return await behavior_module.get_personality_vector()
         except Exception as e:
             # 如果無法取得，返回空字典（不影響主流程）
             pass
