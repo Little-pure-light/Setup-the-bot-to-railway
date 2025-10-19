@@ -2,6 +2,9 @@ from dotenv import load_dotenv
 load_dotenv() 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from contextlib import asynccontextmanager
+import asyncio
+import os
 
 # 引入 backend 資料夾下的各個 router
 from backend.chat_router import router as chat_router
@@ -10,7 +13,70 @@ from backend.openai_handler import router as openai_router
 from backend.file_upload import router as file_upload_router
 from backend.healthcheck_router import router as health_router
 
-app = FastAPI()
+# 全域變數儲存後台任務
+background_tasks = {}
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """應用程式生命週期管理"""
+    # 啟動時執行
+    print("\n" + "="*60)
+    print("🚀 XiaoChenGuang AI System 啟動中...")
+    print("="*60)
+    
+    # 啟動記憶刷寫工作器
+    flush_enabled = os.getenv("ENABLE_MEMORY_FLUSH", "true").lower() == "true"
+    
+    if flush_enabled:
+        try:
+            from backend.modules.memory.core import MemoryCore
+            from backend.jobs.memory_flush_worker import create_flush_worker
+            
+            memory_core = MemoryCore()
+            flush_interval = int(os.getenv("MEMORY_FLUSH_INTERVAL", "300"))
+            worker = create_flush_worker(memory_core, interval_seconds=flush_interval)
+            
+            # 在背景啟動工作器
+            flush_task = asyncio.create_task(worker.start())
+            background_tasks['memory_flush'] = {
+                'task': flush_task,
+                'worker': worker
+            }
+            
+            print(f"✅ 記憶刷寫工作器已啟動（間隔: {flush_interval}秒）")
+        except Exception as e:
+            print(f"⚠️ 記憶刷寫工作器啟動失敗: {e}")
+    else:
+        print("ℹ️ 記憶刷寫工作器已停用")
+    
+    print("="*60)
+    print("✅ 系統啟動完成")
+    print("="*60 + "\n")
+    
+    yield
+    
+    # 關閉時執行
+    print("\n" + "="*60)
+    print("👋 XiaoChenGuang AI System 關閉中...")
+    print("="*60)
+    
+    # 停止記憶刷寫工作器
+    if 'memory_flush' in background_tasks:
+        worker_info = background_tasks['memory_flush']
+        worker_info['worker'].stop()
+        
+        try:
+            await asyncio.wait_for(worker_info['task'], timeout=5.0)
+            print("✅ 記憶刷寫工作器已停止")
+        except asyncio.TimeoutError:
+            print("⚠️ 記憶刷寫工作器停止超時，強制終止")
+            worker_info['task'].cancel()
+    
+    print("="*60)
+    print("✅ 系統已安全關閉")
+    print("="*60 + "\n")
+
+app = FastAPI(lifespan=lifespan)
 
 # ✅ 設定跨來源資源共享（CORS）
 app.add_middleware(
