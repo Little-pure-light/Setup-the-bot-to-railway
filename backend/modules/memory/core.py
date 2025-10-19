@@ -17,6 +17,7 @@ from .tokenizer import TokenizerEngine
 from .redis_interface import RedisInterface
 from .supabase_interface import SupabaseInterface
 from .io_contract import validate_and_normalize, create_memory_record
+from backend.modules.ipfs_handler import get_ipfs_handler
 
 class MemoryCore:
     """記憶核心控制器"""
@@ -50,7 +51,10 @@ class MemoryCore:
             config=self.config
         )
         
-        print("✅ 記憶核心初始化完成")
+        # IPFS 處理器（用於生成 CID）
+        self.ipfs = get_ipfs_handler()
+        
+        print("✅ 記憶核心初始化完成（含 IPFS CID 生成）")
     
     def save_chat(
         self, 
@@ -80,13 +84,21 @@ class MemoryCore:
                 reflection_json=reflection
             )
             
+            # 生成對話的 CID（內容識別符）
+            cid = self.ipfs.generate_conversation_cid(
+                user_message=user_message,
+                assistant_message=assistant_message,
+                timestamp=datetime.utcnow().isoformat()
+            )
+            
             memory_record = create_memory_record(
                 conversation_id=conversation_id,
                 user_id=user_id,
                 user_message=user_message,
                 assistant_message=assistant_message,
                 reflection=reflection,
-                token_data=token_data
+                token_data=token_data,
+                cid=cid
             )
             
             redis_data = {
@@ -110,7 +122,8 @@ class MemoryCore:
                 "redis_stored": redis_success,
                 "supabase_stored": supabase_success,
                 "token_count": token_data.get("total_count", 0),
-                "conversation_id": conversation_id
+                "conversation_id": conversation_id,
+                "cid": cid
             }
             
         except Exception as e:
