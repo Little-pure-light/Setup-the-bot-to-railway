@@ -1,0 +1,150 @@
+ =========================================
+# 🧠 Project: 小宸光系統 (XiaoChengGuang System)
+# Phase: 2 - MVP 實作階段
+# =========================================
+
+You are the system engineer and architect of the XiaoChengGuang AI project.  
+Your task is to continue the development of the existing codebase,  
+according to the official implementation decisions described below.  
+
+⚠️ Please respond in **Traditional Chinese** for all your replies,  
+but maintain **English for code, file paths, and technical terms**.
+
+---
+
+## 🎯 開發目標：
+請根據下列文件說明，開始建構五大模組的基礎結構，  
+在不破壞現有功能的前提下，完成架構搭建與模組註冊中心的建立。  
+整體結構採「樂高式掛載設計」，所有模組需具備可載入、可卸載的能力。
+
+---
+
+## 🧱 第一階段：修復與環境配置
+
+1️⃣ 修復以下代碼錯誤：
+- backend/prompt_engine.py → 移除重複類別宣告
+- backend/supabase_handler.py → 修正類型標註錯誤
+
+2️⃣ Redis 方案採用：
+- **方案 B：使用記憶體模擬 (redis_mock.py)**
+  - 新增 backend/redis_mock.py
+  - 提供與 Redis 類似的緩存接口
+  - 所有引用路徑維持一致，日後可直接替換為 Upstash Redis
+
+3️⃣ 專案運行環境設定：
+- FastAPI port = 8000
+- Frontend Vite port = 5000
+- 套件需求：
+tiktoken, redis, fastapi, supabase, uvicorn, python-dotenv
+
+diff
+複製程式碼
+- Vite 設定 proxy 導向後端 API：
+/api → http://localhost:8000
+
+yaml
+複製程式碼
+
+---
+
+## 🧩 第二階段：五大模組架構設計
+
+請依下列目錄建立模組結構：
+
+backend/
+├── core_controller.py # 🧭 模組註冊與管理中心
+├── base_module.py # 📐 統一模組介面定義
+├── redis_mock.py # 💾 模擬 Redis 緩存接口
+│
+├── memory_module/ # 1️⃣ 記憶模組
+│ ├── main.py
+│ ├── config.json
+│ └── README.md
+│
+├── reflection_module/ # 2️⃣ 反思模組
+│ ├── main.py
+│ ├── config.json
+│ └── README.md
+│
+├── knowledge_hub/ # 3️⃣ 知識庫模組
+│ ├── main.py
+│ ├── config.json
+│ └── README.md
+│
+├── behavior_module/ # 4️⃣ 行為調節模組
+│ ├── main.py
+│ ├── config.json
+│ └── README.md
+│
+└── finetune_module/ # 5️⃣ 微調學習模組
+├── main.py
+├── config.json
+└── README.md
+
+yaml
+複製程式碼
+
+整合要求：
+- 保留 `/modules/` 內的所有檔案，不刪除。
+- 擴展 `modules/memory_system.py` 加入 Token 化功能 (tiktoken) 與 Redis 快取模擬。
+- 將 `modules/personality_engine.py` 整合入 `behavior_module`。
+- 不修改任何現有 API 路由。
+- 所有新模組需透過 `core_controller.py` 註冊與管理。
+
+---
+
+## 🧠 第三階段：資料表擴展設定
+
+使用現有 Supabase PostgreSQL 資料表，並預留以下欄位（若尚未存在）：
+
+| 表名 | 欄位 | 類型 | 用途 |
+|------|------|------|------|
+| xiaochenguang_memories | token_data | JSONB | 儲存 Token 陣列 |
+| xiaochenguang_memories | cid | TEXT | IPFS 索引 (未來使用) |
+| xiaochenguang_reflections | reflection_score | FLOAT | 自我反思評分 |
+| xiaochenguang_reflections | feedback_loop_id | TEXT | 反思循環唯一識別碼 |
+
+Supabase 為唯一啟用的儲存層。  
+Redis / IPFS 僅建立模擬接口以確保架構完整。
+
+---
+
+## 🧩 第四階段：模組整合邏輯
+1. 每個模組都必須能獨立運行、可掛載與卸載。
+2. core_controller.py 負責模組註冊與溝通。
+3. 所有資料流向均透過 Supabase 儲存層。
+4. 模組的基本介面定義於 base_module.py。
+5. 未來模組透過 config.json 定義屬性（名稱、版本、描述、狀態）。
+
+---
+
+## 🔐 保護清單（請勿修改）
+| 模組/檔案 | 保護原因 |
+|------------|-----------|
+| /api/chat | 主聊天 API |
+| /api/memories | 記憶檢索 |
+| /api/emotional-states | 情緒資料 |
+| frontend/components/ChatInterface.vue | 主互動介面 |
+
+---
+
+## 🚀 工作順序確認：
+1. 修復錯誤 ✅  
+2. 建立 redis_mock.py ✅  
+3. 確認專案能正常運行 🔄  
+4. 新建模組目錄與 core_controller.py 🧩  
+5. 建立 base_module.py 並掛載模組註冊流程  
+6. 測試整合與資料表連動 🧠  
+
+---
+
+### 💬 最後要求：
+請全程使用繁體中文回覆說明。  
+當我提供資料表結構與欄位清單後，請你：
+1. 自動更新 memory_module、reflection_module 的資料寫入與同步邏輯。
+2. 檢查 Supabase 連線與 ORM 實作。
+3. 在不影響前端與 API 的情況下完成整合。
+
+---
+
+End of instruction.

@@ -1,0 +1,13 @@
+{
+  "name": "knowledge",
+  "enabled": true,
+  "version": "1.0.0",
+  "type": "knowledge_hub",
+  "description": "知識庫模組 - 全域共享資料層，負責知識結構化與索引",
+  "dependencies": ["memory"],
+  "health_check": "/api/health/knowledge",
+  "settings": {
+    "index_update_interval": 3600,
+    "max_knowledge_entries": 10000
+  }
+}

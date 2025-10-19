@@ -1,0 +1,18 @@
+{
+  "name": "finetune",
+  "enabled": false,
+  "version": "1.0.0",
+  "type": "finetune_module",
+  "description": "微調學習模組 - 使用 QLoRA 技術進行模型微調（實驗性功能）",
+  "dependencies": ["memory", "reflection"],
+  "health_check": "/api/health/finetune",
+  "settings": {
+    "auto_training_enabled": false,
+    "training_threshold": 100,
+    "qlora_config": {
+      "rank": 8,
+      "alpha": 16,
+      "dropout": 0.1
+    }
+  }
+}

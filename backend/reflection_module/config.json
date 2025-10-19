@@ -1,0 +1,14 @@
+{
+  "name": "reflection",
+  "enabled": true,
+  "version": "1.0.0",
+  "type": "reflection_module",
+  "description": "反思模組 - 執行自我反思與因果分析，生成改進建議",
+  "dependencies": ["memory"],
+  "health_check": "/api/health/reflection",
+  "settings": {
+    "reflection_prompt_template": "反推果因法則",
+    "min_confidence_threshold": 0.6,
+    "auto_reflect_enabled": true
+  }
+}

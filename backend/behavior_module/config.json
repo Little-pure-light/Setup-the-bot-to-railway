@@ -1,0 +1,14 @@
+{
+  "name": "behavior",
+  "enabled": true,
+  "version": "1.0.0",
+  "type": "behavior_module",
+  "description": "行為調節模組 - 根據反思結果調整人格與行為策略",
+  "dependencies": ["memory", "reflection"],
+  "health_check": "/api/health/behavior",
+  "settings": {
+    "personality_adjustment_rate": 0.01,
+    "trait_bounds": [0.0, 1.0],
+    "auto_save_enabled": true
+  }
+}

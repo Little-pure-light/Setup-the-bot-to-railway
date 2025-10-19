@@ -16,18 +16,9 @@ class PromptRequest(BaseModel):
     user_message: str
 
 class PromptEngine:
-    def __init__(self, conversation_id: str, supabase_client, memories_table: str):
+    def __init__(self, conversation_id: str, memories_table: str):
         self.soul = XiaoChenGuangSoul()
         self.emotion_detector = EnhancedEmotionDetector()
-        self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
-
-    # prompt_engine.py - 只需要移除參數
-
-class PromptEngine:
-    def __init__(self, conversation_id: str, memories_table: str): # 移除 supabase_client
-        self.soul = XiaoChenGuangSoul()
-        self.emotion_detector = EnhancedEmotionDetector()
-        # 這裡直接用檔案頂部已經實例化好的 supabase_client
         self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
     
     def build_prompt(self, user_message: str, recalled_memories: str = "", 
@@ -53,7 +44,7 @@ class PromptEngine:
 - 同理心等級: {emotion_style["empathy_level"]:.2f}
 - 能量等級: {emotion_style["energy_level"]:.2f}
 
-請根據以上所有資訊，以小宸光的身份回應用戶，展現出對應的情感理解與個性特質。
+請根據以上所有資訊,以小宸光的身份回應用戶，展現出對應的情感理解與個性特質。
 """
 
         messages = [
@@ -62,15 +53,3 @@ class PromptEngine:
         ]
 
         return messages, emotion_analysis
-
-# 如果你想要在 prompt_engine.py 中開放一個 API，可以取消註解以下範例：
-
-# @router.post("/api/prompt")
-# async def generate_prompt(req: PromptRequest):
-#     try:
-#         engine = PromptEngine(req.conversation_id, supabase_client, "memories")
-#         messages, emotions = engine.build_prompt(req.user_message)
-#         return {"messages": messages, "emotions": emotions}
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=str(e))
-
