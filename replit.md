@@ -6,6 +6,35 @@ The XiaoChenGuang AI Soul System is a web-based AI companion platform featuring 
 
 The system creates personalized AI interactions through vector-based memory retrieval, real-time emotion analysis, and dynamic personality adaptation based on conversation history.
 
+## Recent Changes
+
+**Phase 2 - Modular Architecture Completed (2025-10-19)**
+
+✅ **Memory Module (Token-based Storage)**:
+- Implemented complete Token化 architecture using tiktoken library
+- Built 5-layer memory system: IO Contract, Tokenizer, Redis Interface, Supabase Interface, Core
+- Redis short-term cache (2-day TTL) + Supabase long-term persistence
+- Batch flush worker for optimized database writes
+- UTF-8 bytes fallback when tiktoken unavailable
+
+✅ **Reflection Module (反推果因法則)**:
+- Upgraded to "genius-level" causal retrospection engine
+- Multi-layer analysis: L1 (direct), L2 (indirect), L3 (systemic causes)
+- 5 causal pattern library categories
+- Generates 12+ concrete improvement suggestions per reflection
+- Meta-cognitive layer evaluating reflection quality itself
+
+✅ **Module Integration**:
+- Memory-Reflection linkage: conversation → reflection → write-back loop
+- API backward compatibility: /api/chat now includes optional `reflection` field
+- Error isolation: module failures don't break main chat flow
+- Health check endpoints: /api/health/modules, /api/health/detailed
+
+✅ **Documentation**:
+- Complete test report: logs/module_test_results.md (100% pass rate)
+- Core architecture summary: backend/core_summary.md
+- Integration tests: test_modules_integration.py (4/5 modules active)
+
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
