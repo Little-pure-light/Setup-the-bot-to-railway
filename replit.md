@@ -8,6 +8,44 @@ The system creates personalized AI interactions through vector-based memory retr
 
 ## Recent Changes
 
+**Phase 3 - Advanced Features & Reflection Loop Completed (2025-10-19)**
+
+✅ **Automatic Batch Flush Worker**:
+- Background worker with 5-minute intervals in `backend/jobs/memory_flush_worker.py`
+- Integrated into `main.py` using FastAPI lifespan context manager
+- Retry mechanism with exponential backoff (max 3 attempts)
+- Graceful shutdown ensures final flush before termination
+
+✅ **Reflection → Behavior Linkage**:
+- Upgraded `BehaviorModule` to intelligent personality adjustment engine
+- 6 personality dimensions: empathy, curiosity, humor, technical_depth, patience, creativity
+- Dynamic adjustment based on reflection "improvements" and "causes"
+- Persistent storage in `personality_vector.json` to track evolution
+- Adjustment strategies: emotion-based + reflection-based + confidence-weighted
+
+✅ **IPFS Integration**:
+- Lightweight CID generator in `backend/modules/ipfs_handler.py`
+- Standard CIDv1 format (base32) using SHA-256 + Multicodec
+- Integrated into MemoryCore: auto-generates CID for every conversation
+- Ready for future decentralized storage integration (Pinata, Web3.Storage)
+
+✅ **Reflection Loop Closure**:
+- Upgraded `PromptEngine` to async and reads dynamic personality vectors
+- Behavior adjustments now influence subsequent conversations
+- Formatted personality guidance injected into system prompts
+- Complete learning cycle: conversation → reflection → adjustment → next conversation
+
+✅ **System Monitoring Dashboard**:
+- Created `frontend/src/components/ModulesMonitor.vue` - visual monitoring UI
+- Route added at `/monitor` with real-time module status
+- Displays: system info, environment config, module health, personality vectors
+- Auto-refresh every 30 seconds, manual refresh button
+
+✅ **Phase 3 Documentation**:
+- Complete report: `logs/phase3_completion_report.md`
+- All 6 tasks completed with 100% success rate
+- Known issues documented with solutions
+
 **Phase 2 - Modular Architecture Completed (2025-10-19)**
 
 ✅ **Memory Module (Token-based Storage)**:

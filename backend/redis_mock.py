@@ -133,6 +133,81 @@ class RedisMock:
             regex_pattern = pattern.replace("*", ".*")
             return [key for key in self._storage.keys() if re.match(regex_pattern, key)]
     
+    def lpush(self, key: str, *values: str) -> int:
+        """將值推入列表頭部"""
+        with self._lock:
+            if key not in self._storage:
+                self._storage[key] = {
+                    "value": [],
+                    "expire_at": None,
+                    "created_at": datetime.now()
+                }
+            
+            item = self._storage[key]
+            if not isinstance(item["value"], list):
+                item["value"] = []
+            
+            # 將所有值推入列表頭部（逆序）
+            for value in reversed(values):
+                item["value"].insert(0, value)
+            
+            return len(item["value"])
+    
+    def lpop(self, key: str) -> Optional[str]:
+        """從列表頭部彈出一個值"""
+        with self._lock:
+            if key not in self._storage:
+                return None
+            
+            item = self._storage[key]
+            
+            # 檢查是否過期
+            if item["expire_at"] and datetime.now() > item["expire_at"]:
+                del self._storage[key]
+                return None
+            
+            if not isinstance(item["value"], list) or len(item["value"]) == 0:
+                return None
+            
+            return item["value"].pop(0)
+    
+    def lrange(self, key: str, start: int, stop: int) -> list:
+        """獲取列表指定範圍的元素"""
+        with self._lock:
+            if key not in self._storage:
+                return []
+            
+            item = self._storage[key]
+            
+            # 檢查是否過期
+            if item["expire_at"] and datetime.now() > item["expire_at"]:
+                del self._storage[key]
+                return []
+            
+            if not isinstance(item["value"], list):
+                return []
+            
+            # Redis 的 lrange 支持負數索引
+            return item["value"][start:stop+1 if stop >= 0 else None]
+    
+    def llen(self, key: str) -> int:
+        """獲取列表長度"""
+        with self._lock:
+            if key not in self._storage:
+                return 0
+            
+            item = self._storage[key]
+            
+            # 檢查是否過期
+            if item["expire_at"] and datetime.now() > item["expire_at"]:
+                del self._storage[key]
+                return 0
+            
+            if not isinstance(item["value"], list):
+                return 0
+            
+            return len(item["value"])
+    
     def flushall(self) -> bool:
         """清空所有數據"""
         with self._lock:

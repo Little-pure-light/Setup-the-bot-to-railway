@@ -20,7 +20,7 @@ class IPFSHandler:
     def __init__(self):
         """初始化 IPFS 處理器"""
         self.cid_version = "1"
-        self.multicodec_prefix = "dag-json"  # 使用 DAG-JSON 編碼
+        self.multicodec_prefix = "raw"  # 使用 raw 編碼 (0x55)
         self.hash_algorithm = "sha256"
     
     def generate_cid(self, content: str | Dict[str, Any]) -> str:
@@ -43,16 +43,18 @@ class IPFSHandler:
         content_hash = hashlib.sha256(normalized_content.encode('utf-8')).digest()
         
         # 3. 構建 Multihash (hash_func_code + hash_length + hash_value)
-        # SHA-256 的 multicodec code 是 0x12, 長度是 32 bytes
-        multihash = b'\x12' + b'\x20' + content_hash
+        # SHA-256 的 multihash code 是 0x12, 長度是 32 bytes (0x20)
+        multihash = b'\x12\x20' + content_hash
         
-        # 4. 添加 CIDv1 multicodec 前綴（dag-json = 0x0129）
-        cid_bytes = b'\x01' + b'\x29\x01' + multihash
+        # 4. 添加 CIDv1 前綴 (version + codec)
+        # CIDv1 = 0x01
+        # raw codec = 0x55 (最簡單且廣泛支援的編碼)
+        cid_bytes = b'\x01\x55' + multihash
         
-        # 5. Base32 編碼
+        # 5. Base32 編碼（RFC 4648，小寫，無填充）
         cid_base32 = self._base32_encode(cid_bytes)
         
-        return f"b{cid_base32}"  # CIDv1 以 'b' 開頭表示 base32
+        return f"b{cid_base32}"  # CIDv1 以 'b' 開頭表示 base32 編碼
     
     def _normalize_content(self, content: str | Dict[str, Any]) -> str:
         """
