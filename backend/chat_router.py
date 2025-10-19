@@ -60,7 +60,7 @@ async def chat(request: ChatRequest):
         )
         logger.debug(f"📜 對話歷史：{conversation_history}")
 
-        messages, emotion_analysis = prompt_engine.build_prompt(
+        messages, emotion_analysis = await prompt_engine.build_prompt(
             request.user_message,
             recalled_memories,
             conversation_history
