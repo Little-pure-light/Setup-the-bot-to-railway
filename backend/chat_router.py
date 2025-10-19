@@ -96,10 +96,13 @@ async def chat(request: ChatRequest):
         prompt_engine.personality_engine.save_personality()
         
         reflection_result = None
+        behavior_adjustment = None
+        
         try:
             from backend.core_controller import get_core_controller
             controller = await get_core_controller()
             
+            # === 階段1：反思分析 ===
             reflection_module = await controller.get_module("reflection")
             if reflection_module:
                 reflection_response = await reflection_module.process({
@@ -111,7 +114,29 @@ async def chat(request: ChatRequest):
                 if reflection_response.get("success"):
                     reflection_result = reflection_response.get("reflection")
                     logger.info(f"🧠 反思完成（置信度: {reflection_result.get('confidence', 0):.2f}）")
+                    
+                    # === 階段2：行為調節（基於反思結果）===
+                    behavior_module = await controller.get_module("behavior")
+                    if behavior_module and reflection_result:
+                        behavior_response = await behavior_module.process({
+                            "reflection": reflection_result,
+                            "emotion_analysis": emotion_analysis,
+                            "conversation_context": {
+                                "user_message": request.user_message,
+                                "assistant_message": assistant_message
+                            }
+                        })
+                        
+                        if behavior_response.get("success"):
+                            behavior_adjustment = behavior_response
+                            personality_vector = behavior_response.get("personality_vector", {})
+                            adjustments = behavior_response.get("adjustments", {})
+                            
+                            if adjustments:
+                                logger.info(f"🎯 人格調整: {adjustments}")
+                                logger.info(f"📊 新人格向量: {personality_vector}")
             
+            # === 階段3：記憶儲存（含反思與行為調整）===
             new_memory = get_new_memory_core()
             if new_memory:
                 result = new_memory.store_conversation(
@@ -124,7 +149,7 @@ async def chat(request: ChatRequest):
                 if result.get("success"):
                     logger.info(f"💾 新記憶模組已儲存（Token: {result.get('token_count', 0)}）")
         except Exception as e:
-            logger.warning(f"⚠️ 新記憶/反思模組處理失敗（不影響主流程）: {e}")
+            logger.warning(f"⚠️ 新記憶/反思/行為調節模組處理失敗（不影響主流程）: {e}")
 
         return ChatResponse(
             assistant_message=assistant_message,
