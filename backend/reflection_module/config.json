@@ -1,14 +1,24 @@
 {
   "name": "reflection",
   "enabled": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "reflection_module",
-  "description": "反思模組 - 執行自我反思與因果分析，生成改進建議",
+  "description": "反推果因法則 - 元認知引擎，執行多層級因果分析",
   "dependencies": ["memory"],
   "health_check": "/api/health/reflection",
+  "load_priority": 2,
   "settings": {
+    "reflection_depth": 3,
     "reflection_prompt_template": "反推果因法則",
-    "min_confidence_threshold": 0.6,
-    "auto_reflect_enabled": true
+    "min_confidence_threshold": 0.5,
+    "auto_reflect_enabled": true,
+    "enable_causal_library": true,
+    "meta_cognitive_analysis": true
+  },
+  "features": {
+    "causal_retrospection": true,
+    "multi_level_analysis": true,
+    "improvement_generation": true,
+    "quality_scoring": true
   }
 }

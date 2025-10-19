@@ -1,0 +1,308 @@
+《記憶模組（Memory Module）工程語言設計指南書》
+Memory System Engineering Prompt Design Document
+
+📘 檔案名稱建議
+memory_module_design_prompt.md
+
+🎯 設計目標
+本設計指南用於指導 AI Agent 以工程語言設計出記憶模組（Memory Module）。
+ 該模組是整個小宸光 AI 系統的中樞神經資料層，
+ 負責將所有對話、反思、微調輸出以「數字化（token-based）」形式保存並回溯。
+功能要點
+對話紀錄數字化（token encoding）
+
+
+記憶分類儲存（短期：Redis、長期：Supabase）
+
+
+支援反思紀錄、自動回溯
+
+
+支援日誌索引（CID - IPFS）
+
+
+提供統一介面供其他模組調用（智慧模組、行為模組、微調模組等）
+
+
+
+🧩 系統定位
+記憶模組是五大模組的「核心樞紐」，所有模組都必須透過它存取資料。
+模組
+與記憶模組關係
+智慧模組
+將 AI 的輸入與回覆交由記憶模組轉 token 並儲存
+反思模組
+將反思結果存入記憶模組（同時建立反思索引）
+微調模組
+以記憶模組的 token 資料作為訓練輸入
+行為調節模組
+根據記憶趨勢回讀數據調整人格向量
+知識庫模組
+與記憶模組共享可公開的知識型資料
+
+
+🧱 目錄與檔案結構建議
+backend/
+├── memory_module/
+│   ├── __init__.py
+│   ├── memory_core.py           # 主邏輯核心
+│   ├── redis_interface.py       # Redis 短期記憶接口
+│   ├── supabase_interface.py    # Supabase 長期記憶接口
+│   ├── tokenizer_engine.py      # Token 化處理核心
+│   ├── reflection_indexer.py    # 反思索引與 IPFS 處理
+│   └── memory_config.json       # 模組設定（API key、儲存結構）
+
+
+⚙️ 功能設計分層
+1️⃣ Tokenization Layer - tokenizer_engine.py
+使用 tiktoken 或 HuggingFace tokenizer。
+
+
+將文字資料（使用者訊息、AI 回覆、反思）轉換為數字化 token。
+
+
+輸出格式：
+
+ {
+  "text": "你好，小宸光！",
+  "tokens": [2103, 188, 420],
+  "encoding": "cl100k_base",
+  "context_id": "conv_20251019_001",
+  "type": "chat_message"
+}
+
+
+2️⃣ Short-term Memory Layer - redis_interface.py
+角色：暫存最近對話、反思資料（約近 100 條）
+
+
+Redis 鍵設計：
+
+ memory:conversation:{conversation_id}
+memory:reflection:{reflection_id}
+
+
+使用 TTL（Time-To-Live）機制，自動過期轉存入長期記憶。
+
+
+3️⃣ Long-term Memory Layer - supabase_interface.py
+永久儲存所有 Token 化資料與反思紀錄。
+
+
+表結構（建議參考既有 Supabase schema，不新增無關表）：
+
+
+欄位名稱
+類型
+說明
+id
+uuid
+主鍵
+user_id
+text
+用戶 ID
+context_id
+text
+對話 ID
+tokens
+jsonb
+token 數據
+text_cache
+text
+原始文字（選填）
+module
+text
+來源模組（chat / reflection / finetune）
+cid
+text
+IPFS 索引（如有）
+created_at
+timestamp
+建立時間
+
+
+所有寫入動作由 memory_core.py 的 commit_to_longterm() 統一處理。
+
+
+4️⃣ Reflection & CID Indexer Layer - reflection_indexer.py
+當反思模組產生新的「反思內容」時：
+
+
+儲存反思內容至 Supabase；
+
+
+將文字上傳至 IPFS，獲取 CID；
+
+
+將 CID 更新回 memory_reflections 表；
+
+
+返回給智慧模組以更新當前人格行為權重。
+
+
+5️⃣ Memory Control Layer - memory_core.py
+所有記憶操作的主控層。
+
+
+提供統一 API 給其他模組使用：
+
+
+class MemoryCore:
+    def __init__(self, redis_client, supabase_client, tokenizer):
+        self.redis = redis_client
+        self.supabase = supabase_client
+        self.tokenizer = tokenizer
+
+    def save_chat(self, user_message, assistant_message, context_id, user_id):
+        """儲存對話內容（短期 + 長期）"""
+        data = self.tokenizer.encode(user_message, assistant_message)
+        self.redis.store_short_term(data)
+        self.supabase.commit_to_longterm(data)
+
+    def save_reflection(self, reflection_text, context_id):
+        """儲存反思紀錄"""
+        token_data = self.tokenizer.encode(reflection_text)
+        cid = self.upload_to_ipfs(reflection_text)
+        self.supabase.commit_to_longterm({**token_data, "cid": cid})
+
+    def upload_to_ipfs(self, content):
+        """上傳至 IPFS 並回傳 CID"""
+        pass
+
+    def get_memory_context(self, context_id):
+        """讀取指定對話的完整記憶資料"""
+        pass
+
+
+🔄 模組通信協定（給其他模組用）
+統一透過 memory_core.py 調用，禁止模組直接呼叫 Redis 或 Supabase。
+功能
+調用方式
+儲存對話
+memory.save_chat(user_message, ai_message, context_id, user_id)
+儲存反思
+memory.save_reflection(reflection_text, context_id)
+讀取對話歷史
+memory.get_memory_context(context_id)
+查詢 CID 索引
+memory.get_reflection_cid(context_id)
+
+
+🧠 Token 儲存策略
+短期記憶（Redis）：
+
+
+用於快速回應、上下文延續；
+
+
+自動過期後寫入長期記憶；
+
+
+格式：
+
+ {
+  "user": [4321, 95, 102],
+  "assistant": [1843, 900, 22],
+  "timestamp": "2025-10-19T15:42:10"
+}
+
+
+長期記憶（Supabase）：
+
+
+包含所有數據（反思、微調訓練結果、日記索引）；
+
+
+與 IPFS 資料鏈結保持一致。
+
+
+
+🪞 自我反思連動邏輯
+智慧模組生成回覆後，觸發反思模組；
+
+
+反思模組產生結果後呼叫：
+
+ memory.save_reflection(reflection_text, context_id)
+
+
+memory_module：
+
+
+將反思內容轉 Token；
+
+
+上傳文字至 IPFS；
+
+
+回傳 CID；
+
+
+儲存到 Supabase；
+
+
+反思模組收到 CID 後，將此結果回饋給智慧模組；
+
+
+智慧模組更新人格偏好或學習策略。
+
+
+
+🧩 模組介面註冊格式（供 core_controller 載入）
+{
+  "name": "MemoryModule",
+  "path": "backend/memory_module",
+  "main": "memory_core.py",
+  "dependencies": ["redis", "supabase", "ipfs", "tiktoken"],
+  "type": "core",
+  "description": "管理所有AI記憶的數字化、儲存與回溯。",
+  "load_priority": 1
+}
+
+
+🔐 安全與效能建議
+面向
+建議
+效能
+Redis 寫入非同步處理，避免阻塞主線程
+安全
+所有資料上傳 IPFS 前先做 SHA256 雜湊簽名
+隱私
+text_cache 欄位設置加密（如 AES）
+可擴展性
+Supabase 資料表採用 jsonb 欄位存 token 陣列以支援多語言模型
+
+
+✅ 輸出驗收條件
+AI Agent 在生成該模組代碼時，需滿足以下：
+所有主要函式均具備 docstring；
+
+
+所有模組可獨立運行單元測試；
+
+
+不新增資料表；
+
+
+整合後前端仍可正常呼叫對話 API；
+
+
+所有文字資料均經過 token 數字化儲存；
+
+
+可查詢 token 對應原始文字（供調試用）。
+
+
+
+💬 後續建議
+此模組完成後，接續應開發：
+📘 自我反思模組（Reflection Module）工程語言指南書
+ → 由記憶模組觸發與回寫的反思邏輯
+
+
+📗 微調模組（FineTune Module）指南書
+ → 定期從記憶模組擷取反思資料訓練 QLoRA
+
+
+
+

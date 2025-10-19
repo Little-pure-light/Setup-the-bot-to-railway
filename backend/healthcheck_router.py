@@ -66,3 +66,65 @@ def health_check():
         result["error_log"].append(f"Chat API error: {traceback.format_exc()}")
 
     return JSONResponse(content=result)
+
+@router.get("/health/modules")
+async def modules_health_check():
+    """
+    模組健康檢查
+    
+    返回:
+        所有模組的健康狀態
+    """
+    try:
+        from backend.core_controller import get_core_controller
+        
+        controller = await get_core_controller()
+        health_status = await controller.health_check_all()
+        
+        return JSONResponse(content={
+            "status": "success",
+            "data": health_status
+        })
+        
+    except Exception as e:
+        return JSONResponse(content={
+            "status": "error",
+            "error": str(e),
+            "fallback": {
+                "controller": "not_initialized",
+                "message": "模組系統尚未初始化或發生錯誤"
+            }
+        })
+
+@router.get("/health/detailed")
+async def detailed_health_check():
+    """
+    詳細健康檢查（包含環境變數與模組狀態）
+    
+    返回:
+        完整系統狀態
+    """
+    env_status = {
+        "OPENAI_API_KEY": "✅" if os.getenv("OPENAI_API_KEY") else "❌",
+        "SUPABASE_URL": "✅" if os.getenv("SUPABASE_URL") else "❌",
+        "SUPABASE_ANON_KEY": "✅" if os.getenv("SUPABASE_ANON_KEY") else "❌",
+        "REDIS_URL": "✅" if os.getenv("REDIS_URL") else "⚠️ (using mock)"
+    }
+    
+    try:
+        from backend.core_controller import get_core_controller
+        controller = await get_core_controller()
+        modules_health = await controller.health_check_all()
+    except Exception as e:
+        modules_health = {"error": str(e)}
+    
+    return JSONResponse(content={
+        "status": "healthy",
+        "system": {
+            "name": "XiaoChenGuang AI",
+            "version": "2.0.0",
+            "phase": "Phase 2 - Modular Architecture"
+        },
+        "environment": env_status,
+        "modules": modules_health
+    })

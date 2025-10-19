@@ -1,0 +1,296 @@
+記憶-反思模組（Memory Module）工程語言設計指南書
+用途：給 Agent AI 直接執行。
+ 目標：在現有專案內新增「數字化記憶層」，以 Token 為核心儲存對話/反思，Redis 作暫存、Supabase 作長存。
+ 重要：不得改動現有可運作 API 與資料表；欄位命名要前後一致；可插拔模組。
+
+0) 專案前提（請嚴格遵守）
+後端：FastAPI（backend/），已存在 chat_router.py / memory_router.py / prompt_engine.py / supabase_handler.py。
+
+
+不得移除或重命名現有檔案與 API；只能新增模組與輕度掛載。
+
+
+目前已有 6 個資料表；請勿新增資料表，僅以可設定的對應寫入既有表欄位。
+
+
+所有儲存內容以Token 數字化為主；文字可選擇性保留於 text_cache 類欄位（若專案已有）。
+
+
+模組需可獨立啟用/停用，並具備健康檢查。
+
+
+
+1) 交付內容（需產生的檔案與位置）
+backend/
+├─ modules/
+│  └─ memory/
+│     ├─ __init__.py
+│     ├─ core.py                 # 記憶核心：Redis暫存、Token化、Supabase長存
+│     ├─ io_contract.py          # I/O 資料協定（欄位命名與結構校驗）
+│     ├─ tokenizer.py            # tiktoken 封裝與降級方案
+│     ├─ config.json             # 模組開關與表欄位映射
+│     └─ README.md               # 使用說明（如何掛載、測試）
+├─ jobs/
+│  └─ memory_flush_worker.py     # 後台排程：將 Redis 批量刷寫到 Supabase
+└─ core_controller.py            # 若不存在，沿用既有；否則在此註冊啟用 memory 模組
+
+不得移除或重寫現有 router；僅在 core_controller.py（或 main.py 啟動段）掛載 memory 模組即可。
+
+2) 環境變數（新增但不影響既有）
+REDIS_URL=redis://:password@host:6379/0
+MEMORY_REDIS_TTL_SECONDS=172800          # 2天
+MEMORY_FLUSH_BATCH_SIZE=100              # 每次刷寫最大筆數
+MEMORY_TABLE_MAP='{"conversations":"conversations","memories":"memories"}'
+TOKENIZER_NAME=cl100k_base               # tiktoken 字典名；無則走降級方案
+
+MEMORY_TABLE_MAP 以 JSON 設定把「模組邏輯表名」➡「現有實際表名」。請勿硬編碼表名，避免和既有 6 表衝突。
+
+3) 欄位命名規範（必須遵守，一致性最高優先）
+以下欄位在長期儲存（Supabase）時必須存在（若表結構已不同，請在 config.json 做欄位映射）：
+規範欄位
+說明
+資料型態（建議）
+conversation_id
+對話 ID
+text
+user_id
+使用者 ID
+text
+user_message
+使用者輸入原文
+text（可空；以 token 為主）
+assistant_message
+AI 回覆原文
+text（可空；以 token 為主）
+reflection
+反思摘要（JSON 壓成 text 或 jsonb）
+text/json
+token_data
+Token 化結果（含 user/assistant/reflection）
+json
+cid
+IPFS 索引（選用）
+text
+created_at
+建立時間
+timestamptz
+
+前後端一律使用這組鍵名；若資料表既有鍵名不同，用 config.json 做映射（例如 assistant_mes ↔ assistant_message）。
+
+4) I/O 合約（io_contract.py）
+實作 validate_and_normalize(payload: dict) -> dict
+
+
+將前端/路由傳入的資料校驗後，輸出統一結構：
+
+
+{
+  "conversation_id": str,
+  "user_id": str,
+  "user_message": str|None,
+  "assistant_message": str|None,
+  "reflection": {"summary": str, "causes": [str, ...]} | None,
+  "token_data": {"user": [int,...], "assistant": [int,...], "reflection": [int,...]},
+  "cid": str|None,
+  "created_at": iso8601
+}
+
+嚴格：缺少 conversation_id / user_id 視為無效；其餘可為 None。
+
+
+
+5) Tokenizer（tokenizer.py）
+預設使用 tiktoken（TOKENIZER_NAME），不可直依賴 OpenAI API。
+
+
+若環境無 tiktoken，提供降級方案：
+
+
+以 UTF-8 bytes 或 簡單 BPE 替代將字串轉為整數序列（保序即可）。
+
+
+提供方法：
+
+
+def tokenize_text(text: str) -> list[int]
+def pack_token_record(user: str|None, assistant: str|None, reflection_json: dict|None) -> dict
+
+
+6) 記憶核心（core.py）
+職責：
+Redis 短期記憶：寫入最近一筆對話（含反思），Key 規格與 TTL。
+
+
+Supabase 長期記憶：將 Token 化結果與欄位映射後寫入對應資料表。
+
+
+批次刷寫：由 worker 定時從 Redis 批次取出、合併、Upsert 到 Supabase。
+
+
+6.1 Redis key 與資料結構
+key：conv:{conversation_id}:latest
+
+
+value：JSON
+
+
+{
+  "user_msg": "...",
+  "assistant_msg": "...",
+  "reflection": {"summary":"...", "causes":["..."]},
+  "token_data": {"user":[...], "assistant":[...], "reflection":[...]},
+  "user_id": "user_xxx",
+  "ts": 1739900000
+}
+
+6.2 Public API（給 chat_router / prompt_engine 使用）
+def store_short_term(conversation_id: str, user_id: str, user_msg: str|None, assistant_msg: str|None, reflection: dict|None) -> None
+def load_recent_context(conversation_id: str) -> dict|None
+def persist_long_term(records: list[dict]) -> int  # 寫入 Supabase，回傳筆數
+def store_conversation(conversation_id, user_id, user_msg, assistant_msg, reflection) -> None
+
+store_conversation() 內部呼叫 tokenize_text → store_short_term；並將同組資料丟入 Redis list（等 worker 批次刷寫）。
+
+
+6.3 Supabase 寫入（經映射）
+讀取 config.json 欄位映射（例如 assistant_message ↔ assistant_mes）。
+
+
+單筆 upsert（唯一鍵建議 conversation_id + created_at）；或由 worker 批次 upsert。
+
+
+
+7) 模組設定（modules/memory/config.json）
+{
+  "name": "memory",
+  "enabled": true,
+  "version": "1.0.0",
+  "tables": {
+    "conversations": "conversations",
+    "memories": "memories"
+  },
+  "columns_map": {
+    "conversation_id": "conversation_id",
+    "user_id": "user_id",
+    "user_message": "user_message",
+    "assistant_message": "assistant_message",
+    "reflection": "reflection",
+    "token_data": "token_data",
+    "cid": "cid",
+    "created_at": "created_at"
+  }
+}
+
+若現有表欄位不同，修改 columns_map 即可（例如把 assistant_message 映到既有的 assistant_mes）。
+
+8) 後台批次刷寫（jobs/memory_flush_worker.py）
+從 Redis 取 pending:list（或以 stream/隊列），每次彙整 MEMORY_FLUSH_BATCH_SIZE 筆，呼叫 persist_long_term()。
+
+
+失敗重試（最多 3 次，退避 1/2/4s），避免掉資料。
+
+
+可用簡單 apscheduler 或手動呼叫；不得阻塞主 API 執行緒。
+
+
+
+9) 路由接點（最小改動）
+不改既有 API；僅在 chat_router.py 完成回覆後，補一行呼叫：
+# chat_router.py 內，生成 assistant_message 與 reflection 後：
+from backend.modules.memory.core import store_conversation
+
+store_conversation(
+    conversation_id=request.conversation_id,
+    user_id=request.user_id,
+    user_msg=user_message,
+    assistant_msg=assistant_message,
+    reflection=reflection_obj  # dict or None
+)
+
+若檔案路徑不同，以實際專案為準；不可破壞現有回傳格式。
+
+🔎 測試與驗收（Agent 必須提供）
+單元測試：
+
+
+tokenizer.tokenize_text() 對中文/英文/表情符號不報錯；
+
+
+store_short_term() 寫入後能 load_recent_context() 取回；
+
+
+persist_long_term() 能依 columns_map 成功 upsert。
+
+
+手動流程：
+
+
+用 /api/chat 發送一則訊息；
+
+
+驗證 Redis 有 conv:{conversation_id}:latest；
+
+
+觸發 worker 刷寫後，Supabase 有新增一筆（含 token_data、reflection）。
+
+
+不破壞性：
+
+
+不新增資料表；
+
+
+不修改既有 API 路由；
+
+
+欄位名稱與前端使用一致。
+
+
+
+📄 README（modules/memory/README.md 必寫）
+模組用途（短期記憶、長期記憶、Token 化）
+
+
+需要的環境變數
+
+
+欄位映射方式（如何改 columns_map 適配現有 6 表）
+
+
+本地測試步驟（Redis + Supabase）
+
+
+常見錯誤與排除
+
+
+
+🛡️ 防呆規範（必遵守）
+嚴禁在模組內直接寫死表名與欄位名；一律由 config.json 或環境變數提供。
+
+
+嚴禁在模組內發 API 格式變更；現有前端不可感知本模組存在與否。
+
+
+嚴禁將大量文字直接長存；以 token_data 為主，文字僅可選擇性放 text_cache 類欄位。
+
+
+允許模組停用：config.json 設 enabled=false，系統仍可運作。
+
+
+
+✅ 最終產出（Agent 必須回覆）
+新增檔案的完整樹狀結構
+
+
+core.py / tokenizer.py / io_contract.py / memory_flush_worker.py 的完整程式碼
+
+
+config.json 與 README 範例
+
+
+在 chat_router.py 的單點掛載程式碼片段（不改回傳）
+
+
+一份「驗收步驟」清單（含 Redis → Supabase 驗證）
+
+

@@ -1,0 +1,177 @@
+ 目標說明
+你的骨架架構（core_controller + base_module + 五大模組目錄）已建構完成，
+ 接下來請進入 第二階段功能落地實作，依照下列指令逐步進行，
+ 確保現有功能不被破壞，並為未來的五大模組整合做準備。
+
+🧩 第一階段：記憶模組（Memory Module）落地實作
+🪜 指令步驟：
+請讀取《記憶模組工程語言設計指南》中的全部規劃內容。
+
+
+在 backend/memory_module/main.py 中實現核心功能：
+
+
+對話資料 Token 化（tiktoken）
+
+
+Redis（或 redis_mock）快取儲存
+
+
+Supabase 長期儲存（包含 token_data 欄位）
+
+
+更新或擴展現有 modules/memory_system.py，讓其能與新模組共用資料管線。
+
+
+保持 /api/chat、/api/memories 路由不變，只透過內部函式導向記憶模組。
+
+
+確保資料流通順序：
+
+ ChatInterface.vue → chat_router.py → memory_module.main → redis → supabase
+
+
+在 Replit Console 顯示每一步動作的日誌（log），以便除錯。
+
+
+完成後，生成一份簡短的測試報告（格式：Markdown），包含：
+
+
+Redis 寫入測試結果
+
+
+Supabase 寫入與讀取測試結果
+
+
+Token 化對照（原文 vs token 陣列）
+
+
+
+🧠 第二階段：反思模組（Reflection Module）落地實作
+🪜 指令步驟：
+請讀取《反思模組工程語言設計指南》中的規劃內容。
+
+
+在 backend/reflection_module/main.py 中實現核心功能：
+
+
+根據對話結果產生反思（內含「反推果因法則」）
+
+
+生成多層級反思答案（至少 3 個可能原因）
+
+
+將反思結果存入 xiaochenguang_reflections（包含 feedback_loop_id）
+
+
+整合與記憶模組：
+
+
+反思結果需寫回記憶模組（token 化後）
+
+
+反思結果同時紀錄於 Redis（快取）+ Supabase（長期）
+
+
+保持原本的聊天流程，但於 /api/chat 回傳時多回傳：
+
+ {
+  "assistant_message": "...",
+  "emotion_analysis": {...},
+  "reflection": {...}
+}
+
+
+完成後自動生成「反思測試報告」（Markdown），包含：
+
+
+單次反思流程輸出
+
+
+反推果因法則範例
+
+
+資料寫回確認（Redis + Supabase）
+
+
+
+⚙️ 第三階段：模組連動測試（整合測試）
+🪜 指令步驟：
+在 core_controller.py 中建立模組註冊列表：
+
+ from backend.memory_module.main import MemoryModule
+from backend.reflection_module.main import ReflectionModule
+
+modules = {
+    "memory": MemoryModule(),
+    "reflection": ReflectionModule(),
+}
+
+
+實現模組通信測試：
+
+
+MemoryModule 記錄對話
+
+
+ReflectionModule 接收對話並產生反思
+
+
+再將反思結果傳回 MemoryModule 寫入 Supabase
+
+
+確保模組間通信不依賴硬連結（使用事件觸發或介面方法呼叫）
+
+
+生成「整合測試報告」（Markdown）：
+
+
+包含記憶模組 → 反思模組 → 回寫流程
+
+
+驗證資料一致性
+
+
+驗證效能（延遲時間、Redis 命中率）
+
+
+
+🧱 最終交付要求
+完成以上步驟後，請輸出：
+/logs/module_test_results.md – 各階段測試報告整合文件
+
+
+/backend/core_summary.md – 描述模組運作流程與資料流動關係圖
+
+
+確保前端 /status 健康檢查顯示模組狀態如下：
+
+ {
+  "memory_module": "active",
+  "reflection_module": "active"
+}
+
+
+
+🚫 限制條件
+不得修改現有 /api 路由
+
+
+不得刪除現有模組或改動前端程式碼
+
+
+任何新模組功能必須以「掛載」形式加入（不影響原系統運作）
+
+
+
+✅ 任務結束條件
+所有測試報告生成且通過驗證
+
+
+系統運作穩定無錯誤
+
+
+前端健康檢查 /status 可回傳所有模組運行狀態
+
+
+ChatInterface 可在對話後獲得反思回傳結果
