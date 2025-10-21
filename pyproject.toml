@@ -7,5 +7,6 @@ dependencies = [
     "flask>=3.1.2",
     "google-auth>=2.41.1",
     "gspread>=6.2.1",
+    "gunicorn>=23.0.0",
     "python-dotenv>=1.1.1",
 ]

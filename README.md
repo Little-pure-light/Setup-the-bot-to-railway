@@ -239,12 +239,45 @@ curl -X POST "http://localhost:5000/summarize?sheet_name=專案討論_2024"
 5. **匯出功能**
    - 支援匯出為 JSON、CSV、Markdown 格式
 
+## 部署到生產環境
+
+### 使用 Replit 部署
+
+本應用已配置為使用 Replit Autoscale 部署模式，適合無狀態 Web 應用：
+
+#### 部署步驟
+
+1. **設定必要的 Secrets**（在 Replit 部署設定中）：
+   - `SERVICE_ACCOUNT_JSON` - Google 服務帳號 JSON 金鑰
+   - `SPREADSHEET_ID` - Google Spreadsheet ID
+   - `SESSION_SECRET` - Flask session 加密金鑰（建議使用隨機 64 字元）
+
+2. **點擊 Deploy 按鈕**：
+   - 選擇「Autoscale」部署模式
+   - 確認所有 secrets 已正確配置
+
+3. **驗證部署**：
+   - 訪問 `/health` 端點應該回傳 `{"status": "healthy"}`
+   - 訪問首頁確認應用正常運行
+
+#### 部署配置
+
+- **Web 伺服器**：Gunicorn（生產級 WSGI 伺服器）
+- **Workers**：2 個工作進程
+- **超時**：120 秒
+- **健康檢查端點**：`GET /health`
+- **自動擴展**：根據流量自動調整資源
+
+詳細部署說明請參閱 [DEPLOYMENT.md](DEPLOYMENT.md)
+
 ## 安全性注意事項
 
 - ⚠️ **絕不要**將 `.env` 檔案提交到版本控制系統
 - ⚠️ **絕不要**在程式碼中硬編碼 API 金鑰
 - ⚠️ 在生產環境中，請將 `SESSION_SECRET` 更換為強隨機字串
 - ⚠️ 定期輪換服務帳號金鑰
+- ✅ 部署使用 HTTPS（Replit 自動提供）
+- ✅ 生產環境使用 Gunicorn 而非 Flask 開發伺服器
 
 ## 授權
 

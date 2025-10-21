@@ -39,6 +39,13 @@ def get_spreadsheet_id():
         raise ValueError("請在環境變數中設定 SPREADSHEET_ID")
     return spreadsheet_id
 
+@app.route('/health')
+def health():
+    """
+    健康檢查端點（用於部署健康檢查）
+    """
+    return jsonify({'status': 'healthy', 'service': 'semantic-memory-system'}), 200
+
 @app.route('/')
 def index():
     """
@@ -274,4 +281,5 @@ def summarize():
         }), 500
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
