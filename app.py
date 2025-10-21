@@ -123,6 +123,12 @@ def log_conversation():
             }), 400
         
         data = request.get_json()
+        if data is None:
+            return jsonify({
+                'status': 'error',
+                'message': '無效的 JSON 格式，請確保 Content-Type 為 application/json'
+            }), 400
+        
         user_message = data.get('user_message', '')
         ai_response = data.get('ai_response', '')
         
@@ -169,7 +175,19 @@ def get_history():
     """
     try:
         sheet_name = request.args.get('sheet_name')
-        limit = int(request.args.get('limit', 5))
+        
+        try:
+            limit = int(request.args.get('limit', 5))
+            if limit <= 0:
+                return jsonify({
+                    'status': 'error',
+                    'message': 'limit 參數必須為正整數'
+                }), 400
+        except ValueError:
+            return jsonify({
+                'status': 'error',
+                'message': 'limit 參數必須為有效的整數'
+            }), 400
         
         if not sheet_name:
             return jsonify({
