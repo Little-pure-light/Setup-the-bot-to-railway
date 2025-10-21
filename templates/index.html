@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>語義記憶管理系統</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🧠 語義記憶管理系統</h1>
+            <p class="subtitle">AI 對話延續與記憶應用</p>
+        </header>
+
+        <div class="status-box">
+            {% if current_sheet %}
+                <div class="status-active">
+                    <strong>目前使用的記錄本：</strong>
+                    <span class="sheet-name">{{ current_sheet }}</span>
+                </div>
+            {% else %}
+                <div class="status-inactive">
+                    <strong>狀態：</strong>尚未啟動任何對話
+                </div>
+            {% endif %}
+        </div>
+
+        <div class="actions">
+            <div class="action-card">
+                <h2>🆕 建立新對話</h2>
+                <p>建立一個全新的對話記錄本</p>
+                <form id="newConversationForm">
+                    <input type="text" id="newSheetName" name="sheet_name" 
+                           placeholder="輸入對話名稱（例如：專案討論_2024）" required>
+                    <button type="submit" class="btn btn-primary">建立新對話</button>
+                </form>
+                <div id="newConversationUrl" class="url-display"></div>
+            </div>
+
+            <div class="action-card">
+                <h2>📖 延續已有對話</h2>
+                <p>載入並繼續之前的對話記錄</p>
+                <form id="resumeConversationForm">
+                    <input type="text" id="resumeSheetName" name="sheet_name" 
+                           placeholder="輸入現有對話名稱" required>
+                    <button type="submit" class="btn btn-success">延續對話</button>
+                </form>
+                <div id="resumeConversationUrl" class="url-display"></div>
+            </div>
+        </div>
+
+        <div class="info-section">
+            <h3>📚 使用說明</h3>
+            <ul>
+                <li><strong>建立新對話：</strong>輸入一個新的對話名稱，系統會在 Google Sheets 中建立新的工作表</li>
+                <li><strong>延續已有對話：</strong>輸入已存在的對話名稱，系統會載入該工作表的歷史記錄</li>
+                <li><strong>API 端點：</strong>
+                    <ul>
+                        <li><code>POST /log</code> - 記錄對話內容</li>
+                        <li><code>GET /get_history?sheet_name=名稱&limit=5</code> - 查詢歷史記錄</li>
+                    </ul>
+                </li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        document.getElementById('newConversationForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const sheetName = document.getElementById('newSheetName').value.trim();
+            if (sheetName) {
+                const url = `${window.location.origin}/start?mode=new&sheet_name=${encodeURIComponent(sheetName)}`;
+                window.location.href = url;
+            }
+        });
+
+        document.getElementById('resumeConversationForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            const sheetName = document.getElementById('resumeSheetName').value.trim();
+            if (sheetName) {
+                const url = `${window.location.origin}/start?mode=resume&sheet_name=${encodeURIComponent(sheetName)}`;
+                window.location.href = url;
+            }
+        });
+    </script>
+</body>
+</html>
