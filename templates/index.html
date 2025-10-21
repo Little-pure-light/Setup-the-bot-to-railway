@@ -50,22 +50,60 @@
             </div>
         </div>
 
+        <div class="api-endpoints-section">
+            <h3>🔌 API 端點（提供給 AI 語言模型使用）</h3>
+            <p class="api-description">將以下網址複製給您的 AI 助手，讓它能夠記錄和查詢對話：</p>
+            
+            <div class="endpoint-card">
+                <h4>📝 記錄對話</h4>
+                <div class="url-copy-box">
+                    <code id="logEndpoint">{{ request.url_root }}log</code>
+                    <button onclick="copyToClipboard('logEndpoint')" class="btn btn-small">複製</button>
+                </div>
+                <p class="endpoint-hint">POST 請求，JSON 格式：<code>{"user_message": "...", "ai_response": "..."}</code></p>
+            </div>
+
+            <div class="endpoint-card">
+                <h4>📖 查詢歷史</h4>
+                <div class="url-copy-box">
+                    <code id="historyEndpoint">{{ request.url_root }}get_history?sheet_name=對話名稱&limit=5</code>
+                    <button onclick="copyToClipboard('historyEndpoint')" class="btn btn-small">複製</button>
+                </div>
+                <p class="endpoint-hint">GET 請求，參數：sheet_name（必填）、limit（可選，預設5）</p>
+            </div>
+
+            <div class="endpoint-card">
+                <h4>🚀 啟動對話</h4>
+                <div class="url-copy-box">
+                    <code id="startEndpoint">{{ request.url_root }}start?mode=resume&sheet_name=對話名稱</code>
+                    <button onclick="copyToClipboard('startEndpoint')" class="btn btn-small">複製</button>
+                </div>
+                <p class="endpoint-hint">GET 請求，參數：mode（new/resume）、sheet_name</p>
+            </div>
+        </div>
+
         <div class="info-section">
             <h3>📚 使用說明</h3>
             <ul>
                 <li><strong>建立新對話：</strong>輸入一個新的對話名稱，系統會在 Google Sheets 中建立新的工作表</li>
                 <li><strong>延續已有對話：</strong>輸入已存在的對話名稱，系統會載入該工作表的歷史記錄</li>
-                <li><strong>API 端點：</strong>
-                    <ul>
-                        <li><code>POST /log</code> - 記錄對話內容</li>
-                        <li><code>GET /get_history?sheet_name=名稱&limit=5</code> - 查詢歷史記錄</li>
-                    </ul>
-                </li>
+                <li><strong>整合到 AI：</strong>複製上方 API 端點網址，告訴您的 AI 助手使用這些網址來記錄和查詢對話</li>
             </ul>
         </div>
     </div>
 
     <script>
+        function copyToClipboard(elementId) {
+            const element = document.getElementById(elementId);
+            const text = element.textContent;
+            navigator.clipboard.writeText(text).then(() => {
+                alert('✅ 已複製到剪貼簿！\n\n' + text);
+            }).catch(err => {
+                console.error('複製失敗：', err);
+                alert('❌ 複製失敗，請手動複製');
+            });
+        }
+
         document.getElementById('newConversationForm').addEventListener('submit', function(e) {
             e.preventDefault();
             const sheetName = document.getElementById('newSheetName').value.trim();
