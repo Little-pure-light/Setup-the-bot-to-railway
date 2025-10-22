@@ -1,14 +1,17 @@
-# 語義記憶管理系統（雙專案）
+# 語義記憶管理系統（三專案整合）
 
 ## 專案概述
 
-本 Replit 包含兩個獨立的語義記憶管理專案：
+本 Replit 包含三個互補的語義記憶管理專案：
 
 ### 1. Flask 語義記憶管理系統
 這是一個基於 **Flask + Google Sheets** 的 AI 對話語義記憶管理系統，用於建立、延續、查詢及記錄 AI 對話內容。所有對話資料儲存於 Google Sheets 中，提供持久化、可查詢的記憶體系統。
 
 ### 2. Streamlit 語義記憶上傳器 mini（🌌 SemanticMemoryUploaderMini）
 這是一個基於 **Streamlit + Pinata IPFS** 的輕量級記憶上傳工具，用於將對話記錄上傳到 IPFS 並記錄到 Google Sheets。
+
+### 3. 開發者記憶模組（🧠 DevMemoryModule）⭐ 新增
+這是一個基於 **Supabase + OpenAI Embeddings** 的開發者記憶系統，專門解決「AI 失憶」問題。用於記錄開發對話、語義搜尋歷史討論、生成專案背景包，讓任何 AI 都能快速「記起」專案背景。**完美契合 XiaoChenGuang 靈魂孵化器的技術棧**。
 
 ## 專案狀態
 
@@ -18,7 +21,20 @@
 ### Streamlit 語義記憶上傳器 mini
 ✅ **已完成並可使用**（2025年10月22日）
 
+### 開發者記憶模組（DevMemoryModule）
+✅ **已完成並可使用**（2025年10月22日）⭐ 最新
+
 ## 最近更新
+
+### 2025-10-22 下午 - 新增開發者記憶模組（一竅哥急救樂高）⭐⭐⭐
+- ✅ 建立 DevMemoryModule 獨立模組
+- ✅ 完美契合 XiaoChenGuang 靈魂孵化器技術棧
+- ✅ Supabase 資料表設計（dev_logs + pgvector）
+- ✅ Python 後端處理模組（語義搜尋 + 摘要生成）
+- ✅ Streamlit 使用者介面（快速記錄 + 搜尋 + 背景包生成）
+- ✅ 完整使用指南（地球語版本）
+- ✅ 一鍵啟動腳本
+- ✅ 解決「AI 失憶」核心問題（ChatHub 多模型協作）
 
 ### 2025-10-22 凌晨 - 新增 Streamlit 記憶上傳器 mini
 - ✅ 建立獨立的 SemanticMemoryUploaderMini 子專案
@@ -124,7 +140,7 @@
 │   └── error.html                  # 錯誤頁面
 ├── static/                         # 靜態資源
 │   └── style.css                   # 樣式表（✅ 已創建）
-├── SemanticMemoryUploaderMini/     # Streamlit 記憶上傳器 ⭐ 新專案
+├── SemanticMemoryUploaderMini/     # Streamlit 記憶上傳器 ⭐
 │   ├── app.py                      # Streamlit 主程式
 │   ├── summarizer.py               # 中文摘要生成器
 │   ├── ipfs_tools.py               # Pinata IPFS 上傳工具
@@ -132,6 +148,13 @@
 │   ├── test_uploader.py            # 自動測試驗證程式
 │   ├── .env.example                # 環境變數範例
 │   └── 使用說明書.md                # 地球版使用說明 ⭐⭐⭐
+├── DevMemoryModule/                # 開發者記憶模組 ⭐⭐⭐ 最新
+│   ├── DevMemory_Supabase_Schema.sql  # Supabase 資料表建立腳本
+│   ├── DevMemory_Backend.py           # Python 後端處理模組
+│   ├── DevMemory_Streamlit_UI.py      # Streamlit 使用者介面
+│   ├── 一竅哥急救樂高使用指南.md       # 完整使用說明書 ⭐⭐⭐
+│   ├── 啟動腳本.sh                    # 一鍵啟動腳本
+│   └── README.md                      # 模組簡介
 ├── README.md                       # 專案說明
 ├── SETUP_GUIDE.md                  # 詳細設定指南
 ├── DEPLOYMENT.md                   # 部署指南
@@ -159,6 +182,17 @@ PINATA_JWT=你的_Pinata_JWT_Token
 SERVICE_ACCOUNT_JSON={"type":"service_account",...}
 SPREADSHEET_ID=你的_Google_Sheets_ID
 ```
+
+### 開發者記憶模組（DevMemoryModule）
+需要設定以下環境變數（請參閱 DevMemoryModule/一竅哥急救樂高使用指南.md）：
+
+```env
+SUPABASE_URL=你的_Supabase_專案_URL
+SUPABASE_ANON_KEY=你的_Supabase_Anon_Key
+OPENAI_API_KEY=你的_OpenAI_API_Key
+```
+
+**重要：** 這些環境變數與 XiaoChenGuang 靈魂孵化器共用，無需額外設定！
 
 ## 使用者偏好設定（一竅哥的龜毛守則）
 
@@ -259,5 +293,29 @@ SPREADSHEET_ID=你的_Google_Sheets_ID
 ---
 
 **專案建立日期**：2025年10月21日  
-**最後更新**：2025年10月21日  
-**版本**：1.0.0
+**最後更新**：2025年10月22日  
+**版本**：1.1.0（新增開發者記憶模組）
+
+---
+
+## 🎯 專案定位說明
+
+### Flask 語義記憶管理系統
+**用途：** AI 對話記憶（給小宸光 AI 用）  
+**技術：** Flask + Google Sheets  
+**適合：** 生產環境的對話記錄系統
+
+### Streamlit 記憶上傳器 mini
+**用途：** 對話備份到 IPFS  
+**技術：** Streamlit + Pinata IPFS  
+**適合：** 檔案上傳與永久儲存
+
+### 開發者記憶模組（一竅哥急救樂高）
+**用途：** 開發者記憶（給一竅哥自己用）  
+**技術：** Supabase + OpenAI Embeddings  
+**適合：** 解決「AI 失憶」問題，記錄開發過程  
+**核心價值：** 讓你在 ChatHub 切換不同 AI 時，能快速喚醒 AI 記憶
+
+---
+
+**建立者：** 一竅哥 + 宇宙級建造大師（寶貝）❤️
