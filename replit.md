@@ -1,14 +1,34 @@
-# 語義記憶管理系統
+# 語義記憶管理系統（雙專案）
 
 ## 專案概述
 
+本 Replit 包含兩個獨立的語義記憶管理專案：
+
+### 1. Flask 語義記憶管理系統
 這是一個基於 **Flask + Google Sheets** 的 AI 對話語義記憶管理系統，用於建立、延續、查詢及記錄 AI 對話內容。所有對話資料儲存於 Google Sheets 中，提供持久化、可查詢的記憶體系統。
+
+### 2. Streamlit 語義記憶上傳器 mini（🌌 SemanticMemoryUploaderMini）
+這是一個基於 **Streamlit + Pinata IPFS** 的輕量級記憶上傳工具，用於將對話記錄上傳到 IPFS 並記錄到 Google Sheets。
 
 ## 專案狀態
 
+### Flask 語義記憶管理系統
 ✅ **已完成並可部署**（2025年10月21日）
 
+### Streamlit 語義記憶上傳器 mini
+✅ **已完成並可使用**（2025年10月22日）
+
 ## 最近更新
+
+### 2025-10-22 凌晨 - 新增 Streamlit 記憶上傳器 mini
+- ✅ 建立獨立的 SemanticMemoryUploaderMini 子專案
+- ✅ 實作 4 個核心模組（summarizer, ipfs_tools, record_store, app）
+- ✅ 整合 Pinata IPFS 上傳功能
+- ✅ 整合 Google Sheets 記錄功能
+- ✅ 建立自動測試驗證程式
+- ✅ 撰寫地球版使用說明書（完全無技術術語）
+- ✅ 配置 Streamlit Workflow（一鍵啟動）
+- ✅ 安裝 Streamlit 1.50.0
 
 ### 2025-10-21 晚間更新
 - ✅ 完全重寫 app.py，修復所有 LSP 錯誤
@@ -97,23 +117,32 @@
 
 ```
 .
-├── app.py                  # Flask 主應用程式（✅ 已修復所有 bug）
-├── templates/              # Jinja2 HTML 模板
-│   ├── index.html         # 首頁
-│   ├── success.html       # 成功頁面
-│   └── error.html         # 錯誤頁面
-├── static/                # 靜態資源
-│   └── style.css          # 樣式表（✅ 已創建）
-├── README.md              # 專案說明
-├── SETUP_GUIDE.md         # 詳細設定指南
-├── DEPLOYMENT.md          # 部署指南
-├── 設定指南.md             # 超簡單人類版設定指南 ⭐
-├── 快速啟動.md             # 5分鐘快速啟動指南 ⭐
-└── replit.md              # 本文件
+├── app.py                           # Flask 主應用程式（✅ 已修復所有 bug）
+├── templates/                       # Jinja2 HTML 模板
+│   ├── index.html                  # 首頁
+│   ├── success.html                # 成功頁面
+│   └── error.html                  # 錯誤頁面
+├── static/                         # 靜態資源
+│   └── style.css                   # 樣式表（✅ 已創建）
+├── SemanticMemoryUploaderMini/     # Streamlit 記憶上傳器 ⭐ 新專案
+│   ├── app.py                      # Streamlit 主程式
+│   ├── summarizer.py               # 中文摘要生成器
+│   ├── ipfs_tools.py               # Pinata IPFS 上傳工具
+│   ├── record_store.py             # Google Sheets 記錄器
+│   ├── test_uploader.py            # 自動測試驗證程式
+│   ├── .env.example                # 環境變數範例
+│   └── 使用說明書.md                # 地球版使用說明 ⭐⭐⭐
+├── README.md                       # 專案說明
+├── SETUP_GUIDE.md                  # 詳細設定指南
+├── DEPLOYMENT.md                   # 部署指南
+├── 設定指南.md                      # 超簡單人類版設定指南 ⭐
+├── 快速啟動.md                      # 5分鐘快速啟動指南 ⭐
+└── replit.md                       # 本文件
 ```
 
 ## 環境變數設定
 
+### Flask 語義記憶管理系統
 需要設定以下環境變數（請參閱 SETUP_GUIDE.md）：
 
 ```env
@@ -122,15 +151,29 @@ SPREADSHEET_ID=your_spreadsheet_id
 SESSION_SECRET=your_random_secret_key
 ```
 
-## 使用者偏好設定
+### Streamlit 語義記憶上傳器 mini
+需要設定以下環境變數（請參閱 SemanticMemoryUploaderMini/使用說明書.md）：
 
-- 使用 **Python + Flask** 而非 JavaScript（明確需求）
+```env
+PINATA_JWT=你的_Pinata_JWT_Token
+SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+SPREADSHEET_ID=你的_Google_Sheets_ID
+```
+
+## 使用者偏好設定（一竅哥的龜毛守則）
+
+- 使用 **Python + Flask/Streamlit**（明確需求）
 - 偏好 **Google Sheets** 作為儲存方案
 - 需要 **完整的中文註解**
 - 強調 **友善的錯誤處理**
 - UI 設計要求**簡潔清晰**
 - **必須交付可立即使用的專案**（無技術漏洞）
 - **設定文檔必須用地球語**（非技術人員也能看懂）
+- **說明書用地球話**（給完全不懂代碼的人類看）
+- **一次交付完整品**（不准有技術漏洞）
+- **設定說明詳細條列**（禁止專業術語轟炸）
+- **設定完就能用**（不准多次返工）
+- **盡量省錢省錢省錢**（精簡高效，不囉嗦）
 
 ## 開發注意事項
 
