@@ -9,4 +9,5 @@ dependencies = [
     "gspread>=6.2.1",
     "gunicorn>=23.0.0",
     "python-dotenv>=1.1.1",
+    "streamlit>=1.50.0",
 ]
