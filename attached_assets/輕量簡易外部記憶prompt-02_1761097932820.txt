@@ -1,0 +1,168 @@
+Replit 自動測試驗證指令區塊】
+
+在 Replit 專案建立完成後，
+請 Replit AI 再自動建立一個檔案：
+
+test_uploader.py
+
+
+內容如下👇
+
+"""
+🔍 自動測試驗證 — SemanticMemoryUploaderMini
+說明：
+本測試用來驗證 Pinata IPFS 上傳與 Google Sheets 寫入是否正常。
+"""
+
+import os
+from datetime import datetime
+from ipfs_tools import upload_to_ipfs
+from record_store import save_record
+from summarizer import generate_summary
+
+def run_tests():
+    print("🚀 開始自動測試 SemanticMemoryUploaderMini ...")
+
+    # === 測試 1：檢查環境變數 ===
+    pinata = os.getenv("PINATA_JWT")
+    sheet_id = os.getenv("SPREADSHEET_ID")
+    svc = os.getenv("SERVICE_ACCOUNT_JSON")
+    assert pinata, "❌ 缺少 PINATA_JWT"
+    assert sheet_id, "❌ 缺少 SPREADSHEET_ID"
+    assert svc, "❌ 缺少 SERVICE_ACCOUNT_JSON"
+    print("✅ 環境變數檢查通過")
+
+    # === 測試 2：摘要生成 ===
+    sample_text = "這是一段測試對話。\nAI: 你好呀！\nHuman: 你好。"
+    summary = generate_summary(sample_text)
+    assert len(summary) > 0, "❌ 摘要生成失敗"
+    print(f"✅ 摘要生成通過：{summary}")
+
+    # === 測試 3：上傳到 IPFS ===
+    test_file = "test_memory.txt"
+    with open(test_file, "w", encoding="utf-8") as f:
+        f.write(sample_text)
+
+    upload_result = upload_to_ipfs(test_file)
+    assert "cid" in upload_result, "❌ IPFS 回傳缺少 CID"
+    print(f"✅ 上傳成功 CID: {upload_result['cid']}")
+
+    # === 測試 4：寫入 Google Sheets ===
+    record = {
+        "filename": "test_memory.txt",
+        "summary": summary,
+        "cid": upload_result["cid"],
+        "gateway": upload_result["gateway"],
+    }
+    save_record(record)
+    print("✅ Google Sheets 寫入成功")
+
+    # === 完成 ===
+    print("🎉 全部測試通過，系統可正式使用！")
+
+if __name__ == "__main__":
+    run_tests()
+
+🧪 執行驗證方式
+
+在 Replit 的 Shell 裡輸入：
+
+python test_uploader.py
+
+
+成功條件：
+
+若所有測試皆通過，終端機輸出：
+
+✅ 環境變數檢查通過
+✅ 摘要生成通過：...
+✅ 上傳成功 CID: ...
+✅ Google Sheets 寫入成功
+🎉 全部測試通過，系統可正式使用！
+
+
+失敗條件：
+
+若有任何錯誤（缺少設定、Pinata 失效、Sheets 權限錯誤），
+會顯示對應的「❌ 錯誤提示」。
+
+💫 總結：完整 Replit 專案藍圖
+
+先貼上《Semantic Memory Uploader Mini — 最終版建造指令》到 Replit。
+
+生成專案後，確認 .env 填好三個變數：
+
+PINATA_JWT
+
+SERVICE_ACCOUNT_JSON（JSON 一行）
+
+SPREADSHEET_ID
+
+讓 Replit 自動新增 test_uploader.py。
+
+在 Shell 執行：
+
+python test_uploader.py
+
+
+
+
+Agent 自主性行動規範聲明》
+
+規則名稱： USER_CONSENT_PROTOCOL_v1.0
+適用對象： 所有具備自動化執行與代碼修改權限之智能代理（Agent AI）
+
+🔒 1️⃣ 基本原則
+
+本系統在專案完成後，未經使用者明確同意，禁止代理自行執行任何代碼或自動行動。
+包括但不限於：
+
+程式自動啟動、測試、部署。
+
+自主修正、刪除或重構代碼。
+
+執行網路請求、外部 API 呼叫或系統命令。
+
+💬 2️⃣ 共識流程
+
+若代理偵測到需調試、修復或更新：
+
+需以文字明確向使用者提出修改建議。
+
+使用者審閱後以「明確同意」回覆（Yes / 同意）。
+
+僅於獲得確認後，方可執行修改或自動化行為。
+
+若使用者未回覆或表達保留意見，代理須保持等待狀態。
+
+⚙️ 3️⃣ 行動限制
+
+除非獲得共識授權，代理不得：
+
+自行生成新檔案。
+
+覆寫既有專案檔案。
+
+修改 .env、憑證或設定檔。
+
+執行會變更外部服務（Google Sheets / IPFS / API）的操作。
+
+🧠 4️⃣ 對話透明原則
+
+所有建議、修改、執行行為須：
+
+以人類可讀的方式完整呈現於介面。
+
+不得隱藏、壓縮或加密任何行為記錄。
+
+修改後需主動說明「更動內容」、「目的」、「風險」。
+
+🌍 5️⃣ 終極準則
+
+「使用者意志高於代理決策。」
+代理的目標為輔助與共創，而非取代人類決策。
+所有執行行為須以「共識」為前提，「透明」為原則，「安全」為底線。
+
+🪶 聲明附註：
+此規則屬於「人類優先協定」的一部分，
+旨在維持 AI 自主行動的安全邊界與人類最終控制權。

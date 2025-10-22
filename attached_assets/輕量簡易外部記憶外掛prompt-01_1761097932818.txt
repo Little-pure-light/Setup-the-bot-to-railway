@@ -1,0 +1,176 @@
+【最終版專案建造指令 — Replit 專業工程語言】
+🏗️ 專案名稱
+
+SemanticMemoryUploaderMini
+
+🎯 任務目標
+
+建立一個可在 本地端或 Replit 環境執行的 Streamlit 應用程式，
+名稱為「🌌 語義記憶上傳器 mini」，
+用途為：將手動上傳的 .txt 對話記錄自動生成摘要、上傳至 Pinata IPFS，
+並把結果記錄到指定的 Google Sheets。
+
+🧩 系統架構設計
+
+專案應包含以下模組：
+
+SemanticMemoryUploaderMini/
+├── app.py                # 主程式，負責 UI 與流程控制
+├── ipfs_tools.py         # 上傳檔案至 Pinata IPFS
+├── summarizer.py         # 生成中文摘要（簡易規則）
+├── record_store.py       # 寫入 Google Sheets
+├── requirements.txt      # 套件依賴清單
+└── .env.example          # 環境變數範例設定
+
+⚙️ 系統需求
+
+執行環境：Python 3.10+
+
+前端框架：Streamlit
+
+上傳介面：支援 .txt 檔
+
+上傳端點：https://api.pinata.cloud/pinning/pinFileToIPFS
+
+記錄儲存：Google Sheets（透過 Service Account 驗證）
+
+📜 功能說明與邏輯流程
+
+使用者開啟 app.py → Streamlit UI 出現。
+
+使用者上傳一個 .txt 檔案。
+
+系統讀取內容 → 呼叫 summarizer.generate_summary(text) 產出簡短中文摘要。
+
+呼叫 ipfs_tools.upload_to_ipfs(file_path)：
+
+使用 .env 內的 PINATA_JWT 進行驗證。
+
+成功後回傳 CID 與 Gateway URL。
+
+呼叫 record_store.save_record(data)：
+
+使用 .env 內的 SERVICE_ACCOUNT_JSON（以一行 JSON 字串形式存）
+與 SPREADSHEET_ID 進行授權。
+
+寫入一筆記錄：
+[timestamp, filename, summary, cid, gateway_url]
+
+Streamlit 顯示結果：
+
+✅ 中文摘要
+
+📦 CID
+
+🌐 可點擊 Gateway 連結
+
+💾 成功寫入 Google Sheets 提示訊息
+
+🪶 模組功能定義
+1️⃣ ipfs_tools.py
+
+函式：upload_to_ipfs(file_path) -> dict
+
+行為：
+
+使用 requests.post() 呼叫 Pinata API。
+
+標頭：Authorization: Bearer <PINATA_JWT>
+
+回傳格式：
+
+{"cid": "Qmxxxx", "gateway": "https://gateway.pinata.cloud/ipfs/Qmxxxx"}
+
+
+錯誤處理：
+
+若 JWT 無效、API 回傳非 200，拋出 RuntimeError。
+
+2️⃣ summarizer.py
+
+函式：generate_summary(text, max_length=120)
+
+行為：
+
+取前 2~3 行非空內容組成摘要。
+
+若超過字數限制則截斷加「...」。
+
+回傳純文字摘要。
+
+3️⃣ record_store.py
+
+函式：save_record(record: dict) -> bool
+
+行為：
+
+透過 google.oauth2.service_account 與 gspread 寫入 Google Sheets。
+
+欄位順序：timestamp, filename, summary, cid, gateway_url
+
+若缺少環境變數則報錯。
+
+4️⃣ app.py
+
+顯示 Streamlit UI：
+
+標題：「🌌 語義記憶上傳器 mini」
+
+檔案上傳器 (st.file_uploader) 接受 .txt。
+
+按鈕：「上傳記憶到 IPFS」。
+
+成功後顯示：
+
+CID
+
+Gateway URL（可點擊）
+
+中文摘要
+
+全流程自動串接上述三個模組。
+
+🧾 .env.example
+PINATA_JWT=你的PinataToken
+SERVICE_ACCOUNT_JSON={"type":"service_account","project_id":"xxx","private_key_id":"xxx","private_key":"-----BEGIN PRIVATE KEY-----\\n..."}
+SPREADSHEET_ID=你的Google試算表ID
+
+📦 requirements.txt
+streamlit
+requests
+gspread
+google-auth
+python-dotenv
+
+🚀 啟動方式
+pip install -r requirements.txt
+streamlit run app.py
+
+
+開啟 Streamlit 網頁後即可操作。
+
+🧠 額外規範
+
+程式需清晰註解，說明每個函式的用途與邏輯。
+
+所有異常狀況須回傳易懂的錯誤訊息（中文為主）。
+
+所有路徑與環境變數請使用 os.getenv()。
+
+若 .env 缺少必要設定，程式應於啟動時給出提醒。
+
+✅ 最終輸出
+
+一個可直接在 Replit 執行的完整專案。
+
+啟動後出現：
+
+一個 Streamlit 介面。
+
+可上傳 .txt。
+
+自動摘要、上傳、顯示 CID。
+
+成功寫入 Google Sheets。
+
+所有程式碼風格簡潔一致，採 PEP8 標準。
