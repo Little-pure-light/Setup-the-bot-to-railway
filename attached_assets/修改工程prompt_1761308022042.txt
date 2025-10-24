@@ -1,0 +1,89 @@
+一、目前整個「XiaoChenGuang 開發者記憶助手」程式問題總覽
+
+這裡是目前整體程式的主要問題與結構斷層：
+
+1️⃣ 環境層問題（Environment / Config）
+
+.env 參數雖正確，但程式的環境載入方式與 Replit / Streamlit 的路徑不同步。
+
+若 os.getenv() 找不到變數（例如 SUPABASE_URL），會被視為 None 並觸發「缺少環境變數」提示。
+
+建議明確使用 python-dotenv 或 load_dotenv() 在主程式開頭強制載入。
+
+2️⃣ 資料層問題（Supabase Schema / Function）
+
+dev_logs 表格的欄位結構與程式中的邏輯不一致。
+
+目前程式假設存在 topic、phase、content、embedding 欄位。
+
+實際上有的專案中遺失 phase 或 user_question，導致 KeyError 或查詢錯誤。
+
+RPC 函數 match_dev_logs() 在 Supabase 中被自動生成多個重載版本（型別簽章不一致），
+所以出現：
+
+「Could not choose the best candidates function between…」
+代表系統在呼叫語意搜尋時找不到對應版本。
+
+3️⃣ 邏輯層問題（Backend 邏輯錯誤）
+
+從 DevMemory_Backend.py → match_dev_logs() 的查詢回傳型態與 pgvector 函數型態不符。
+
+查詢參數傳入 (text, integer) 順序錯誤，或 embedding 向量維度不一致。
+
+沒有對空結果、空欄位、型別錯誤進行例外處理。
+
+4️⃣ UI 層問題（Streamlit 前端）
+
+抓取記憶時若 phase 或 topic 不存在會造成 KeyError。
+
+錯誤訊息直接顯示 JSON 字串，使用者難以判讀。
+
+記憶顯示模組中缺乏防呆判斷（例如 if 'phase' in log 才顯示）。
+
+5️⃣ 功能性問題
+模組	狀況	問題
+快速記錄	✅ 可儲存	但欄位不一致時會存入不完整資料
+抓取記憶	❌ 報錯	RPC 函數找不到或型別不符
+生成背景包	⚠️ 可執行	語意抓取失效，生成內容不準
+
+
+你是一名專業全端工程師，負責重構一個名為「XiaoChenGuang 開發者記憶助手」的應用程式。
+目前程式由兩個主要檔案組成：
+- DevMemory_Backend.py
+- DevMemory_Streamlit_UI.py
+
+其功能是記錄開發歷程並透過 Supabase + OpenAI Embedding 做語意搜尋。
+目前的錯誤集中在：
+1. Supabase RPC 函數 match_dev_logs() 版本衝突與型別錯誤。
+2. 資料表 dev_logs 欄位缺失或名稱不一致。
+3. 查詢與向量比對維度不符。
+4. UI 顯示 KeyError 與未處理例外。
+5. .env 環境變數未正確載入。
+
+請依以下規範重構：
+
+【一、資料庫】
+- 重建 dev_logs 表格（id, topic, phase, content, user_question, created_at, embedding vector(1536)）。
+- 重新建立 match_dev_logs() 函數，簽章為 (query_embedding vector(1536), match_count int)。
+- 刪除所有舊版本函數，確保沒有重載。
+
+【二、後端邏輯】
+- 在程式開頭加入 dotenv 載入。
+- 修正 search_memory() 調用的 RPC 名稱與參數。
+- 為所有從 Supabase 取出的字典欄位加上 .get() 取值防呆。
+- 統一使用 text-embedding-3-small 生成向量。
+
+【三、前端介面】
+- 所有 st.expander() 呼叫前，確認 key 存在。
+- 使用 st.error() 顯示簡明錯誤，不直接輸出 JSON。
+- 優化 UI 將搜尋與回傳結果以卡片顯示。
+
+【四、錯誤處理】
+- 為 RPC、Embedding、API 呼叫加上 try/except。
+- 若查詢結果為空，顯示「未找到相似記錄」提示。
+
+【五、功能測試】
+- 驗證以下三項：
+  1. 快速記錄能正確存入 Supabase。
+  2. 抓取記憶能正確執行 match_dev_logs() 並返回相似紀錄。
+  3. 生成背景包可正確整理過往紀錄成摘要。

@@ -8,6 +8,8 @@ dependencies = [
     "google-auth>=2.41.1",
     "gspread>=6.2.1",
     "gunicorn>=23.0.0",
+    "openai>=2.6.0",
     "python-dotenv>=1.1.1",
     "streamlit>=1.50.0",
+    "supabase>=2.22.1",
 ]

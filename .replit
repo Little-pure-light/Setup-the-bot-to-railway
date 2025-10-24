@@ -15,15 +15,15 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "Streamlit 記憶上傳器"
+args = "開發者記憶助手 V2"
 
 [[workflows.workflow]]
-name = "Streamlit 記憶上傳器"
+name = "開發者記憶助手 V2"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "cd SemanticMemoryUploaderMini && streamlit run app.py --server.port 5000 --server.address 0.0.0.0 --server.headless true"
+args = "streamlit run DevMemoryModule/DevMemory_Streamlit_UI_V2.py --server.port 5000 --server.address 0.0.0.0 --server.headless true"
 waitForPort = 5000
 
 [workflows.workflow.metadata]
@@ -36,14 +36,6 @@ externalPort = 3001
 [[ports]]
 localPort = 5000
 externalPort = 80
-
-[[ports]]
-localPort = 8080
-externalPort = 8080
-
-[[ports]]
-localPort = 8501
-externalPort = 3000
 
 [deployment]
 deploymentTarget = "autoscale"
