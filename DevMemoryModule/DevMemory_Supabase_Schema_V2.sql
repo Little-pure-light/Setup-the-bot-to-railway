@@ -1,65 +1,67 @@
 -- ============================================
--- XiaoChenGuang 開發者記憶助手 - Supabase Schema V2
--- 完全重構版本 - 解決所有已知問題
+-- XiaoChenGuang 開發者記憶助手 V2 - Supabase Schema
+-- ============================================
+-- 功能：記錄開發對話、語義搜尋、生成背景包
+-- 版本：2.0.0
+-- 日期：2025-10-24
 -- ============================================
 
 -- ============================================
--- 步驟 0：清理舊版本（避免衝突）
+-- 步驟 0：清理舊版本（避免版本衝突）
 -- ============================================
 
--- 刪除舊的 RPC 函數（避免版本衝突）
-DROP FUNCTION IF EXISTS match_dev_logs(vector, int);
-DROP FUNCTION IF EXISTS match_dev_logs(vector, int, text);
-DROP FUNCTION IF EXISTS match_dev_logs(vector, int, text, text);
-DROP FUNCTION IF EXISTS generate_project_context(text, text);
-
--- 刪除舊的資料表（如果需要重建）
--- 注意：這會刪除所有現有資料！如果要保留資料，請先備份
--- DROP TABLE IF EXISTS dev_logs CASCADE;
+-- 刪除舊版 RPC 函數（如果存在）
+DROP FUNCTION IF EXISTS match_dev_logs(vector(1536), int, text, text);
+DROP FUNCTION IF EXISTS match_dev_logs(vector(1536), int);
 
 -- ============================================
--- 步驟 1：建立開發日誌資料表（統一欄位結構）
+-- 步驟 1：啟用 pgvector 擴充功能
+-- ============================================
+
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- ============================================
+-- 步驟 2：建立 dev_logs 資料表（完整版）
 -- ============================================
 
 CREATE TABLE IF NOT EXISTS dev_logs (
-    -- 主鍵和時間戳
-    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- 主鍵
+    id BIGSERIAL PRIMARY KEY,
+    
+    -- 開發階段資訊
+    phase TEXT NOT NULL,                    -- 開發階段（Phase1, Phase2, Phase3...）
+    module TEXT NOT NULL,                   -- 模組名稱
+    ai_model TEXT NOT NULL,                 -- AI 模型名稱（GPT-4, Claude...）
+    topic TEXT NOT NULL,                    -- 討論主題
+    
+    -- 對話內容
+    user_question TEXT NOT NULL,            -- 使用者問題
+    ai_response TEXT NOT NULL,              -- AI 回應
+    
+    -- 自動生成欄位（用於全文搜尋和摘要）
+    content TEXT GENERATED ALWAYS AS (user_question || ' ' || ai_response) STORED,
+    
+    -- 向量嵌入（用於語義搜尋）
+    embedding vector(1536),                 -- OpenAI text-embedding-3-small 的維度
+    
+    -- 標籤和元數據
+    tags TEXT[],                            -- 標籤陣列
+    metadata JSONB DEFAULT '{}'::jsonb,     -- 擴充元數據
+    
+    -- 時間戳記
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-    
-    -- 分類欄位
-    phase VARCHAR(50) NOT NULL,              -- 階段（Phase1/Phase2/Phase3）
-    module VARCHAR(100) NOT NULL,            -- 模組（記憶模組/反思模組）
-    ai_model VARCHAR(50) NOT NULL,           -- AI 模型（GPT-4/Claude）
-    
-    -- 內容欄位（確保完整）
-    topic VARCHAR(200) NOT NULL,             -- 討論主題
-    user_question TEXT NOT NULL,             -- 用戶問題
-    ai_response TEXT NOT NULL,               -- AI 回答
-    content TEXT GENERATED ALWAYS AS (
-        user_question || ' ' || ai_response
-    ) STORED,                                -- 合併內容（用於全文搜尋）
-    summary TEXT,                            -- 自動摘要
-    
-    -- 向量嵌入（OpenAI text-embedding-3-small = 1536 維）
-    embedding VECTOR(1536),
-    
-    -- 元數據
-    importance_score FLOAT DEFAULT 0.5 CHECK (importance_score >= 0 AND importance_score <= 1),
-    tags TEXT[] DEFAULT '{}',
-    related_files TEXT[] DEFAULT '{}'
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- ============================================
--- 步驟 2：建立索引（提升查詢效能）
+-- 建立索引（優化查詢效能）
 -- ============================================
 
--- 向量相似度搜尋索引（使用 HNSW 算法）
-CREATE INDEX IF NOT EXISTS dev_logs_embedding_idx 
-ON dev_logs 
-USING hnsw (embedding vector_cosine_ops);
+-- 向量相似度搜尋索引（核心功能）
+CREATE INDEX IF NOT EXISTS dev_logs_embedding_idx ON dev_logs USING ivfflat (embedding vector_cosine_ops)
+WITH (lists = 100);
 
--- 常用查詢欄位索引
+-- 常用欄位索引
 CREATE INDEX IF NOT EXISTS dev_logs_phase_idx ON dev_logs(phase);
 CREATE INDEX IF NOT EXISTS dev_logs_module_idx ON dev_logs(module);
 CREATE INDEX IF NOT EXISTS dev_logs_created_at_idx ON dev_logs(created_at DESC);
@@ -72,124 +74,52 @@ CREATE INDEX IF NOT EXISTS dev_logs_content_idx ON dev_logs USING GIN(to_tsvecto
 -- 步驟 3：建立 RPC 函數 - 向量相似度搜尋（修正版）
 -- ============================================
 
+-- 刪除舊版本（如果存在）
+DROP FUNCTION IF EXISTS match_dev_logs;
+
+-- 建立新版本（只接受 2 個參數，避免版本衝突）
 CREATE OR REPLACE FUNCTION match_dev_logs(
-    query_embedding VECTOR(1536),
-    match_count INT DEFAULT 5
+    query_embedding vector(1536),
+    match_count int DEFAULT 5
 )
 RETURNS TABLE (
-    id UUID,
-    created_at TIMESTAMP WITH TIME ZONE,
-    phase VARCHAR(50),
-    module VARCHAR(100),
-    ai_model VARCHAR(50),
-    topic VARCHAR(200),
-    user_question TEXT,
-    ai_response TEXT,
-    summary TEXT,
-    similarity FLOAT
+    id bigint,
+    phase text,
+    module text,
+    ai_model text,
+    topic text,
+    user_question text,
+    ai_response text,
+    content text,
+    tags text[],
+    created_at timestamp with time zone,
+    similarity float
 )
-LANGUAGE plpgsql
-STABLE
+LANGUAGE sql STABLE
 AS $$
-BEGIN
-    RETURN QUERY
-    SELECT
+    SELECT 
         dev_logs.id,
-        dev_logs.created_at,
         dev_logs.phase,
         dev_logs.module,
         dev_logs.ai_model,
         dev_logs.topic,
         dev_logs.user_question,
         dev_logs.ai_response,
-        dev_logs.summary,
+        dev_logs.content,
+        dev_logs.tags,
+        dev_logs.created_at,
         1 - (dev_logs.embedding <=> query_embedding) AS similarity
     FROM dev_logs
     WHERE dev_logs.embedding IS NOT NULL
     ORDER BY dev_logs.embedding <=> query_embedding
     LIMIT match_count;
-END;
 $$;
 
 -- ============================================
--- 步驟 4：建立輔助函數 - 生成專案背景包
+-- 步驟 4：建立自動更新 updated_at 的觸發器
 -- ============================================
 
-CREATE OR REPLACE FUNCTION generate_project_context(
-    target_phase TEXT DEFAULT NULL,
-    target_module TEXT DEFAULT NULL,
-    max_logs INT DEFAULT 10
-)
-RETURNS TEXT
-LANGUAGE plpgsql
-STABLE
-AS $$
-DECLARE
-    context_text TEXT := '';
-    log_record RECORD;
-    log_count INT := 0;
-BEGIN
-    -- 標題
-    context_text := E'📦 XiaoChenGuang 專案背景包\n';
-    context_text := context_text || '生成時間：' || TO_CHAR(NOW(), 'YYYY-MM-DD HH24:MI:SS') || E'\n\n';
-    
-    -- 專案概述
-    context_text := context_text || E'【專案概述】\n';
-    context_text := context_text || E'數位靈魂孵化器 - XiaoChenGuang AI 系統\n';
-    context_text := context_text || E'技術棧：FastAPI + Vue 3 + Supabase + OpenAI + Redis\n';
-    context_text := context_text || E'核心模組：\n';
-    context_text := context_text || E'  • 記憶系統（向量嵌入 + pgvector）\n';
-    context_text := context_text || E'  • 反思模組（反推果因法則）\n';
-    context_text := context_text || E'  • 人格學習引擎（動態特質調整）\n';
-    context_text := context_text || E'  • 情感檢測系統（9種情緒類型）\n';
-    context_text := context_text || E'  • 提示詞引擎（動態 Prompt 生成）\n\n';
-    
-    -- 最近開發記錄
-    context_text := context_text || E'【最近開發記錄】\n';
-    
-    FOR log_record IN
-        SELECT 
-            TO_CHAR(created_at, 'YYYY-MM-DD') AS date,
-            phase,
-            module,
-            topic,
-            COALESCE(summary, SUBSTRING(user_question, 1, 100)) AS summary_text
-        FROM dev_logs
-        WHERE 
-            (target_phase IS NULL OR phase = target_phase)
-            AND (target_module IS NULL OR module = target_module)
-        ORDER BY created_at DESC
-        LIMIT max_logs
-    LOOP
-        log_count := log_count + 1;
-        context_text := context_text || log_count || '. ' || log_record.date || ' [' || 
-                        log_record.phase || '] ' || log_record.topic || E'\n';
-        context_text := context_text || '   摘要：' || 
-                        SUBSTRING(log_record.summary_text, 1, 80) || E'...\n\n';
-    END LOOP;
-    
-    -- 如果沒有記錄
-    IF log_count = 0 THEN
-        context_text := context_text || E'（目前尚無開發記錄）\n\n';
-    END IF;
-    
-    -- 使用說明
-    context_text := context_text || E'【使用說明】\n';
-    context_text := context_text || E'1. 複製上面的背景包\n';
-    context_text := context_text || E'2. 貼給任何 AI（ChatGPT/Claude/Gemini）\n';
-    context_text := context_text || E'3. AI 就能立刻了解專案背景！\n';
-    context_text := context_text || E'4. 然後問你的問題，AI 會給出更精準的建議\n\n';
-    context_text := context_text || E'---\n';
-    context_text := context_text || E'由 XiaoChenGuang 開發者記憶助手生成\n';
-    
-    RETURN context_text;
-END;
-$$;
-
--- ============================================
--- 步驟 5：建立觸發器 - 自動更新時間戳
--- ============================================
-
+-- 建立觸發器函數
 CREATE OR REPLACE FUNCTION update_updated_at_column()
 RETURNS TRIGGER AS $$
 BEGIN
@@ -198,82 +128,113 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+-- 建立觸發器
+DROP TRIGGER IF EXISTS update_dev_logs_updated_at ON dev_logs;
 CREATE TRIGGER update_dev_logs_updated_at
     BEFORE UPDATE ON dev_logs
     FOR EACH ROW
     EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================
--- 步驟 6：插入測試資料（驗證功能）
+-- 步驟 5：插入測試資料（可選）
 -- ============================================
 
--- 清理舊測試資料
-DELETE FROM dev_logs WHERE topic LIKE '%測試記錄%';
+-- 清空測試資料（如果需要重新開始）
+-- TRUNCATE TABLE dev_logs RESTART IDENTITY CASCADE;
 
--- 插入測試記錄
-INSERT INTO dev_logs (
-    phase,
-    module,
-    ai_model,
-    topic,
-    user_question,
-    ai_response,
-    summary,
-    importance_score,
-    tags
-) VALUES 
+-- 插入範例記錄
+INSERT INTO dev_logs (phase, module, ai_model, topic, user_question, ai_response, tags, embedding)
+VALUES 
 (
     'Phase1',
-    '測試模組',
+    '系統初始化',
     'GPT-4',
-    '系統測試記錄',
-    '這是一條測試記錄，用於驗證資料表是否正常運作？',
-    '資料表運作正常！所有欄位都已正確建立，RPC 函數也已準備就緒。',
-    '測試記錄：驗證資料表功能正常',
-    0.5,
-    ARRAY['測試', '系統驗證']
-);
+    'Supabase 設定',
+    '如何在 Supabase 啟用 pgvector？',
+    '在 Supabase SQL Editor 執行：CREATE EXTENSION IF NOT EXISTS vector;',
+    ARRAY['Supabase', 'pgvector', '設定'],
+    NULL  -- embedding 會在後端程式中生成
+),
+(
+    'Phase1',
+    '資料庫設計',
+    'Claude',
+    'Schema 設計',
+    'dev_logs 表格需要哪些欄位？',
+    '需要 phase, module, ai_model, topic, user_question, ai_response, embedding, tags 等欄位。',
+    ARRAY['資料庫', 'Schema', '設計'],
+    NULL
+),
+(
+    'Phase2',
+    'API 整合',
+    'GPT-4',
+    'OpenAI Embeddings',
+    '如何生成 embedding？',
+    '使用 OpenAI API：client.embeddings.create(model="text-embedding-3-small", input=text)',
+    ARRAY['OpenAI', 'Embeddings', 'API'],
+    NULL
+)
+ON CONFLICT DO NOTHING;
 
 -- ============================================
--- 步驟 7：授權設定（如果使用 RLS）
+-- 步驟 6：授權設定（確保 Supabase 可以存取）
 -- ============================================
 
--- 如果你的專案使用 Row Level Security，請取消以下註解
--- ALTER TABLE dev_logs ENABLE ROW LEVEL SECURITY;
+-- 授予 anon 角色讀取權限（用於 RPC 函數）
+GRANT USAGE ON SCHEMA public TO anon, authenticated;
+GRANT SELECT ON dev_logs TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION match_dev_logs TO anon, authenticated;
 
--- 允許所有已認證用戶讀寫（根據需求調整）
--- CREATE POLICY "Allow authenticated users to read dev_logs"
---     ON dev_logs FOR SELECT
---     TO authenticated
---     USING (true);
-
--- CREATE POLICY "Allow authenticated users to insert dev_logs"
---     ON dev_logs FOR INSERT
---     TO authenticated
---     WITH CHECK (true);
+-- 授予 authenticated 使用者完整權限
+GRANT ALL ON dev_logs TO authenticated;
+GRANT ALL ON SEQUENCE dev_logs_id_seq TO authenticated;
 
 -- ============================================
--- 完成！執行此腳本後你會得到：
--- ============================================
--- ✅ 統一的資料表結構（包含所有必要欄位）
--- ✅ 向量搜尋索引（HNSW 高效能）
--- ✅ 修正的 RPC 函數（無版本衝突）
--- ✅ 背景包生成函數（完整錯誤處理）
--- ✅ 自動更新時間戳
--- ✅ 測試資料（驗證功能）
-
--- ============================================
--- 驗證安裝（執行以下查詢測試）
+-- 完成！
 -- ============================================
 
--- 1. 檢查資料表結構
--- SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'dev_logs';
+-- 驗證建立結果
+SELECT 
+    '✅ dev_logs 資料表建立成功！' AS status,
+    COUNT(*) AS record_count,
+    COUNT(DISTINCT phase) AS phase_count,
+    COUNT(DISTINCT module) AS module_count
+FROM dev_logs;
 
--- 2. 檢查測試資料
--- SELECT * FROM dev_logs LIMIT 1;
+-- 驗證 RPC 函數
+SELECT 
+    '✅ match_dev_logs RPC 函數建立成功！' AS status,
+    routine_name,
+    routine_type
+FROM information_schema.routines
+WHERE routine_name = 'match_dev_logs';
 
--- 3. 測試背景包生成
--- SELECT generate_project_context(NULL, NULL, 5);
+-- ============================================
+-- 使用說明
+-- ============================================
 
--- 4. 檢查 RPC 函數是否存在
--- SELECT routine_name, routine_type FROM information_schema.routines WHERE routine_name LIKE 'match_dev_logs%';
+-- 1. 執行此 SQL 腳本（在 Supabase SQL Editor）
+-- 2. 確認看到「✅ dev_logs 資料表建立成功！」訊息
+-- 3. 確認看到「✅ match_dev_logs RPC 函數建立成功！」訊息
+-- 4. 啟動 DevMemory_Streamlit_UI_V2.py 開始使用
+
+-- ============================================
+-- 常見問題排查
+-- ============================================
+
+-- Q1: 如何檢查 pgvector 是否啟用？
+-- A1: SELECT * FROM pg_extension WHERE extname = 'vector';
+
+-- Q2: 如何檢查 RPC 函數是否存在？
+-- A2: SELECT routine_name FROM information_schema.routines WHERE routine_name = 'match_dev_logs';
+
+-- Q3: 如何刪除所有記錄重新開始？
+-- A3: TRUNCATE TABLE dev_logs RESTART IDENTITY CASCADE;
+
+-- Q4: 如何手動測試 RPC 函數？
+-- A4: 需要先生成 embedding，然後：
+--     SELECT * FROM match_dev_logs(
+--         '[0.1, 0.2, ..., 0.5]'::vector(1536),
+--         5
+--     );
