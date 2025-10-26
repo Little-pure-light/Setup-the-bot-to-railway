@@ -275,7 +275,7 @@ class BehaviorModule(BaseModule):
                 
                 self.personality_vector[trait] = new_value
                 
-                self.log_debug(f"  {trait}: {old_value:.3f} → {new_value:.3f} (Δ{adjustment:+.3f})")
+                self.log_info(f"  {trait}: {old_value:.3f} → {new_value:.3f} (Δ{adjustment:+.3f})")
     
     async def get_personality_vector(self) -> Dict[str, float]:
         """取得當前人格向量"""
