@@ -18,7 +18,7 @@
           </div>
         </div>
       </div>
-      
+
       <div class="input-area">
         <input 
           v-model="userInput" 
@@ -30,7 +30,7 @@
           發送
         </button>
       </div>
-      
+
       <div class="file-upload-area">
         <input 
           type="file" 
@@ -48,7 +48,7 @@
         <span v-if="uploadedFile" class="file-name">{{ uploadedFile }}</span>
       </div>
     </div>
-    
+
     <div class="sidebar">
       <h3>💭 記憶列表</h3>
       <div class="memories-list">
@@ -58,7 +58,7 @@
           <small>{{ formatDate(memory.created_at) }}</small>
         </div>
       </div>
-      
+
       <h3>😊 情緒狀態</h3>
       <div class="emotion-chart">
         <div v-for="emotion in emotionalStates" :key="emotion.id" class="emotion-item">
@@ -101,32 +101,32 @@ export default {
     },
     async sendMessage() {
       if (!this.userInput.trim()) return
-      
+
       const userMessage = this.userInput.trim()
       this.messages.push({
         type: 'user',
         content: userMessage,
         timestamp: new Date().toLocaleTimeString('zh-TW')
       })
-      
+
       this.userInput = ''
       this.isLoading = true
       this.scrollToBottom()
-      
+
       try {
         const response = await axios.post(`${API_URL}/api/chat`, {
           user_message: userMessage,
           conversation_id: this.conversationId,
           user_id: this.userId
         })
-        
+
         this.messages.push({
           type: 'assistant',
           content: response.data.assistant_message,
           emotion: response.data.emotion_analysis,
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
-        
+
         this.loadMemories()
         this.loadEmotionalStates()
       } catch (error) {
@@ -160,13 +160,13 @@ export default {
     async handleFileUpload(event) {
       const file = event.target.files[0]
       if (!file) return
-      
+
       const formData = new FormData()
       formData.append('file', file)
       formData.append('conversation_id', this.conversationId)
-      
+
       this.isLoading = true
-      
+
       try {
         const response = await axios.post(`${API_URL}/api/upload`, formData, {
           headers: { 'Content-Type': 'multipart/form-data' }

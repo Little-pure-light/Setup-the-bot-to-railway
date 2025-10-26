@@ -107,6 +107,16 @@ async def root():
         "status": "running"
     }
 
+from fastapi.responses import JSONResponse
+import datetime
+
+# 新增測試日期的API
+@app.get("/api/test-date")
+async def test_date():
+    now = datetime.datetime.utcnow()  # 獲取標準的 UTC 時間
+    iso_date = now.isoformat() + "Z"  # 格式化為 ISO 標準
+    return JSONResponse(content={"timestamp": iso_date})
+
 if __name__ == "__main__":
     import os
     import uvicorn
