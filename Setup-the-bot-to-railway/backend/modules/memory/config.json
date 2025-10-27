@@ -1,0 +1,44 @@
+{
+  "name": "memory",
+  "enabled": true,
+  "version": "2.0.0",
+  "description": "AI 數字宇宙的中樞神經資料層",
+  "type": "core",
+  "load_priority": 1,
+  "tokenizer_name": "cl100k_base",
+  "tables": {
+    "conversations": "xiaochenguang_memories",
+    "memories": "xiaochenguang_memories",
+    "reflections": "xiaochenguang_reflections"
+  },
+  "columns_map": {
+    "conversation_id": "conversation_id",
+    "user_id": "user_id",
+    "user_message": "user_message",
+    "assistant_message": "assistant_message",
+    "reflection": "reflection",
+    "token_data": "token_data",
+    "cid": "cid",
+    "created_at": "created_at",
+    "importance_score": "importance_score",
+    "access_count": "access_count",
+    "memory_type": "memory_type",
+    "platform": "platform"
+  },
+  "redis": {
+    "ttl_seconds": 172800,
+    "flush_batch_size": 100
+  },
+  "features": {
+    "short_term_memory": true,
+    "long_term_memory": true,
+    "tokenization": true,
+    "ipfs_integration": false,
+    "auto_flush": true
+  },
+  "dependencies": [
+    "redis",
+    "supabase",
+    "tiktoken"
+  ]
+}
