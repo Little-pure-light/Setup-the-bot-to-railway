@@ -1,7 +1,8 @@
+run = "streamlit run DevMemoryModule/DevMemory_Streamlit_UI_V2.py --server.port=5000 --server.address=0.0.0.0"
+
 modules = ["python-3.11"]
 [agent]
 expertMode = true
-
 [nix]
 channel = "stable-25_05"
 
