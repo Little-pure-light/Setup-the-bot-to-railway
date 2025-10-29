@@ -107,7 +107,7 @@ class MemoryCore:
                 "reflection": reflection,
                 "token_data": token_data,
                 "user_id": user_id,
-                "ts": int(datetime.utcnow().timestamp())
+                "timestamp": int(datetime.utcnow().timestamp())
             }
             
             redis_success = self.redis.store_short_term(

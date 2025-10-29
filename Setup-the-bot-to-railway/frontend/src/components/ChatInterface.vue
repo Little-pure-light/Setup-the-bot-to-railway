@@ -1,5 +1,4 @@
-# 創建修改後的 ChatInterface.vue 文件
-content = '''<template>
+<template>
   <div class="chat-interface">
     <div class="chat-container">
       <div class="messages-area" ref="messagesArea">
@@ -10,6 +9,21 @@ content = '''<template>
               {{ getEmotionEmoji(msg.emotion.dominant_emotion) }} {{ msg.emotion.dominant_emotion }}
             </span>
           </div>
+          
+          <!-- ✨ 新增：Reflection 反思區塊（顯示在 AI 回應下方） -->
+          <div v-if="msg.reflection && msg.type === 'assistant'" class="reflection-block">
+            <div class="reflection-header">💭 反思</div>
+            <div v-if="msg.reflection.summary" class="reflection-summary">
+              {{ msg.reflection.summary }}
+            </div>
+            <div v-if="msg.reflection.causes && msg.reflection.causes.length > 0" class="reflection-causes">
+              <div class="causes-title">🔍 原因分析</div>
+              <div v-for="(cause, idx) in msg.reflection.causes" :key="idx" class="cause-item">
+                {{ cause }}
+              </div>
+            </div>
+          </div>
+          
           <small class="timestamp">{{ msg.timestamp }}</small>
         </div>
         <div v-if="isLoading" class="message assistant">
@@ -72,7 +86,7 @@ content = '''<template>
 <script>
 import axios from 'axios'
 import { CHAT_API } from '../config.js';
-// ✅ 簡單的 API URL 配置
+
 const getApiUrl = () => {
   const url = import.meta.env.VITE_API_URL
   console.log('🔗 [ChatInterface] API URL 環境變數:', url)
@@ -131,7 +145,6 @@ export default {
       
       this.isLoading = true
       
-      // 添加用戶訊息到聊天界面
       this.messages.push({
         type: 'user',
         content: this.userInput,
@@ -159,11 +172,12 @@ export default {
         
         console.log('✅ [ChatInterface] 收到回應:', response.data)
         
-        // 添加 AI 回應
+        // ✨ 添加 AI 回應（包含 reflection 數據）
         this.messages.push({
           type: 'assistant',
           content: response.data.assistant_message,
           emotion: response.data.emotion_analysis,
+          reflection: response.data.reflection || null,  // ← 新增：接收 reflection 數據
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
         
@@ -179,7 +193,6 @@ export default {
           apiUrl: API_URL
         })
         
-        // 用戶友好的錯誤提示
         let errorMessage = '抱歉，發生錯誤了 😢'
         if (error.response?.status === 405) {
           errorMessage = '❌ 方法不被允許 (405) - 檢查後端路由配置'
@@ -210,12 +223,8 @@ export default {
       } catch (error) {
         console.error('❌ [ChatInterface] 載入記憶錯誤:', {
           message: error.message,
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          url: error.config?.url,
-          data: error.response?.data
+          status: error.response?.status
         })
-        // 不中斷應用，繼續運行
         this.memories = []
       }
     },
@@ -223,20 +232,11 @@ export default {
       try {
         console.log('😊 [ChatInterface] 正在載入情緒狀態...')
         const url = `${API_URL}/api/emotional-states/${this.userId}?limit=10`
-        console.log('📍 [ChatInterface] 情緒狀態端點:', url)
         const response = await axios.get(url)
         this.emotionalStates = response.data
         console.log('✅ [ChatInterface] 情緒狀態載入成功:', this.emotionalStates.length, '條')
       } catch (error) {
-        console.warn('⚠️ [ChatInterface] 載入情緒狀態錯誤:', {
-          message: error.message,
-          status: error.response?.status,
-          statusText: error.response?.statusText,
-          url: error.config?.url,
-          endpoint: `${API_URL}/api/emotional-states`
-        })
-        // ⚠️ 注意：如果後端沒有這個端點，會收到 404 或 405 錯誤
-        console.warn('💡 提示：檢查後端是否實現了 /api/emotional-states 端點')
+        console.warn('⚠️ [ChatInterface] 載入情緒狀態錯誤:', error.message)
         this.emotionalStates = []
       }
     },
@@ -263,11 +263,7 @@ export default {
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
       } catch (error) {
-        console.error('❌ [ChatInterface] 檔案上傳錯誤:', {
-          message: error.message,
-          status: error.response?.status,
-          data: error.response?.data
-        })
+        console.error('❌ [ChatInterface] 檔案上傳錯誤:', error.message)
         this.messages.push({
           type: 'system',
           content: '❌ 檔案上傳失敗，請重試',
@@ -377,6 +373,48 @@ export default {
   font-size: 0.8em;
   margin-top: 5px;
   opacity: 0.8;
+}
+
+/* ✨ 新增：Reflection 反思區塊樣式 */
+.reflection-block {
+  margin-top: 8px;
+  padding: 10px 12px;
+  background-color: #f0f7ff;
+  border-left: 3px solid #2196F3;
+  border-radius: 8px;
+  font-size: 0.9em;
+  max-width: 70%;
+}
+
+.reflection-header {
+  font-weight: bold;
+  color: #1976D2;
+  margin-bottom: 6px;
+  font-size: 0.95em;
+}
+
+.reflection-summary {
+  color: #424242;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+.reflection-causes {
+  margin-top: 8px;
+}
+
+.causes-title {
+  font-weight: 600;
+  color: #1976D2;
+  margin-bottom: 4px;
+  font-size: 0.9em;
+}
+
+.cause-item {
+  padding: 4px 0;
+  color: #616161;
+  font-size: 0.85em;
+  line-height: 1.3;
 }
 
 .timestamp {
@@ -532,25 +570,9 @@ export default {
   .emotions-section {
     flex: 1;
   }
-}
-</style>
-'''
-
-# 寫入文件
-with open('ChatInterface_modified.vue', 'w', encoding='utf-8') as f:
-    f.write(content)
-
-print("✅ 修改完成！")
-print("📝 文件已生成：ChatInterface_modified.vue")
-print(f"📊 文件大小: {len(content)} 字節")
-print(f"📈 總行數: {len(content.split(chr(10)))}")
-Result
-{
-  "results": [],
-  "logs": {
-    "stdout": [
-      "✅ 修改完成！\n📝 文件已生成：ChatInterface_modified.vue\n📊 文件大小: 12820 字節\n📈 總行數: 540\n"
-    ],
-    "stderr": []
+  
+  .reflection-block {
+    max-width: 90%;
   }
 }
+</style>

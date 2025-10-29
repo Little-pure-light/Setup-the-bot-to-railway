@@ -18,10 +18,56 @@ class RedisInterface:
             redis_client: Redis 客戶端（如為 None 則使用 redis_mock）
         """
         self.redis = redis_client
-        self.ttl_seconds = int(os.getenv("MEMORY_REDIS_TTL_SECONDS", "172800"))  # 預設 2 天
+        self.ttl_seconds = int(os.getenv("MEMORY_REDIS_TTL_SECONDS", "86400"))  # 預設 24 小時
         
+        # 如果沒有傳入 redis_client，嘗試自動初始化
         if self.redis is None:
-            self._init_redis_mock()
+            self._auto_init_redis()
+    
+    def _auto_init_redis(self):
+        """
+        自動初始化 Redis（優先真實連接，降級到 Mock）
+        支援格式：
+        - REDIS_ENDPOINT + REDIS_TOKEN (Upstash 格式，支援 SSL)
+        - REDIS_URL (標準格式)
+        - Redis Mock (降級方案)
+        """
+        # 方案 1：使用 REDIS_ENDPOINT + REDIS_TOKEN (Upstash 格式)
+        redis_endpoint = os.getenv("REDIS_ENDPOINT")
+        redis_token = os.getenv("REDIS_TOKEN")
+        
+        if redis_endpoint and redis_token:
+            try:
+                import redis
+                self.redis = redis.Redis(
+                    host=redis_endpoint,
+                    port=6379,
+                    password=redis_token,
+                    ssl=True,
+                    ssl_cert_reqs=None,
+                    decode_responses=True
+                )
+                # 測試連接
+                self.redis.ping()
+                print(f"✅ Redis 已連接（Upstash SSL 模式）: {redis_endpoint}")
+                return
+            except Exception as e:
+                print(f"⚠️ Redis Upstash 連接失敗: {e}，嘗試其他方案...")
+        
+        # 方案 2：使用標準 REDIS_URL
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            try:
+                import redis
+                self.redis = redis.from_url(redis_url, decode_responses=True)
+                self.redis.ping()
+                print(f"✅ Redis 已連接（URL 模式）")
+                return
+            except Exception as e:
+                print(f"⚠️ Redis URL 連接失敗: {e}，降級到 Mock 模式...")
+        
+        # 方案 3：降級到 Redis Mock
+        self._init_redis_mock()
     
     def _init_redis_mock(self):
         """初始化 Redis Mock（用於開發環境）"""
