@@ -5,6 +5,7 @@ modules = ["python-3.11"]
 expertMode = true
 [nix]
 channel = "stable-25_05"
+packages = ["cargo", "libiconv", "libxcrypt", "rustc"]
 
 [workflows]
 runButton = "Project"
@@ -16,15 +17,15 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "開發者記憶助手 V2"
+args = "小宸光 FastAPI 後端"
 
 [[workflows.workflow]]
-name = "開發者記憶助手 V2"
+name = "小宸光 FastAPI 後端"
 author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "streamlit run DevMemoryModule/DevMemory_Streamlit_UI_V2.py --server.port 5000 --server.address 0.0.0.0 --server.headless true"
+args = "cd Setup-the-bot-to-railway && python main.py"
 waitForPort = 5000
 
 [workflows.workflow.metadata]
