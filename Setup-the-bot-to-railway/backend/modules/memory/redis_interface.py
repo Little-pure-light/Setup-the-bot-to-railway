@@ -32,29 +32,50 @@ class RedisInterface:
         - REDIS_URL (標準格式)
         - Redis Mock (降級方案)
         """
-        # 方案 1：使用 REDIS_ENDPOINT + REDIS_TOKEN (Upstash 格式)
+        # 方案 1：使用 REDIS_URL（最優先，支援完整 URL 格式）
+        redis_url = os.getenv("REDIS_URL") or os.getenv("REDIS_ENDPOINT")
+        
+        if redis_url:
+            try:
+                import redis
+                
+                # 自動修正：Upstash 需要 SSL，將 redis:// 改成 rediss://
+                if redis_url.startswith("redis://"):
+                    redis_url = redis_url.replace("redis://", "rediss://", 1)
+                    print(f"🔧 [AUTO-FIX] 啟用 SSL：redis:// → rediss://")
+                
+                self.redis = redis.from_url(redis_url, decode_responses=True)
+                self.redis.ping()
+                print(f"✅ Redis 已連接（URL 模式）")
+                return
+            except Exception as e:
+                print(f"⚠️ Redis URL 連接失敗: {type(e).__name__}: {e}")
+                print(f"⚠️ 嘗試其他方案...")
+        
+        # 方案 2：使用 REDIS_ENDPOINT + REDIS_TOKEN（分離格式，僅用於純 hostname）
         redis_endpoint = os.getenv("REDIS_ENDPOINT")
         redis_token = os.getenv("REDIS_TOKEN")
         
-        if redis_endpoint and redis_token:
+        # 確保不是 URL 格式（已在方案 1 處理）
+        if redis_endpoint and redis_token and not redis_endpoint.startswith(('redis://', 'rediss://')):
             try:
                 import redis
                 self.redis = redis.Redis(
-                    host=redis_endpoint,
+                    host=redis_endpoint.strip(),
                     port=6379,
                     password=redis_token,
                     ssl=True,
                     ssl_cert_reqs=None,
                     decode_responses=True
                 )
-                # 測試連接
                 self.redis.ping()
-                print(f"✅ Redis 已連接（Upstash SSL 模式）: {redis_endpoint}")
+                print(f"✅ Redis 已連接（Endpoint + Token 模式）: {redis_endpoint}")
                 return
             except Exception as e:
-                print(f"⚠️ Redis Upstash 連接失敗: {e}，嘗試其他方案...")
+                print(f"⚠️ Redis Endpoint+Token 連接失敗: {type(e).__name__}: {e}")
+                print(f"⚠️ 降級到 Mock 模式...")
         
-        # 方案 2：使用標準 REDIS_URL
+        # 方案 3：使用標準 REDIS_URL（再次檢查，防止重複）
         redis_url = os.getenv("REDIS_URL")
         if redis_url:
             try:

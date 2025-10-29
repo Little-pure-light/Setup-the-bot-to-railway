@@ -14,6 +14,10 @@ class RedisMock:
         self._storage: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.Lock()
     
+    
+    def ping(self) -> bool:
+        """測試連接"""
+        return True
     def set(self, key: str, value: str, ex: Optional[int] = None) -> bool:
         """設置鍵值對，可選擇過期時間（秒）"""
         with self._lock:
@@ -153,6 +157,26 @@ class RedisMock:
             
             return len(item["value"])
     
+    
+    def rpush(self, key: str, *values: str) -> int:
+        """將值推入列表尾部"""
+        with self._lock:
+            if key not in self._storage:
+                self._storage[key] = {
+                    "value": [],
+                    "expire_at": None,
+                    "created_at": datetime.now()
+                }
+            
+            item = self._storage[key]
+            if not isinstance(item["value"], list):
+                item["value"] = []
+            
+            # 將所有值推入列表尾部
+            for value in values:
+                item["value"].append(value)
+            
+            return len(item["value"])
     def lpop(self, key: str) -> Optional[str]:
         """從列表頭部彈出一個值"""
         with self._lock:

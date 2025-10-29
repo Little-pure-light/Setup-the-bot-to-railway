@@ -9,21 +9,6 @@
               {{ getEmotionEmoji(msg.emotion.dominant_emotion) }} {{ msg.emotion.dominant_emotion }}
             </span>
           </div>
-          
-          <!-- ✨ 新增：Reflection 反思區塊（顯示在 AI 回應下方） -->
-          <div v-if="msg.reflection && msg.type === 'assistant'" class="reflection-block">
-            <div class="reflection-header">💭 反思</div>
-            <div v-if="msg.reflection.summary" class="reflection-summary">
-              {{ msg.reflection.summary }}
-            </div>
-            <div v-if="msg.reflection.causes && msg.reflection.causes.length > 0" class="reflection-causes">
-              <div class="causes-title">🔍 原因分析</div>
-              <div v-for="(cause, idx) in msg.reflection.causes" :key="idx" class="cause-item">
-                {{ cause }}
-              </div>
-            </div>
-          </div>
-          
           <small class="timestamp">{{ msg.timestamp }}</small>
         </div>
         <div v-if="isLoading" class="message assistant">
@@ -56,6 +41,25 @@
     </div>
 
     <div class="sidebar">
+      <!-- ✨ 新增：Reflection 反思區塊（右側顯示） -->
+      <div class="reflections-section">
+        <h3>💭 反思</h3>
+        <div v-if="latestReflection" class="reflection-display">
+          <div v-if="latestReflection.summary" class="reflection-summary">
+            {{ latestReflection.summary }}
+          </div>
+          <div v-if="latestReflection.causes && latestReflection.causes.length > 0" class="reflection-causes">
+            <div class="causes-title">🔍 原因分析</div>
+            <div v-for="(cause, idx) in latestReflection.causes" :key="idx" class="cause-item">
+              {{ cause }}
+            </div>
+          </div>
+        </div>
+        <div v-else class="empty-state">
+          暫無反思數據
+        </div>
+      </div>
+      
       <div class="memories-section">
         <h3>💭 記憶列表</h3>
         <div v-if="memories.length > 0" class="memories-list">
@@ -111,6 +115,7 @@ export default {
       isLoading: false,
       memories: [],
       emotionalStates: [],
+      latestReflection: null,
       conversationId: this.generateConversationId(),
       userId: 'user_' + Date.now()
     }
@@ -172,14 +177,19 @@ export default {
         
         console.log('✅ [ChatInterface] 收到回應:', response.data)
         
-        // ✨ 添加 AI 回應（包含 reflection 數據）
+        // ✨ 添加 AI 回應
         this.messages.push({
           type: 'assistant',
           content: response.data.assistant_message,
           emotion: response.data.emotion_analysis,
-          reflection: response.data.reflection || null,  // ← 新增：接收 reflection 數據
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
+        
+        // ✨ 更新右側 Reflection 區塊
+        if (response.data.reflection) {
+          this.latestReflection = response.data.reflection
+          console.log('💭 [ChatInterface] 更新 Reflection:', this.latestReflection)
+        }
         
         this.loadMemories()
         this.loadEmotionalStates()
@@ -509,14 +519,16 @@ export default {
 }
 
 .memories-section,
-.emotions-section {
+.emotions-section,
+.reflections-section {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
 .memories-section h3,
-.emotions-section h3 {
+.emotions-section h3,
+.reflections-section h3 {
   margin: 0;
   font-size: 1em;
   color: #333;
@@ -545,6 +557,49 @@ export default {
   border-left-color: #FF9800;
 }
 
+/* ✨ Reflection 反思區塊樣式 */
+.reflection-display {
+  padding: 12px;
+  background-color: #f0f7ff;
+  border-left: 3px solid #2196F3;
+  border-radius: 8px;
+  font-size: 0.9em;
+}
+
+.reflection-summary {
+  color: #424242;
+  margin-bottom: 10px;
+  line-height: 1.4;
+  font-weight: 500;
+}
+
+.reflection-causes {
+  margin-top: 10px;
+}
+
+.causes-title {
+  font-weight: 600;
+  color: #1976D2;
+  margin-bottom: 6px;
+  font-size: 0.9em;
+}
+
+.cause-item {
+  padding: 4px 0;
+  color: #616161;
+  font-size: 0.85em;
+  line-height: 1.4;
+  padding-left: 12px;
+  position: relative;
+}
+
+.cause-item::before {
+  content: "•";
+  position: absolute;
+  left: 0;
+  color: #2196F3;
+}
+
 .empty-state {
   color: #999;
   font-size: 0.9em;
@@ -567,12 +622,9 @@ export default {
   }
   
   .memories-section,
-  .emotions-section {
+  .emotions-section,
+  .reflections-section {
     flex: 1;
-  }
-  
-  .reflection-block {
-    max-width: 90%;
   }
 }
 </style>
