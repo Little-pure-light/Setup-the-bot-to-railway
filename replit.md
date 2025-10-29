@@ -12,6 +12,38 @@ XiaoChenGuang (小宸光) is an AI companion system with personality learning, e
 
 The system combines Vue 3 frontend with FastAPI backend, using Supabase PostgreSQL for persistence and Redis for short-term memory caching.
 
+## Recent Changes
+
+### 2025-10-29: Redis Connection Fix & UI Improvements
+
+**Problem Identified**: Redis connection failures due to SSL requirement for Upstash service.
+
+**Root Cause**: Upstash Redis requires SSL connections (`rediss://` protocol), but environment variables used standard `redis://` format, causing "Connection closed by server" errors.
+
+**Fixes Applied**:
+
+1. **Redis Interface Auto-SSL Conversion** (`backend/modules/memory/redis_interface.py`):
+   - Automatically converts `redis://` to `rediss://` for Upstash compatibility
+   - Supports both `REDIS_URL` and `REDIS_ENDPOINT` environment variables
+   - Removes unsupported SSL certificate parameters
+   - No credential logging (security reviewed and approved)
+
+2. **RedisMock Enhancements** (`backend/redis_mock.py`):
+   - Added `ping()` method for initialization health checks
+   - Added `rpush()` method for queue operation support
+   - Provides complete fallback functionality when Redis unavailable
+
+3. **Frontend Reflection UI** (`frontend/src/components/ChatInterface.vue`):
+   - Relocated reflection display from message blocks to dedicated right sidebar
+   - Added `latestReflection` data binding
+   - Improved visual hierarchy with dedicated "💭 最新反思" section
+
+**Testing Status**: All changes passed Architect security review. Redis connectivity verified with PING/SET/GET operations.
+
+**Deployment Note**: Works with both `redis://` and `rediss://` URL formats - automatic conversion ensures compatibility.
+
+---
+
 ## User Preferences
 
 Preferred communication style: Simple, everyday language.
