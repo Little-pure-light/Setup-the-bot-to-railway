@@ -11,9 +11,9 @@ from modules.memory_system import MemorySystem
 
 router = APIRouter()
 logger = logging.getLogger("chat_router")
-# 注意：emotional-states 路由已在 memory_router.py 中定義，這裡移除重複定義
 
 _new_memory_core = None
+_reflection_storage = None
 
 def get_new_memory_core():
     """獲取新記憶模組核心（延遲初始化）"""
@@ -27,6 +27,29 @@ def get_new_memory_core():
             logger.warning(f"⚠️ 新記憶模組初始化失敗: {e}")
             _new_memory_core = None
     return _new_memory_core
+
+def get_reflection_storage():
+    """獲取反思儲存服務（延遲初始化）"""
+    global _reflection_storage
+    if _reflection_storage is None:
+        try:
+            from backend.modules.reflection_storage import ReflectionStorage
+            from backend.modules.memory.redis_interface import RedisInterface
+            from backend.modules.pinecone_handler import PineconeHandler
+            
+            redis_interface = RedisInterface()
+            pinecone_handler = PineconeHandler()
+            
+            _reflection_storage = ReflectionStorage(
+                redis_interface=redis_interface,
+                supabase_client=supabase,
+                pinecone_handler=pinecone_handler
+            )
+            logger.info("✅ 反思儲存服務已啟用")
+        except Exception as e:
+            logger.warning(f"⚠️ 反思儲存服務初始化失敗: {e}")
+            _reflection_storage = None
+    return _reflection_storage
 
 class ChatRequest(BaseModel):
     user_message: str
@@ -115,6 +138,24 @@ async def chat(request: ChatRequest):
                 if reflection_response.get("success"):
                     reflection_result = reflection_response.get("reflection")
                     logger.info(f"🧠 反思完成（置信度: {reflection_result.get('confidence', 0):.2f}）")
+                    
+                    # === 階段1.5：反思儲存（三層架構：Redis + Supabase + Pinecone）===
+                    reflection_storage = get_reflection_storage()
+                    if reflection_storage and reflection_result:
+                        storage_result = await reflection_storage.store_reflection(
+                            reflection_data=reflection_result,
+                            conversation_id=request.conversation_id,
+                            user_id=request.user_id,
+                            related_message_id=None
+                        )
+                        
+                        if storage_result.get("overall_success"):
+                            logger.info(f"💾 反思已儲存到三層架構 (ID: {storage_result.get('reflection_id')})")
+                            logger.info(f"   - Redis: {'✅' if storage_result.get('redis_success') else '❌'}")
+                            logger.info(f"   - Supabase: {'✅' if storage_result.get('supabase_success') else '❌'}")
+                            logger.info(f"   - Pinecone: {'✅' if storage_result.get('pinecone_success') else '❌'}")
+                        else:
+                            logger.warning(f"⚠️ 反思儲存部分失敗")
                     
                     # === 階段2：行為調節（基於反思結果）===
                     behavior_module = await controller.get_module("behavior")

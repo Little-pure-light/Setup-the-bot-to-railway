@@ -39,6 +39,10 @@ externalPort = 3001
 localPort = 5000
 externalPort = 80
 
+[[ports]]
+localPort = 38493
+externalPort = 3000
+
 [deployment]
 deploymentTarget = "autoscale"
 run = ["bash", "-c", "cd Setup-the-bot-to-railway && uvicorn main:app --host 0.0.0.0 --port 5000"]

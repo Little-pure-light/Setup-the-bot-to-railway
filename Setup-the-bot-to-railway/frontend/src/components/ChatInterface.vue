@@ -60,6 +60,8 @@
         </div>
       </div>
       
+      <!-- ⚠️ 已隱藏：記憶列表區塊（需要時可重新啟用） -->
+      <!--
       <div class="memories-section">
         <h3>💭 記憶列表</h3>
         <div v-if="memories.length > 0" class="memories-list">
@@ -71,7 +73,10 @@
           暫無記憶
         </div>
       </div>
+      -->
 
+      <!-- ⚠️ 已隱藏：情緒狀態區塊（需要時可重新啟用） -->
+      <!--
       <div class="emotions-section">
         <h3>😊 情緒狀態</h3>
         <div v-if="emotionalStates.length > 0" class="emotions-list">
@@ -83,6 +88,7 @@
           暫無情緒數據
         </div>
       </div>
+      -->
     </div>
   </div>
 </template>
