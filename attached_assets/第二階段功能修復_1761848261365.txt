@@ -1,0 +1,75 @@
+小宸光專案二階段功能修復任務（Replit修改專用）
+🔧 修復目標
+
+請在「不更動原始邏輯設計」前提下，完成以下三個功能修復與整合：
+
+✅ 功能一：自動觸發流程圖
+
+當使用者完成手勢對話（含答案），即自動觸發射擊模組（Assistant2 / MetaReflector）
+
+輸入：最近得分用戶與 AI 對話（從 Redis 或 Supabase 獲取）
+
+輸出：回顧摘要內容（含邏輯、情緒、自我建議）
+
+✅ 功能二：回憶資料（Redis + Supabase + P
+
+每次思考結果記錄：
+
+Redis（快取）
+
+僅保留最新5筆參考資料
+
+資料結構：JSON格式（含摘要、時間、應答對話id）
+
+Supabase（永久儲存）
+
+表格：xiaochenguang_reflections
+
+新增位置列：
+
+欄位	類型別	說明
+reflection_content	文字	總結摘要內容
+analysis_tags	json	標籤分析（情緒、建議等）
+reflection_level	json	多層次分析資料（優勢/邏輯/情緒）
+personality_embedding	向量/json	取得成果
+related_message_id	UUID	回覆對話記錄 id
+
+Pinecone（利於儲存）
+
+環境變數請讀取.env/ Secrets
+
+PINECONE_API_KEY
+
+PINECONE_ENVIRONMENT
+
+PINECONE_INDEX_NAME
+
+輸入personality_embeddingPinecone 支援索引中，方便後續查詢
+
+✅ 功能三：顯示不適（減輕障礙）
+僅保留「反思模組區塊」，隱藏其他側欄區域
+- 優先讀取 Redis 快取資料，無資料時再讀 Supabase 歷史紀錄
+
+補充僅顯示「預計區塊」的最新支出數據
+
+資
+
+📌 開發規則與限制
+
+請勿刪減或覆寫原有模組／功能邏輯
+
+所有新增欄位須確保相鄰相容（不可導致錯誤）
+
+若資料表不存在欄位，請自行於Supabase建立
+
+有不清楚疑惑的問題點,請務必詢問達成共識後才執行動作
+
+所有動作須在Replit環境下測試通過，並返回確認點
+
+✅ 驗收標準（開發完成需完成）
+驗收項目	驗證方式
+自動觸發	對話後，應自動回覆筆記
+Redis 緩存期待	在Redis中能立即查到1筆以上
+Supabase 資料完整書寫	每筆反思應含摘要、指示、分類標籤等欄位
+Pinecone 讀取寫入成功	可以從索引中查詢到最近一次反思
+前端顯示正常	唯一的反射塊顯示最新的反射，其他的塊不顯示
