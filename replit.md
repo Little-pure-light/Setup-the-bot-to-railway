@@ -14,6 +14,58 @@ The system combines Vue 3 frontend with FastAPI backend, using Supabase PostgreS
 
 ## Recent Changes
 
+### 2025-10-30: Phase 2 - Three-Tier Reflection Storage System
+
+**Feature Implemented**: Comprehensive reflection storage with Redis cache, Supabase permanent storage, and Pinecone vector embeddings.
+
+**New Components**:
+
+1. **Pinecone Vector Database Handler** (`backend/modules/pinecone_handler.py`):
+   - Uses Pinecone's built-in `llama-text-embed-v2` model for automatic vector generation (4096 dimensions)
+   - Supports vector storage, similarity search, and deletion
+   - Auto-creates serverless index with cosine metric
+   - Deferred embedding generation (on-demand, not during initialization)
+
+2. **Reflection Storage Service** (`backend/modules/reflection_storage.py`):
+   - Three-tier storage architecture:
+     - **Redis**: Latest 5 reflections with 24-hour TTL (fast cache)
+     - **Supabase**: Permanent storage in `xiaochenguang_reflections` table
+     - **Pinecone**: Vector embeddings for semantic similarity search
+   - Fallback mechanism: Reads from Redis first, then Supabase if cache miss
+   - Success threshold: ≥2 layers must succeed for overall success
+
+3. **Chat Router Integration** (`backend/chat_router.py`):
+   - Auto-triggers three-tier storage after reflection analysis (Phase 1.5)
+   - Detailed logging for each storage layer's success/failure status
+   - Non-blocking: Storage failures do not interrupt main chat flow
+   - New `get_reflection_storage()` lazy initialization function
+
+4. **Frontend UI Simplification** (`frontend/src/components/ChatInterface.vue`):
+   - Hidden memory list and emotional states sections (commented out for easy restoration)
+   - Displays only reflection module in right sidebar
+   - Cleaner, focused user interface
+
+**Database Schema**: New Supabase table `xiaochenguang_reflections` with fields:
+- `reflection_content` (TEXT): Summary content
+- `analysis_tags` (JSONB): Emotion tags and analysis metadata
+- `reflection_level` (JSONB): Multi-level analysis data (observation, causes, improvements)
+- `personality_embedding` (JSONB): Vector representation placeholder
+- `related_message_id` (UUID): Linked conversation record
+- `confidence_score` (FLOAT): Reflection quality score (0-1)
+
+**Architect Review**: ✅ Passed with recommendations for future performance monitoring
+- Critical finding: Pinecone operations remain synchronous (potential latency spikes)
+- Suggested next steps: Add instrumentation, consider background tasks if needed
+
+**Testing Status**: All components initialized successfully, workflow running without errors.
+
+**Environment Variables Required**:
+- `PINECONE_API_KEY` ✅
+- `PINECONE_ENVIRONMENT` ✅
+- `PINECONE_INDEX_NAME` ✅
+
+---
+
 ### 2025-10-29: Redis Connection Fix & UI Improvements
 
 **Problem Identified**: Redis connection failures due to SSL requirement for Upstash service.
