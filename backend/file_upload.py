@@ -5,6 +5,7 @@ from backend.modules.memory.redis_interface import RedisInterface
 import logging
 import json
 import base64
+import os
 from datetime import datetime
 from typing import Optional
 import io
@@ -134,6 +135,13 @@ async def analyze_image_with_vision(file_bytes: bytes, filename: str) -> dict:
     try:
         openai_client = get_openai_client()
         
+        file_ext = os.path.splitext(filename.lower())[1]
+        mime_type = "image/jpeg"
+        if file_ext == '.png':
+            mime_type = "image/png"
+        elif file_ext in ['.jpg', '.jpeg']:
+            mime_type = "image/jpeg"
+        
         base64_image = base64.b64encode(file_bytes).decode('utf-8')
         
         response = openai_client.chat.completions.create(
@@ -149,7 +157,7 @@ async def analyze_image_with_vision(file_bytes: bytes, filename: str) -> dict:
                         {
                             "type": "image_url",
                             "image_url": {
-                                "url": f"data:image/jpeg;base64,{base64_image}"
+                                "url": f"data:{mime_type};base64,{base64_image}"
                             }
                         }
                     ]

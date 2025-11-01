@@ -118,7 +118,10 @@ async def archive_conversation(request: ArchiveRequest):
         redis_conversations = await get_conversation_from_redis(request.conversation_id)
         supabase_conversations = await get_conversation_from_supabase(request.conversation_id)
         
-        all_conversations = redis_conversations if redis_conversations else supabase_conversations
+        all_conversations = supabase_conversations if supabase_conversations else redis_conversations
+        
+        logger.info(f"📊 數據來源 - Redis: {len(redis_conversations)} 條, Supabase: {len(supabase_conversations)} 條")
+        logger.info(f"📦 使用 {'Supabase (完整)' if supabase_conversations else 'Redis (快取)'} 數據進行封存")
         
         if not all_conversations:
             raise HTTPException(
@@ -174,16 +177,22 @@ async def archive_conversation(request: ArchiveRequest):
             name=f"conversation_{request.conversation_id}"
         )
         
-        if not ipfs_result.get("success"):
+        ipfs_cid = ipfs_result.get("cid") or ipfs_result.get("ipfs_hash") or ipfs_result.get("local_cid")
+        
+        if not ipfs_cid:
             raise HTTPException(
                 status_code=500,
-                detail=f"IPFS 上傳失敗: {ipfs_result.get('error', 'Unknown error')}"
+                detail=f"無法生成 CID: {ipfs_result.get('error', 'Unknown error')}"
             )
         
-        ipfs_cid = ipfs_result.get("cid") or ipfs_result.get("ipfs_hash")
+        uploaded_to_pinata = ipfs_result.get("success", False)
         gateway_url = ipfs_result.get("gateway_url", f"https://gateway.pinata.cloud/ipfs/{ipfs_cid}")
         
-        logger.info(f"✅ 對話已上傳到 IPFS: {ipfs_cid}")
+        if uploaded_to_pinata:
+            logger.info(f"✅ 對話已上傳到 Pinata IPFS: {ipfs_cid}")
+        else:
+            logger.warning(f"⚠️ Pinata 上傳失敗，使用本地 CID: {ipfs_cid}")
+            gateway_url = f"ipfs://{ipfs_cid}"
         
         try:
             archive_table = os.getenv("SUPABASE_ARCHIVE_TABLE", "conversation_archive")
