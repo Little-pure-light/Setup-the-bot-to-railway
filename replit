@@ -1,0 +1,43 @@
+run = "streamlit run DevMemoryModule/DevMemory_Streamlit_UI_V2.py --server.port=5000 --server.address=0.0.0.0"
+modules = ["python-3.11", "nodejs-20"]
+[agent]
+expertMode = true
+[nix]
+channel = "stable-25_05"
+packages = ["cargo", "libiconv", "libxcrypt", "rustc"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "小宸光 FastAPI 後端"
+
+[[workflows.workflow]]
+name = "小宸光 FastAPI 後端"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+waitForPort = 5000
+
+[[ports]]
+localPort = 3000
+externalPort = 3001
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[deployment]
+deploymentTarget = "autoscale"
+run = ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
