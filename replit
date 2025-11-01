@@ -1,10 +1,9 @@
-run = "streamlit run DevMemoryModule/DevMemory_Streamlit_UI_V2.py --server.port=5000 --server.address=0.0.0.0"
-modules = ["python-3.11", "nodejs-20"]
+modules = ["python-3.11"]
 [agent]
 expertMode = true
+
 [nix]
 channel = "stable-25_05"
-packages = ["cargo", "libiconv", "libxcrypt", "rustc"]
 
 [workflows]
 runButton = "Project"
@@ -16,19 +15,19 @@ author = "agent"
 
 [[workflows.workflow.tasks]]
 task = "workflow.run"
-args = "小宸光 FastAPI 後端"
+args = "開發者記憶助手 V2"
 
 [[workflows.workflow]]
-name = "小宸光 FastAPI 後端"
+name = "開發者記憶助手 V2"
 author = "agent"
-
-[workflows.workflow.metadata]
-outputType = "webview"
 
 [[workflows.workflow.tasks]]
 task = "shell.exec"
-args = "python main.py"
+args = "streamlit run DevMemoryModule/DevMemory_Streamlit_UI_V2.py --server.port 5000 --server.address 0.0.0.0 --server.headless true"
 waitForPort = 5000
+
+[workflows.workflow.metadata]
+outputType = "webview"
 
 [[ports]]
 localPort = 3000
@@ -38,10 +37,7 @@ externalPort = 3001
 localPort = 5000
 externalPort = 80
 
-[[ports]]
-localPort = 39375
-externalPort = 3000
-
 [deployment]
 deploymentTarget = "autoscale"
-run = ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "5000"]
+run = ["gunicorn", "--bind=0.0.0.0:5000", "--reuse-port", "--workers=2", "--timeout=120", "app:app"]
+build = ["pip", "install", "gunicorn"]
