@@ -1,0 +1,114 @@
+🎯 專案任務：修正並美化聊天介面 UI
+
+## 📁 檔案位置
+frontend/src/components/ChatInterface.vue
+
+---
+
+## 🧩 主要目標
+請重新設計並優化 ChatInterface.vue 的整體介面，使其：
+- 保留現有功能（上傳檔案、上傳圖片、健康檢查、發送訊息等）
+- 在任何螢幕寬度下都能正常顯示（RWD）
+- 採用現代 AI 聊天室風格（ChatGPT / Claude / Notion AI 類型）
+- 視覺上乾淨、流暢、有一致設計感
+
+---
+
+## 🧱 功能與版面修正重點
+
+### 1. 響應式排版（RWD）
+- 修正按鈕群組在窄螢幕時被擠壓或消失的問題
+- 外層容器需使用：
+  ```css
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+若使用 Tailwind，請改用：
+
+html
+複製程式碼
+<div class="flex flex-wrap justify-center gap-3">
+2. 元件美化設計
+將整體介面改為「卡片式圓角」風格
+
+採用淺色主題（白底＋柔和灰階）
+
+使用圓角與陰影：
+
+html
+複製程式碼
+<div class="max-w-3xl mx-auto bg-white shadow-xl rounded-2xl p-6">
+為按鈕套用一致的美化樣式：
+
+html
+複製程式碼
+class="px-4 py-2 rounded-xl bg-gradient-to-r from-blue-500 to-indigo-500 text-white font-semibold hover:opacity-90 transition-all duration-300 shadow-md hover:scale-105"
+建議使用 lucide-react 或 heroicons 加入按鈕圖示：
+
+📁 Upload → Upload icon
+
+🖼️ Image → Image icon
+
+💬 Send → Send icon
+
+⚙️ Health check → Activity icon
+
+3. 輸入框設計
+改成圓角輸入框 + 內陰影：
+
+html
+複製程式碼
+<input class="flex-1 rounded-xl shadow-inner px-4 py-3 focus:ring-2 focus:ring-indigo-400 outline-none" />
+發送按鈕放在右邊，風格一致。
+
+4. 頁面結構
+建議整體結構如下：
+
+html
+複製程式碼
+<div class="min-h-screen bg-gradient-to-b from-gray-50 to-white flex flex-col items-center p-4">
+  <div class="w-full max-w-3xl bg-white shadow-xl rounded-2xl p-6 flex flex-col gap-4">
+    <!-- 聊天紀錄區 -->
+    <div class="flex-1 overflow-y-auto space-y-4">
+      <!-- 單條訊息 -->
+    </div>
+
+    <!-- 按鈕區 -->
+    <div class="flex flex-wrap justify-center gap-3">
+      <button>上傳檔案</button>
+      <button>上傳圖片</button>
+      <button>健康檢查</button>
+    </div>
+
+    <!-- 輸入區 -->
+    <div class="flex gap-2 items-center">
+      <input type="text" placeholder="輸入訊息..." class="flex-1 rounded-xl shadow-inner px-4 py-3 focus:ring-2 focus:ring-indigo-400 outline-none" />
+      <button class="px-4 py-2 rounded-xl bg-indigo-600 text-white hover:bg-indigo-700 transition-all">發送</button>
+    </div>
+  </div>
+</div>
+5. Meta 設定
+請確認 index.html 內 <head> 區塊有：
+
+html
+複製程式碼
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+🌗 額外加分（可選）
+支援 Dark Mode，自動切換背景與文字顏色
+
+按鈕 hover 時加上輕微放大動畫
+
+訊息氣泡設計有區分使用者與系統對話
+
+✅ 驗收條件
+所有按鈕在桌面與手機端都能完整顯示且不變形
+
+輸入框與按鈕排列整齊、間距適中
+
+整體 UI 現代、乾淨、有一致設計語言
+
+執行後請輸出完整修改後的 ChatInterface.vue 內容
+
+最後請回傳訊息：
+「✅ ChatInterface.vue 已完成 RWD 修正與視覺優化
