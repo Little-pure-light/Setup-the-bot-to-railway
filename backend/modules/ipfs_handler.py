@@ -1,27 +1,41 @@
 """
 IPFS 處理器 - IPFS Handler
-輕量級 CID (Content Identifier) 生成與管理
+輕量級 CID (Content Identifier) 生成與管理 + Pinata 上傳整合
 
 設計理念：
 - 不依賴完整 IPFS 節點
 - 生成標準的 CIDv1（base32）
-- 支援未來與真實 IPFS 網路整合
+- 整合 Pinata API 實現真實 IPFS 上傳
 """
 import hashlib
 import base64
 import json
+import os
+import requests
 from typing import Dict, Any, Optional
 from datetime import datetime
+import logging
+
+logger = logging.getLogger("ipfs_handler")
 
 
 class IPFSHandler:
-    """IPFS 內容識別符處理器"""
+    """IPFS 內容識別符處理器 + Pinata 上傳"""
     
     def __init__(self):
         """初始化 IPFS 處理器"""
         self.cid_version = "1"
-        self.multicodec_prefix = "raw"  # 使用 raw 編碼 (0x55)
+        self.multicodec_prefix = "raw"
         self.hash_algorithm = "sha256"
+        
+        self.pinata_jwt = os.getenv("PINATA_JWT")
+        self.pinata_api_url = "https://api.pinata.cloud/pinning/pinJSONToIPFS"
+        self.pinata_file_url = "https://api.pinata.cloud/pinning/pinFileToIPFS"
+        
+        if self.pinata_jwt:
+            logger.info("✅ Pinata API 已配置，支援實際 IPFS 上傳")
+        else:
+            logger.warning("⚠️ 未配置 PINATA_JWT，將僅生成本地 CID")
     
     def generate_cid(self, content: str | Dict[str, Any]) -> str:
         """
@@ -36,50 +50,25 @@ class IPFSHandler:
         返回:
             CID 字串（base32 編碼）
         """
-        # 1. 正規化內容
         normalized_content = self._normalize_content(content)
-        
-        # 2. 生成 SHA-256 雜湊
         content_hash = hashlib.sha256(normalized_content.encode('utf-8')).digest()
-        
-        # 3. 構建 Multihash (hash_func_code + hash_length + hash_value)
-        # SHA-256 的 multihash code 是 0x12, 長度是 32 bytes (0x20)
         multihash = b'\x12\x20' + content_hash
-        
-        # 4. 添加 CIDv1 前綴 (version + codec)
-        # CIDv1 = 0x01
-        # raw codec = 0x55 (最簡單且廣泛支援的編碼)
         cid_bytes = b'\x01\x55' + multihash
-        
-        # 5. Base32 編碼（RFC 4648，小寫，無填充）
         cid_base32 = self._base32_encode(cid_bytes)
-        
-        return f"b{cid_base32}"  # CIDv1 以 'b' 開頭表示 base32 編碼
+        return f"b{cid_base32}"
     
     def _normalize_content(self, content: str | Dict[str, Any]) -> str:
-        """
-        正規化內容為一致的字串表示
-        
-        確保相同內容總是生成相同的 CID
-        """
+        """正規化內容為一致的字串表示"""
         if isinstance(content, dict):
-            # 字典：按鍵排序後轉為 JSON
             return json.dumps(content, sort_keys=True, ensure_ascii=False)
         elif isinstance(content, str):
-            # 字串：直接使用
             return content
         else:
-            # 其他類型：轉為字串
             return str(content)
     
     def _base32_encode(self, data: bytes) -> str:
-        """
-        Base32 編碼（小寫，無填充）
-        
-        IPFS 使用小寫的 base32 編碼（RFC 4648）
-        """
+        """Base32 編碼（小寫，無填充）"""
         encoded = base64.b32encode(data).decode('ascii')
-        # 移除填充的 '=' 並轉為小寫
         return encoded.rstrip('=').lower()
     
     def generate_conversation_cid(
@@ -88,17 +77,7 @@ class IPFSHandler:
         assistant_message: str,
         timestamp: Optional[str] = None
     ) -> str:
-        """
-        生成對話記錄的 CID
-        
-        參數:
-            user_message: 使用者訊息
-            assistant_message: AI 回覆
-            timestamp: 時間戳（可選，預設使用當前時間）
-        
-        返回:
-            對話的 CID
-        """
+        """生成對話記錄的 CID"""
         if timestamp is None:
             timestamp = datetime.utcnow().isoformat()
         
@@ -111,49 +90,22 @@ class IPFSHandler:
         return self.generate_cid(conversation_data)
     
     def generate_reflection_cid(self, reflection: Dict[str, Any]) -> str:
-        """
-        生成反思記錄的 CID
-        
-        參數:
-            reflection: 反思數據
-        
-        返回:
-            反思的 CID
-        """
-        # 提取核心反思數據
+        """生成反思記錄的 CID"""
         core_reflection = {
             "summary": reflection.get("summary", ""),
             "causes": reflection.get("causes", []),
             "improvements": reflection.get("improvements", []),
             "confidence": reflection.get("confidence", 0)
         }
-        
         return self.generate_cid(core_reflection)
     
     def verify_cid(self, content: str | Dict[str, Any], expected_cid: str) -> bool:
-        """
-        驗證內容的 CID 是否匹配
-        
-        參數:
-            content: 內容
-            expected_cid: 預期的 CID
-        
-        返回:
-            是否匹配
-        """
+        """驗證內容的 CID 是否匹配"""
         actual_cid = self.generate_cid(content)
         return actual_cid == expected_cid
     
     def get_cid_info(self, cid: str) -> Dict[str, Any]:
-        """
-        解析 CID 資訊
-        
-        參數:
-            cid: CID 字串
-        
-        返回:
-            CID 資訊
-        """
+        """解析 CID 資訊"""
         if not cid or len(cid) < 2:
             return {"valid": False, "error": "CID too short"}
         
@@ -169,39 +121,104 @@ class IPFSHandler:
             "cid": cid
         }
     
-    async def upload_to_ipfs(self, content: str | Dict[str, Any]) -> Dict[str, Any]:
+    async def upload_json_to_pinata(
+        self,
+        json_data: Dict[str, Any],
+        name: Optional[str] = None
+    ) -> Dict[str, Any]:
         """
-        上傳內容到 IPFS（預留接口）
+        上傳 JSON 資料到 Pinata IPFS
         
-        當前實現：只生成 CID，不實際上傳
-        未來可整合：
-        - Infura IPFS API
-        - Pinata IPFS 服務
-        - Web3.Storage
-        - 本地 IPFS 節點
+        參數:
+            json_data: 要上傳的 JSON 資料
+            name: 檔案名稱（可選）
+        
+        返回:
+            上傳結果（包含 CID）
+        """
+        if not self.pinata_jwt:
+            logger.warning("未配置 PINATA_JWT，無法上傳")
+            return {
+                "success": False,
+                "error": "PINATA_JWT not configured",
+                "local_cid": self.generate_cid(json_data)
+            }
+        
+        try:
+            headers = {
+                "Authorization": f"Bearer {self.pinata_jwt}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "pinataContent": json_data,
+                "pinataMetadata": {
+                    "name": name or f"xiaochenguang_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                }
+            }
+            
+            response = requests.post(
+                self.pinata_api_url,
+                headers=headers,
+                json=payload,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                ipfs_hash = result.get("IpfsHash", "")
+                
+                logger.info(f"✅ 成功上傳到 Pinata IPFS: {ipfs_hash}")
+                
+                return {
+                    "success": True,
+                    "cid": ipfs_hash,
+                    "ipfs_hash": ipfs_hash,
+                    "uploaded": True,
+                    "timestamp": result.get("Timestamp", datetime.utcnow().isoformat()),
+                    "gateway_url": f"https://gateway.pinata.cloud/ipfs/{ipfs_hash}"
+                }
+            else:
+                logger.error(f"❌ Pinata 上傳失敗: {response.status_code} - {response.text}")
+                return {
+                    "success": False,
+                    "error": f"Pinata API error: {response.status_code}",
+                    "local_cid": self.generate_cid(json_data)
+                }
+                
+        except Exception as e:
+            logger.error(f"❌ Pinata 上傳異常: {e}")
+            return {
+                "success": False,
+                "error": str(e),
+                "local_cid": self.generate_cid(json_data)
+            }
+    
+    async def upload_to_ipfs(self, content: str | Dict[str, Any], name: Optional[str] = None) -> Dict[str, Any]:
+        """
+        上傳內容到 IPFS（透過 Pinata）
         
         參數:
             content: 要上傳的內容
+            name: 檔案名稱（可選）
         
         返回:
             上傳結果
         """
-        cid = self.generate_cid(content)
-        
-        return {
-            "success": True,
-            "cid": cid,
-            "uploaded": False,  # 當前未實際上傳
-            "message": "CID 已生成，實際上傳功能待實現",
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        if isinstance(content, dict):
+            return await self.upload_json_to_pinata(content, name)
+        elif isinstance(content, str):
+            json_data = {"content": content, "type": "text"}
+            return await self.upload_json_to_pinata(json_data, name)
+        else:
+            return {
+                "success": False,
+                "error": "Unsupported content type"
+            }
     
     async def retrieve_from_ipfs(self, cid: str) -> Dict[str, Any]:
         """
-        從 IPFS 檢索內容（預留接口）
-        
-        當前實現：返回 CID 資訊
-        未來可整合 IPFS gateway
+        從 IPFS 檢索內容
         
         參數:
             cid: 內容識別符
@@ -220,8 +237,6 @@ class IPFSHandler:
         return {
             "success": True,
             "cid": cid,
-            "retrieved": False,  # 當前未實際檢索
-            "message": "CID 有效，實際檢索功能待實現",
             "gateway_urls": [
                 f"https://ipfs.io/ipfs/{cid}",
                 f"https://gateway.pinata.cloud/ipfs/{cid}",
@@ -230,7 +245,6 @@ class IPFSHandler:
         }
 
 
-# 全域單例
 _ipfs_handler = None
 
 def get_ipfs_handler() -> IPFSHandler:

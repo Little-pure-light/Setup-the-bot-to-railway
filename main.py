@@ -23,6 +23,7 @@ try:
     from backend.memory_router import router as memory_router
     from backend.openai_handler import router as openai_router
     from backend.file_upload import router as file_upload_router
+    from backend.archive_conversation import router as archive_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -58,6 +59,7 @@ try:
     app.include_router(memory_router, prefix="/api")
     app.include_router(openai_router, prefix="/api")
     app.include_router(file_upload_router, prefix="/api")
+    app.include_router(archive_router, prefix="/api")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
