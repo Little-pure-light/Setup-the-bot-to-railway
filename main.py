@@ -4,10 +4,13 @@ load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 from contextlib import asynccontextmanager
 import datetime
 import logging
 import os
+from pathlib import Path
 
 # ✅ 設定日誌
 logging.basicConfig(
@@ -112,6 +115,29 @@ async def fallback_chat(req: Request):
         logger.error(f"⚠️ Chat Endpoint 錯誤: {e}")
         return {"error": str(e)}
 
+# ✅ 靜態文件服務（前端）
+frontend_dist = Path(__file__).parent / "frontend" / "dist"
+if frontend_dist.exists():
+    app.mount("/assets", StaticFiles(directory=frontend_dist / "assets"), name="assets")
+    
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        if full_path.startswith("api/"):
+            return {"error": "API endpoint not found"}, 404
+        
+        file_path = frontend_dist / full_path
+        if file_path.is_file():
+            return FileResponse(file_path)
+        
+        index_path = frontend_dist / "index.html"
+        if index_path.exists():
+            return FileResponse(index_path)
+        
+        return {"error": "Frontend not built"}, 404
+else:
+    logger.warning("⚠️ 前端 dist 目錄不存在，僅提供 API 服務")
+
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=5000)
+    port = int(os.getenv("PORT", 5000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
