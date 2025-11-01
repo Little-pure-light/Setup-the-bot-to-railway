@@ -34,8 +34,9 @@
       <div class="action-buttons">
         <label class="upload-btn">
           📎 上傳檔案
-          <input type="file" @change="handleFileUpload" style="display: none" />
+          <input type="file" @change="handleFileUpload" style="display: none" accept=".txt,.md,.json,.pdf,.docx,.png,.jpg,.jpeg" />
         </label>
+        <button @click="archiveConversation" class="archive-btn">🗂️ 結束對話</button>
         <button @click="goToHealthCheck" class="health-check-btn">📋 健康檢查</button>
       </div>
     </div>
@@ -262,29 +263,106 @@ export default {
       
       try {
         console.log('📤 [ChatInterface] 正在上傳檔案:', file.name)
+        
+        this.messages.push({
+          type: 'system',
+          content: `⏳ 正在上傳檔案 "${file.name}"...`,
+          timestamp: new Date().toLocaleTimeString('zh-TW')
+        })
+        
         const formData = new FormData()
         formData.append('file', file)
         formData.append('conversation_id', this.conversationId)
+        formData.append('user_id', this.userId)
         
-        const response = await axios.post(`${API_URL}/api/upload`, formData, {
+        const response = await axios.post(`${API_URL}/api/upload_file`, formData, {
           headers: {
             'Content-Type': 'multipart/form-data'
           }
         })
         
         console.log('✅ [ChatInterface] 檔案上傳成功:', response.data)
+        
+        const summary = response.data.summary || '檔案已上傳'
+        const fileType = response.data.file_type || ''
+        const parsed = response.data.parsed ? '✅ 已解析' : '⚠️ 未解析'
+        
         this.messages.push({
           type: 'system',
-          content: `📎 檔案 "${file.name}" 已上傳`,
+          content: `📎 檔案上傳成功\n📄 ${file.name} (${fileType})\n${parsed}\n📝 ${summary}`,
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
+        
+        event.target.value = ''
       } catch (error) {
-        console.error('❌ [ChatInterface] 檔案上傳錯誤:', error.message)
+        console.error('❌ [ChatInterface] 檔案上傳錯誤:', error)
         this.messages.push({
           type: 'system',
-          content: '❌ 檔案上傳失敗，請重試',
+          content: `❌ 檔案上傳失敗: ${error.response?.data?.detail || error.message}`,
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
+      }
+    },
+    async archiveConversation() {
+      if (!confirm('確定要結束並封存此對話嗎？對話將被上傳到 IPFS 永久保存。')) {
+        return
+      }
+      
+      try {
+        console.log('🗂️ [ChatInterface] 開始封存對話...')
+        
+        this.messages.push({
+          type: 'system',
+          content: '⏳ 正在封存對話到 IPFS...',
+          timestamp: new Date().toLocaleTimeString('zh-TW')
+        })
+        
+        const response = await axios.post(`${API_URL}/api/archive_conversation`, {
+          conversation_id: this.conversationId,
+          user_id: this.userId,
+          include_attachments: true
+        })
+        
+        console.log('✅ [ChatInterface] 對話封存成功:', response.data)
+        
+        const cid = response.data.ipfs_cid
+        const gatewayUrl = response.data.gateway_url
+        
+        this.messages.push({
+          type: 'system',
+          content: `✅ 對話已封存到 IPFS\n🔗 CID: ${cid}\n🌐 查看: ${gatewayUrl}`,
+          timestamp: new Date().toLocaleTimeString('zh-TW')
+        })
+        
+        alert(`對話已成功封存！\n\nIPFS CID: ${cid}\n\n你可以通過以下網址查看:\n${gatewayUrl}`)
+        
+      } catch (error) {
+        console.error('❌ [ChatInterface] 對話封存錯誤:', error)
+        this.messages.push({
+          type: 'system',
+          content: `❌ 封存失敗: ${error.response?.data?.detail || error.message}`,
+          timestamp: new Date().toLocaleTimeString('zh-TW')
+        })
+      }
+    },
+    handleBeforeUnload(event) {
+      if (this.messages.length > 2) {
+        event.preventDefault()
+        event.returnValue = '你有未封存的對話，確定要離開嗎？'
+        
+        const shouldArchive = confirm('檢測到未封存的對話，是否要自動封存到 IPFS？\n\n點擊「確定」封存，點擊「取消」直接離開')
+        
+        if (shouldArchive) {
+          axios.post(`${API_URL}/api/archive_conversation`, {
+            conversation_id: this.conversationId,
+            user_id: this.userId,
+            include_attachments: true
+          }).then(response => {
+            console.log('✅ 對話已自動封存:', response.data)
+          }).catch(error => {
+            console.error('❌ 自動封存失敗:', error)
+          })
+        }
       }
     },
     goToHealthCheck() {
@@ -298,6 +376,11 @@ export default {
     console.log('💬 Conversation ID:', this.conversationId)
     this.loadMemories()
     this.loadEmotionalStates()
+    
+    window.addEventListener('beforeunload', this.handleBeforeUnload)
+  },
+  beforeUnmount() {
+    window.removeEventListener('beforeunload', this.handleBeforeUnload)
   }
 }
 </script>
@@ -497,6 +580,7 @@ export default {
 }
 
 .upload-btn,
+.archive-btn,
 .health-check-btn {
   padding: 8px 15px;
   background-color: #2196F3;
@@ -509,6 +593,7 @@ export default {
 }
 
 .upload-btn:hover,
+.archive-btn:hover,
 .health-check-btn:hover {
   background-color: #0b7dda;
 }
