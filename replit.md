@@ -2,99 +2,7 @@
 
 ## Overview
 
-XiaoChenGuang (小宸光) is an AI companion system with personality learning, emotional intelligence, and memory capabilities. Originally a Telegram bot, it has been migrated to a web-based architecture featuring:
-
-- **Intelligent Memory**: Vector-based long-term memory storage and retrieval using pgvector
-- **Emotional Detection**: 9-emotion classification system with sentiment analysis
-- **Dynamic Personality**: AI personality traits that evolve based on interactions
-- **Reflection System**: Self-aware improvement mechanism using "causal retrospection"
-- **Modular Architecture**: Phase 2 design with 5 core modules (Memory, Reflection, Knowledge Hub, Behavior, FineTune)
-
-The system combines Vue 3 frontend with FastAPI backend, using Supabase PostgreSQL for persistence and Redis for short-term memory caching.
-
-## Recent Changes
-
-### 2025-10-30: Phase 2 - Three-Tier Reflection Storage System
-
-**Feature Implemented**: Comprehensive reflection storage with Redis cache, Supabase permanent storage, and Pinecone vector embeddings.
-
-**New Components**:
-
-1. **Pinecone Vector Database Handler** (`backend/modules/pinecone_handler.py`):
-   - Uses Pinecone's built-in `llama-text-embed-v2` model for automatic vector generation (4096 dimensions)
-   - Supports vector storage, similarity search, and deletion
-   - Auto-creates serverless index with cosine metric
-   - Deferred embedding generation (on-demand, not during initialization)
-
-2. **Reflection Storage Service** (`backend/modules/reflection_storage.py`):
-   - Three-tier storage architecture:
-     - **Redis**: Latest 5 reflections with 24-hour TTL (fast cache)
-     - **Supabase**: Permanent storage in `xiaochenguang_reflections` table
-     - **Pinecone**: Vector embeddings for semantic similarity search
-   - Fallback mechanism: Reads from Redis first, then Supabase if cache miss
-   - Success threshold: ≥2 layers must succeed for overall success
-
-3. **Chat Router Integration** (`backend/chat_router.py`):
-   - Auto-triggers three-tier storage after reflection analysis (Phase 1.5)
-   - Detailed logging for each storage layer's success/failure status
-   - Non-blocking: Storage failures do not interrupt main chat flow
-   - New `get_reflection_storage()` lazy initialization function
-
-4. **Frontend UI Simplification** (`frontend/src/components/ChatInterface.vue`):
-   - Hidden memory list and emotional states sections (commented out for easy restoration)
-   - Displays only reflection module in right sidebar
-   - Cleaner, focused user interface
-
-**Database Schema**: New Supabase table `xiaochenguang_reflections` with fields:
-- `reflection_content` (TEXT): Summary content
-- `analysis_tags` (JSONB): Emotion tags and analysis metadata
-- `reflection_level` (JSONB): Multi-level analysis data (observation, causes, improvements)
-- `personality_embedding` (JSONB): Vector representation placeholder
-- `related_message_id` (UUID): Linked conversation record
-- `confidence_score` (FLOAT): Reflection quality score (0-1)
-
-**Architect Review**: ✅ Passed with recommendations for future performance monitoring
-- Critical finding: Pinecone operations remain synchronous (potential latency spikes)
-- Suggested next steps: Add instrumentation, consider background tasks if needed
-
-**Testing Status**: All components initialized successfully, workflow running without errors.
-
-**Environment Variables Required**:
-- `PINECONE_API_KEY` ✅
-- `PINECONE_ENVIRONMENT` ✅
-- `PINECONE_INDEX_NAME` ✅
-
----
-
-### 2025-10-29: Redis Connection Fix & UI Improvements
-
-**Problem Identified**: Redis connection failures due to SSL requirement for Upstash service.
-
-**Root Cause**: Upstash Redis requires SSL connections (`rediss://` protocol), but environment variables used standard `redis://` format, causing "Connection closed by server" errors.
-
-**Fixes Applied**:
-
-1. **Redis Interface Auto-SSL Conversion** (`backend/modules/memory/redis_interface.py`):
-   - Automatically converts `redis://` to `rediss://` for Upstash compatibility
-   - Supports both `REDIS_URL` and `REDIS_ENDPOINT` environment variables
-   - Removes unsupported SSL certificate parameters
-   - No credential logging (security reviewed and approved)
-
-2. **RedisMock Enhancements** (`backend/redis_mock.py`):
-   - Added `ping()` method for initialization health checks
-   - Added `rpush()` method for queue operation support
-   - Provides complete fallback functionality when Redis unavailable
-
-3. **Frontend Reflection UI** (`frontend/src/components/ChatInterface.vue`):
-   - Relocated reflection display from message blocks to dedicated right sidebar
-   - Added `latestReflection` data binding
-   - Improved visual hierarchy with dedicated "💭 最新反思" section
-
-**Testing Status**: All changes passed Architect security review. Redis connectivity verified with PING/SET/GET operations.
-
-**Deployment Note**: Works with both `redis://` and `rediss://` URL formats - automatic conversion ensures compatibility.
-
----
+XiaoChenGuang (小宸光) is an AI companion system designed for personality learning, emotional intelligence, and memory retention. It offers intelligent memory using vector-based storage, a 9-emotion classification system, dynamic personality traits, and a self-improving reflection mechanism. The system is built with a modular architecture, combining a Vue 3 frontend with a FastAPI backend, utilizing Supabase PostgreSQL for persistent data, Redis for caching, and integrating external services like OpenAI and Pinata for IPFS archiving. Its core purpose is to provide an engaging, evolving AI companion experience.
 
 ## User Preferences
 
@@ -102,163 +10,62 @@ Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### Frontend Architecture
+### UI/UX Decisions
 
-**Technology Stack**: Vue 3 + Vite (Port 5000)
+The frontend is a single-page application (SPA) built with Vue 3 and Vite, accessible on Port 5000. Key components include `ChatInterface.vue` for conversations, `StatusPage.vue` for system health, and `ModulesMonitor.vue` for module status. The design prioritizes a clean, focused user interface, relocating elements like reflection displays to dedicated sidebars for improved visual hierarchy.
 
-The frontend is a single-page application (SPA) with:
-- **ChatInterface.vue**: Main conversation interface
-- **StatusPage.vue**: System health monitoring
-- **ModulesMonitor.vue**: Module status dashboard
-- Vue Router for navigation
-- Axios for API communication
+### Technical Implementations
 
-**Design Decision**: Chose Vue 3 for its reactivity system and lightweight footprint, suitable for real-time chat interfaces. Vite provides fast development builds and optimized production bundles.
+The backend, running on FastAPI (Python 3.11, Port 8000), employs a modular plugin architecture managed by a `Core Controller`. This enables dynamic loading and unloading of modules, facilitating incremental development.
 
-### Backend Architecture
+**Core Modules:**
+-   **Memory Module**: Manages short-term (Redis) and long-term (Supabase) memory, tokenization, and vector embeddings.
+-   **Reflection Module**: Implements "causal retrospection" for self-improvement and stores reflections across Redis, Supabase, and Pinecone.
+-   **Knowledge Hub**: For global knowledge indexing and retrieval.
+-   **Behavior Module**: Adjusts AI personality based on reflection insights.
+-   **FineTune Module**: An experimental module for QLoRA-based model fine-tuning.
 
-**Technology Stack**: FastAPI (Python 3.11, Port 8000)
+**AI Processing Pipeline:**
+The conversation flow integrates emotion analysis, memory recall, dynamic personality prompting, OpenAI GPT-4o-mini processing, response generation, reflection analysis, behavior adjustment, and memory storage.
 
-The backend follows a modular plugin architecture with:
+**Key AI Components:**
+-   **Emotion Detection**: Classifies 9 emotions using keyword matching and regex.
+-   **Personality Engine**: Manages 4 core traits (curiosity, empathy, humor, technical_depth) that dynamically adjust.
+-   **Soul System**: Defines the AI's core character profile, backstory, and language patterns for consistent personality.
+-   **Reflection System**: Utilizes "Causal Retrospection" for multi-level analysis and generating improvement suggestions.
 
-1. **Core Controller Pattern** (`core_controller.py`):
-   - Central module registry and lifecycle manager
-   - Dynamic module loading/unloading
-   - Inter-module communication bus
-   - Health monitoring for all modules
+### System Design Choices
 
-2. **Module System** (5 core modules):
-   - **Memory Module** (Priority 1): Handles tokenization, short-term (Redis) and long-term (Supabase) storage
-   - **Reflection Module** (Priority 2): Implements "causal retrospection" for self-improvement
-   - **Knowledge Hub**: Global knowledge indexing and retrieval
-   - **Behavior Module**: Dynamic personality vector adjustment based on reflection
-   - **FineTune Module**: Experimental QLoRA-based model fine-tuning (disabled by default)
+**Data Layer:** Features a two-tier memory architecture:
+-   **Short-term Memory (Redis/Mock)**: For recent conversations with a 2-day TTL, batch-flushed to Supabase. Includes automatic `redis://` to `rediss://` conversion for Upstash compatibility.
+-   **Long-term Memory (Supabase PostgreSQL)**: Stores persistent data, emotional states, user preferences, and reflections using pgvector for embeddings.
+-   **Reflection Storage**: Three-tier system for reflections using Redis (cache), Supabase (permanent), and Pinecone (vector embeddings).
 
-3. **Router-based API** (`*_router.py`):
-   - `chat_router`: Main conversation endpoints
-   - `memory_router`: Memory retrieval endpoints
-   - `openai_handler`: OpenAI API integration
-   - `file_upload`: File handling capabilities
+**File Upload System**: Supports 7 file formats (`.txt`, `.md`, `.json`, `.pdf`, `.docx`, `.png`, `.jpg`, `.jpeg`) with content parsing, pdfplumber for PDFs, python-docx for DOCX, and OpenAI Vision API (gpt-4o-mini) for image analysis. Files are stored in Redis (2-day TTL) and Supabase Storage (permanent).
 
-**Design Rationale**: The modular architecture allows components to be enabled/disabled independently, facilitating incremental development and testing. Each module inherits from `BaseModule` and implements standard lifecycle methods (load, unload, process, health_check).
+**Conversation Archiving**: Enables packaging conversations and attachments into JSON, uploading them to IPFS via Pinata, storing the CID in Supabase, and providing a public gateway URL. Prioritizes Supabase data for archive completeness.
 
-### Data Layer
-
-**Two-tier Memory Architecture**:
-
-1. **Short-term Memory** (Redis/Mock):
-   - 2-day TTL for recent conversations
-   - Batch flush mechanism to Supabase every 5 minutes
-   - Reduces database write load during active conversations
-   - Fallback to `RedisMock` if Redis unavailable
-
-2. **Long-term Memory** (Supabase PostgreSQL):
-   - Tables: `xiaochenguang_memories`, `emotional_states`, `user_preferences`
-   - Vector embeddings using OpenAI `text-embedding-3-small`
-   - Importance scoring and access count tracking
-   - Platform-agnostic storage (Web/Telegram)
-
-**Token Processing**:
-- Uses `tiktoken` (cl100k_base encoding) for accurate token counting
-- Fallback to UTF-8 byte counting if tiktoken unavailable
-- Critical for managing OpenAI API costs and context windows
-
-### AI Processing Pipeline
-
-**Conversation Flow**:
-```
-User Input → Emotion Analysis → Memory Recall → Personality Prompt Generation → 
-OpenAI GPT-4o-mini → Response → Reflection Analysis → Behavior Adjustment → 
-Memory Storage (Redis + Supabase)
-```
-
-**Key Components**:
-
-1. **Emotion Detection** (`emotion_detector.py`):
-   - 9 emotion types: joy, sadness, anger, fear, love, tired, confused, grateful, neutral
-   - Keyword matching + regex patterns
-   - Intensity multipliers for emotional depth
-
-2. **Personality Engine** (`personality_engine.py`):
-   - 4 core traits: curiosity, empathy, humor, technical_depth
-   - Loads from `user_profile.json` and Supabase
-   - Dynamic adjustment via Behavior Module
-
-3. **Soul System** (`soul.py`):
-   - Character profile: Name (小宸光), Age (18), MBTI (ENFJ-A)
-   - Language patterns: Catchphrases and addressing styles
-   - Backstory integration for consistent personality
-
-4. **Reflection System** (`reflection_module`):
-   - "Causal Retrospection" methodology
-   - Multi-level analysis: Direct → Indirect → Systemic causes
-   - Generates improvement suggestions fed to Behavior Module
-
-### Background Jobs
-
-**Memory Flush Worker** (`memory_flush_worker.py`):
-- Automated batch writes from Redis to Supabase
-- 5-minute intervals with configurable batch size (100 records)
-- Retry mechanism (3 attempts) with exponential backoff
-- Graceful shutdown handling
-- Integrated via FastAPI lifespan context manager
-
-**Design Choice**: Background jobs prevent blocking the main API thread and optimize database writes by batching operations.
+**Background Jobs**: A `Memory Flush Worker` performs automated batch writes from Redis to Supabase every 5 minutes to optimize database load.
 
 ## External Dependencies
 
 ### Third-party Services
 
-1. **OpenAI API**:
-   - Model: GPT-4o-mini
-   - Embeddings: text-embedding-3-small (1536 dimensions)
-   - Required: `OPENAI_API_KEY`, optional `OPENAI_ORG_ID`, `OPENAI_PROJECT_ID`
-
-2. **Supabase (PostgreSQL + Storage)**:
-   - PostgreSQL with pgvector extension
-   - Storage buckets for file uploads
-   - Required: `SUPABASE_URL`, `SUPABASE_ANON_KEY`
-   - Tables: `xiaochenguang_memories`, `emotional_states`, `user_preferences`, `xiaochenguang_reflections`
-
-3. **Redis** (optional):
-   - Short-term memory cache
-   - Falls back to in-memory mock if unavailable
-   - Optional: `REDIS_URL`
+1.  **OpenAI API**: Used for GPT-4o-mini for conversation generation, `text-embedding-3-small` for vector embeddings, and Vision API for image analysis.
+2.  **Supabase**: Provides PostgreSQL with pgvector extension for long-term memory, emotional states, user preferences, and reflection storage, along with Supabase Storage for file uploads.
+3.  **Redis**: Utilized for short-term memory caching. Falls back to an in-memory mock if unavailable.
+4.  **Pinata**: Integrated for IPFS archiving of conversation data.
+5.  **Pinecone**: Used for vector embeddings and similarity search of reflections.
 
 ### Python Dependencies
 
-Core packages (from `requirements.txt`):
-- **fastapi**: Web framework
-- **uvicorn**: ASGI server
-- **openai**: OpenAI API client
-- **supabase**: Supabase client
-- **tiktoken**: Token counting
-- **redis**: Redis client (optional)
-- **python-multipart**: File upload handling
-- **pydantic**: Data validation
+-   `fastapi`, `uvicorn`, `openai`, `supabase`, `tiktoken`, `redis`, `python-multipart`, `pydantic`.
 
 ### Frontend Dependencies
 
-From `frontend/package.json`:
-- **vue** (3.3.11): UI framework
-- **vue-router** (4.5.1): Routing
-- **axios** (1.6.5): HTTP client
-- **vite** (5.0.11): Build tool
-- **@vitejs/plugin-vue**: Vue 3 plugin for Vite
+-   `vue`, `vue-router`, `axios`, `vite`, `@vitejs/plugin-vue`.
 
 ### Deployment Configuration
 
-**CORS Settings**: Allows multiple origins including production domains (ai.dreamground.net, ai2.dreamground.net), Cloudflare Pages, Replit, and localhost variants.
-
-**Environment Variables**:
-- Frontend: `VITE_API_URL` for API endpoint configuration
-- Backend: Uses `python-dotenv` for `.env` file loading
-- Supports Replit-specific configurations (host 0.0.0.0, HMR client port 443)
-
-### Experimental Features
-
-**IPFS Handler** (`backend/modules/ipfs_handler.py`):
-- Generates CIDv1 content identifiers
-- Lightweight implementation without full IPFS node
-- Reserved for future decentralized storage integration
-- Currently generates SHA-256 based CIDs locally
+-   **CORS Settings**: Configured to allow multiple origins including production domains, Cloudflare Pages, Replit, and localhost.
+-   **Environment Variables**: Managed via `python-dotenv` for backend, and `VITE_API_URL` for frontend API endpoints.
