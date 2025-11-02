@@ -3,14 +3,17 @@ from pydantic import BaseModel
 from typing import Optional
 import os
 import logging
+import json
 from backend.supabase_handler import get_supabase
 supabase = get_supabase()
 from backend.openai_handler import get_openai_client, generate_response
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
+from backend.modules.memory.redis_interface import RedisInterface
 
 router = APIRouter()
 logger = logging.getLogger("chat_router")
+redis_interface = RedisInterface()
 
 _new_memory_core = None
 _reflection_storage = None
@@ -84,10 +87,25 @@ async def chat(request: ChatRequest):
         )
         logger.debug(f"📜 對話歷史：{conversation_history}")
 
+        # Retrieve file content from Redis
+        file_content = ""
+        try:
+            keys = redis_interface.redis.keys(f"upload:{request.conversation_id}:*")
+            if keys:
+                latest_key = keys[-1]
+                file_data_json = redis_interface.redis.get(latest_key)
+                if file_data_json:
+                    file_data = json.loads(file_data_json)
+                    file_content = file_data.get("content", "")
+                    logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+        except Exception as e:
+            logger.warning(f"⚠️ 從 Redis 檢索檔案內容失敗: {e}")
+
         messages, emotion_analysis = await prompt_engine.build_prompt(
             request.user_message,
             recalled_memories,
-            conversation_history
+            conversation_history,
+            file_content
         )
 
         assistant_message = await generate_response(
