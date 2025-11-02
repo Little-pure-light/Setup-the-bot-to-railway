@@ -145,11 +145,11 @@ const getApiUrl = () => {
   console.log('🔗 [ChatInterface] API URL 環境變數:', url)
   
   if (!url || url === 'undefined' || url === 'null') {
-    console.warn('⚠️ [ChatInterface] VITE_API_URL 未定義，使用預設 URL')
-    return 'https://setup-the-bot-to-railway-production.up.railway.app'
+    console.warn('⚠️ [ChatInterface] VITE_API_URL 未定義，使用預設 Replit URL')
+    return 'https://ai2.dreamground.net'
   }
   
-  return url
+  return url.replace(/\/$/, '')
 }
 
 const API_URL = getApiUrl()

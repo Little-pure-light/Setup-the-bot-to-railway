@@ -3,17 +3,21 @@ import vue from "@vitejs/plugin-vue";
 
 export default defineConfig({
   plugins: [vue()],
-   // ✅ 添加這個
   define: {
-    __API_URL__: JSON.stringify(process.env.VITE_API_URL || 'https://setup-the-bot-to-railway-production.up.railway.app')
+    __API_URL__: JSON.stringify(process.env.VITE_API_URL || 'https://ai2.dreamground.net')
   },
   envPrefix: 'VITE_',
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    sourcemap: false,
+  },
   server: {
-    host: "0.0.0.0", // 外網可訪問
-    port: 5000, // 改用不衝突的端口
+    host: "0.0.0.0",
+    port: 5000,
     strictPort: true,
     hmr: {
-      clientPort: 443, // Replit thru HTTPS
+      clientPort: 443,
     },
     proxy: {
       "/api": {
@@ -21,6 +25,5 @@ export default defineConfig({
         changeOrigin: true,
       },
     },
-    allowedHosts: true, // ❤️ 允許所有 host
   },
 });

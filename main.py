@@ -36,21 +36,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# ✅ CORS 設定
+# ✅ CORS 設定（支援 Cloudflare Pages 與 Replit）
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "https://ai.dreamground.net",
         "https://ai2.dreamground.net",
         "https://*.pages.dev",
+        "https://*.cloudflare.pages.dev",
         "https://*.replit.dev",
+        "https://*.replit.app",
         "http://localhost:3000",
         "http://localhost:5000",
         "http://localhost:8080"
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"],
 )
 
 # ✅ 掛載 Routers
