@@ -36,9 +36,17 @@ class PromptEngine:
         if personality_vector:
             personality_context = self._format_personality_vector(personality_vector)
 
-        file_context = f"""### 相關檔案內容
-{file_content}
-""" if file_content else ""
+        MAX_FILE_CONTENT_LENGTH = 2000
+        
+        if file_content:
+            truncated = file_content[:MAX_FILE_CONTENT_LENGTH]
+            has_more = len(file_content) > MAX_FILE_CONTENT_LENGTH
+            file_context = f"""### 相關檔案內容
+{truncated}
+{"...(檔案內容已截斷，僅顯示前 2000 字元)" if has_more else ""}
+"""
+        else:
+            file_context = ""
 
         system_prompt = f"""{personality_prompt}
 

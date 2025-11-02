@@ -1,0 +1,75 @@
+PromptEngine 檔案注入修復工程指令書（For Agent AI 開發）
+🎯 修正目標
+
+解決 PromptEngine 無法引用使用者上傳檔案內容的問題，確保 AI 回應能正確包含檔案上下文。
+
+🧩 問題描述與根因
+問題現象：
+
+使用者上傳檔案成功（Redis 有儲存 file_name, summary, content）。
+
+前端顯示成功，但 AI 回覆無參考檔案內容。
+
+無 API error log，但 prompt 無檔案上下文，導致 AI 無法感知使用者背景資料。
+
+根本原因：
+
+chat_router.py 沒有從 Redis 讀取檔案內容，也未傳給 PromptEngine.build_prompt()。
+
+prompt_engine.py 的 build_prompt() 未設計處理 file_content，導致內容未進入 system prompt。
+
+若 memories_table 設定錯誤（Supabase），也可能造成 PromptEngine 初始化錯誤。
+
+🔧 修正項目明細
+① 修改 chat_router.py – 加入 Redis 檔案讀取與傳遞邏輯
+
+新增程式碼：
+
+try:
+    redis_keys = redis_interface.client.keys(f"file:*:{conversation_id}")
+    if redis_keys:
+        latest_key = redis_keys[-1]
+        file_data = redis_interface.client.get(latest_key)
+        file_content = json.loads(file_data).get("content", "")
+    else:
+        file_content = ""
+except Exception as e:
+    logger.error(f"[File Load Error] {e}")
+    file_content = ""
+
+
+並將 file_content 傳入 build_prompt：
+
+messages = await prompt_engine.build_prompt(
+    user_message=user_message,
+    recalled_memories=recalled_memories,
+    file_content=file_content
+)
+
+② 修改 prompt_engine.py – 支援注入 file_content
+
+修改 build_prompt() 函式簽名與邏輯：
+
+async def build_prompt(
+    self,
+    user_message: str,
+    recalled_memories: str = "",
+    file_content: str = ""
+):
+    ...
+    system_prompt = BASE_PROMPT
+
+    if file_content:
+        system_prompt += f"\n\n### 相關檔案內容\n{file_content[:1500]}"
+
+✅ 驗收與測試項目
+測試項目	驗證方式	預期結果
+Redis 檔案確認	redis-cli 查詢 file:* 鍵值	有對應 file:<conversation_id> 鍵
+Prompt 檢查	執行 test_chat.py	終端輸出含「### 相關檔案內容」
+模型行為測試	聊天中輸入「幫我摘要上傳的檔案」	回應能引用檔案摘要
+錯誤容錯	模擬無 Redis 檔案情境	系統不崩潰，AI 仍能正常運作（file_content = ""）
+⚠️ 注意事項與風險控管
+項目	說明
+Prompt Token 限制	建議只注入前 1500–2000 字，避免超過模型 token 限制。
+多檔案處理	目前僅支援取最後一筆上傳記錄，如需多檔管理需另開實作。
+Supabase 記憶表	若指定的 memories_table 名稱錯誤，PromptEngine 初始化會失敗。請確認名稱設定正確，如無表則設定為 "memory_statistics" 或留空。

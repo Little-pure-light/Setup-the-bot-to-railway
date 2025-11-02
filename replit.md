@@ -11,7 +11,8 @@ XiaoChenGuang (小宸光) is a modular AI companion system featuring memory mana
 - Emotional detection and response adaptation across 9 emotion types
 - Self-reflection module using "Causal Retrospection" methodology
 - Dynamic personality adjustment based on interaction patterns
-- File upload support (text, documents, images)
+- File upload support (text, documents, images) with automatic AI analysis
+- **File content injection** - AI can reference and analyze uploaded file contents in conversations
 - Conversation archiving to IPFS
 
 ## User Preferences
@@ -87,11 +88,21 @@ Preferred communication style: Simple, everyday language.
    - **Planned**: QLoRA-based model fine-tuning using reflection data
 
 **API Router Structure**:
-- `/api/chat` - Main conversation endpoint with reflection integration
+- `/api/chat` - Main conversation endpoint with reflection integration and file context injection
 - `/api/memories/{conversation_id}` - Memory retrieval
 - `/api/upload_file` - File processing (text/PDF/images via OpenAI Vision)
 - `/api/archive` - IPFS conversation archiving
 - `/api/health` - System health monitoring
+
+**File Content Injection System** (Added 2025-11-02):
+- **Flow**: Upload → Redis Storage → Chat Request → Content Injection → AI Response
+- **Implementation**:
+  - `chat_router.py` (L90-109): Retrieves uploaded file content from Redis using pattern `upload:{conversation_id}:*`
+  - `prompt_engine.py` (L24-52): Injects file content into system prompt under "### 相關檔案內容" section
+  - Token limit control: Max 2000 characters to prevent exceeding OpenAI token limits
+  - Graceful degradation: System continues normally if no file is present
+- **Redis Key Pattern**: `upload:{conversation_id}:{filename}` with 2-day TTL
+- **Use Case**: Users can upload documents and ask AI to analyze, summarize, or reference their content in conversation
 
 **Background Jobs**:
 - `memory_flush_worker.py` - Automated Redis → Supabase batch flush every 5 minutes
