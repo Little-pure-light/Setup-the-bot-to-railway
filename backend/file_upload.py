@@ -195,6 +195,7 @@ async def upload_file(
     檔案上傳端點
     支援格式: .txt, .md, .json, .pdf, .docx, .png, .jpg, .jpeg
     雙重儲存: Redis (2天) + Supabase Storage (永久)
+    ✨ 新增：自動調用 AI 分析檔案內容並返回回應
     """
     try:
         file_bytes = await file.read()
@@ -265,6 +266,52 @@ async def upload_file(
         except Exception as e:
             logger.warning(f"⚠️ Redis 暫存失敗: {e}")
         
+        ai_analysis = None
+        if parsed_data.get("parsed", False) and parsed_data.get("content"):
+            try:
+                openai_client = get_openai_client()
+                
+                file_content = parsed_data.get("content", "")
+                file_type = parsed_data.get("type", "unknown")
+                
+                if file_type == "image":
+                    analysis_prompt = f"""我上傳了一張圖片「{filename}」。
+
+圖片分析結果：
+{file_content}
+
+請用繁體中文簡短回應，告訴我你看到了什麼，以及你的想法或建議（不超過150字）。"""
+                else:
+                    analysis_prompt = f"""我上傳了一個檔案「{filename}」。
+
+檔案內容：
+{file_content[:3000]}
+
+請用繁體中文簡短分析這個檔案的內容，告訴我主要重點和你的想法（不超過150字）。"""
+                
+                response = openai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "你是小宸光，一個友善、溫暖、有靈魂的 AI 助手。用親切的語氣回應用戶上傳的檔案。"
+                        },
+                        {
+                            "role": "user",
+                            "content": analysis_prompt
+                        }
+                    ],
+                    max_tokens=300,
+                    temperature=0.7
+                )
+                
+                ai_analysis = response.choices[0].message.content
+                logger.info(f"🤖 AI 分析完成: {ai_analysis[:100]}...")
+                
+            except Exception as e:
+                logger.error(f"❌ AI 分析失敗: {e}")
+                ai_analysis = "檔案上傳成功，但 AI 分析暫時無法使用。你可以在聊天中詢問我關於這個檔案的問題。"
+        
         return {
             "status": "success",
             "file_name": filename,
@@ -274,6 +321,7 @@ async def upload_file(
             "temporary_key": redis_key,
             "file_url": file_url,
             "parsed": parsed_data.get("parsed", False),
+            "ai_analysis": ai_analysis,
             "storage": {
                 "redis": "cached_2_days",
                 "supabase": "permanent" if file_url else "failed"

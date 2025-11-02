@@ -295,9 +295,18 @@ export default {
           content: `📎 檔案上傳成功\n📄 ${file.name} (${fileType})\n${parsed}\n📝 ${summary}`,
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
+        this.scrollToBottom()
+        
+        if (response.data.ai_analysis) {
+          this.messages.push({
+            type: 'assistant',
+            content: response.data.ai_analysis,
+            timestamp: new Date().toLocaleTimeString('zh-TW')
+          })
+          this.scrollToBottom()
+        }
         
         event.target.value = ''
-        this.scrollToBottom()
       } catch (error) {
         this.messages.push({
           type: 'system',
