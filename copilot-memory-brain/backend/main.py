@@ -11,10 +11,11 @@ import sys
 import os
 from datetime import datetime
 
-# 添加父目錄到路徑，以便 import 主專案模組
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../..'))
+# 添加專案根目錄到路徑
+project_root = os.path.join(os.path.dirname(__file__), '../..')
+sys.path.insert(0, project_root)
 
-from copilot_memory_brain.backend.config import config
+from config import config
 
 # 設定日誌
 logging.basicConfig(
@@ -69,9 +70,9 @@ app.add_middleware(
 
 # 匯入路由
 try:
-    from copilot_memory_brain.backend.routers import copilot_router
-    from copilot_memory_brain.backend.routers import memory_router
-    from copilot_memory_brain.backend.routers import reflection_router
+    from routers import copilot_router
+    from routers import memory_router
+    from routers import reflection_router
     
     app.include_router(copilot_router.router, prefix=config.API_PREFIX, tags=["Copilot"])
     app.include_router(memory_router.router, prefix=config.API_PREFIX, tags=["Memory"])

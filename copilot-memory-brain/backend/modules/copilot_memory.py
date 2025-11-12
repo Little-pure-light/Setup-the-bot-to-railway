@@ -10,10 +10,12 @@ from datetime import datetime
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
+project_root = os.path.join(os.path.dirname(__file__), '../../..')
+sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from backend.openai_handler import get_openai_client
-from copilot_memory_brain.backend.config import config
+from config import config
 
 logger = logging.getLogger("copilot_memory")
 

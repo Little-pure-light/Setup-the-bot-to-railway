@@ -9,12 +9,14 @@ import logging
 import sys
 import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../../..'))
+project_root = os.path.join(os.path.dirname(__file__), '../../..')
+sys.path.insert(0, project_root)
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from backend.modules.memory.redis_interface import RedisInterface
 from backend.supabase_handler import get_supabase
-from copilot_memory_brain.backend.config import config
-from copilot_memory_brain.backend.modules.copilot_memory import CopilotMemoryIntegration
+from config import config
+from modules.copilot_memory import CopilotMemoryIntegration
 
 router = APIRouter()
 logger = logging.getLogger("memory_router")

@@ -96,7 +96,7 @@
 
 <script>
 import axios from 'axios'
-import { API_BASE } from '../config.js'
+import { COPILOT_API_BASE } from '../config.js'
 
 export default {
   name: 'CopilotWindow',
@@ -172,7 +172,7 @@ export default {
       this.errorMessage = ''
       
       try {
-        const COPILOT_API = `${API_BASE}:8001/api/ask_copilot`
+        const COPILOT_API = `${COPILOT_API_BASE}/api/ask_copilot`
         
         const response = await axios.post(COPILOT_API, {
           prompt: this.userPrompt,

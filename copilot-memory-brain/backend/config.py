@@ -11,7 +11,7 @@ class Config:
     
     # 伺服器配置
     HOST: str = "0.0.0.0"
-    PORT: int = 8001
+    PORT: int = 8080
     
     # API 配置
     API_PREFIX: str = "/api"
