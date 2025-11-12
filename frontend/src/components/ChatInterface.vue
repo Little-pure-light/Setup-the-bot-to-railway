@@ -68,6 +68,11 @@
                 />
               </label>
               
+              <button @click="openCopilotWindow" class="action-btn copilot-btn">
+                <span class="btn-icon">🤖</span>
+                <span class="btn-text">Ask Copilot</span>
+              </button>
+              
               <button @click="archiveConversation" class="action-btn archive-btn">
                 <span class="btn-icon">🗂️</span>
                 <span class="btn-text">結束對話</span>
@@ -133,12 +138,21 @@
         </div>
       </div>
     </div>
+    
+    <!-- Copilot 視窗 -->
+    <CopilotWindow
+      :visible="copilotWindowVisible"
+      :conversation-id="conversationId"
+      :user-id="userId"
+      @close="closeCopilotWindow"
+    />
   </div>
 </template>
 
 <script>
 import axios from 'axios'
-import { CHAT_API } from '../config.js';
+import { CHAT_API } from '../config.js'
+import CopilotWindow from './CopilotWindow.vue'
 
 const getApiUrl = () => {
   const url = import.meta.env.VITE_API_URL
@@ -157,6 +171,9 @@ console.log('🚀 [ChatInterface] 最終 API_URL:', API_URL)
 
 export default {
   name: 'ChatInterface',
+  components: {
+    CopilotWindow
+  },
   data() {
     return {
       messages: [],
@@ -166,7 +183,8 @@ export default {
       emotionalStates: [],
       latestReflection: null,
       conversationId: this.generateConversationId(),
-      userId: 'user_' + Date.now()
+      userId: 'user_' + Date.now(),
+      copilotWindowVisible: false
     }
   },
   methods: {
@@ -315,6 +333,14 @@ export default {
         })
         this.scrollToBottom()
       }
+    },
+    openCopilotWindow() {
+      console.log('🤖 開啟 Copilot 視窗')
+      this.copilotWindowVisible = true
+    },
+    closeCopilotWindow() {
+      console.log('🤖 關閉 Copilot 視窗')
+      this.copilotWindowVisible = false
     },
     async archiveConversation() {
       if (!confirm('確定要結束並封存此對話嗎？對話將被上傳到 IPFS 永久保存。')) {
@@ -633,6 +659,10 @@ export default {
 
 .upload-btn {
   background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
+}
+
+.copilot-btn {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
 .archive-btn {
