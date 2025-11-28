@@ -1,10 +1,11 @@
+import asyncio # ✅ 新增匯入，用於後台任務
 from fastapi import APIRouter, HTTPException, BackgroundTasks # ✅ 匯入 BackgroundTasks
 from pydantic import BaseModel
 from typing import Optional
 import os
 import logging
 import json
-import asyncio # ✅ 新增匯入，用於後台任務
+import traceback # 確保 traceback 也在
 
 # *** 請確保這些模組在你的 backend/ 目錄中可被正確匯入 ***
 from backend.supabase_handler import get_supabase
@@ -19,26 +20,62 @@ router = APIRouter()
 logger = logging.getLogger("chat_router")
 redis_interface = RedisInterface()
 
-# === 延遲初始化函數維持不變 ===
-# （此處省略 get_new_memory_core, get_reflection_storage 的程式碼，請保持其在你的文件中）
+_new_memory_core = None
+_reflection_storage = None
 
-# chat_router.py (ChatRequest 模組設定)
+def get_new_memory_core():
+    """獲取新記憶模組核心（延遲初始化）"""
+    global _new_memory_core
+    if _new_memory_core is None:
+        try:
+            from backend.modules.memory.core import MemoryCore
+            _new_memory_core = MemoryCore()
+            logger.info("✅ 新記憶模組已啟用")
+        except Exception as e:
+            logger.warning(f"⚠️ 新記憶模組初始化失敗: {e}")
+            _new_memory_core = None
+    return _new_memory_core
+
+def get_reflection_storage():
+    """獲取反思儲存服務（延遲初始化）"""
+    global _reflection_storage
+    if _reflection_storage is None:
+        try:
+            from backend.modules.reflection_storage import ReflectionStorage
+            from backend.modules.memory.redis_interface import RedisInterface
+            from backend.modules.pinecone_handler import PineconeHandler
+            
+            redis_interface = RedisInterface()
+            pinecone_handler = PineconeHandler()
+            
+            _reflection_storage = ReflectionStorage(
+                redis_interface=redis_interface,
+                supabase_client=supabase,
+                pinecone_handler=pinecone_handler
+            )
+            logger.info("✅ 反思儲存服務已啟用")
+        except Exception as e:
+            logger.warning(f"⚠️ 反思儲存服務初始化失敗: {e}")
+            _reflection_storage = None
+    return _reflection_storage
+
+
+# =========================================================
+# ✅ 數據模型（已新增 AI 寶貝切換開關）
+# =========================================================
 class ChatRequest(BaseModel):
     user_message: str
     conversation_id: str
     user_id: str = "default_user"
-    # ✅ 新增 AI 寶貝切換開關 (預設為 xiaochenguang_v1)
+    # ✅ 新增 AI 寶貝切換開關
     ai_id: str = os.getenv("AI_ID", "xiaochenguang_v1") 
     
-    # 這裡可以加入更多你想觀察的參數
-    # temperature: float = 0.8
-    # top_p: float = 1.0
 class ChatResponse(BaseModel):
     assistant_message: str
     emotion_analysis: dict
     conversation_id: str
-    # 將 reflection 設為 None，因為它將在背景處理，不會立即返回
     reflection: Optional[dict] = None 
+
 
 # =========================================================
 # ✅ 核心：【隱形後門通道】的處理函數 (Background Task Function)
@@ -52,7 +89,7 @@ async def run_post_chat_tasks(
     """
     logger.info(f"🟢 啟動背景處理任務，處理 conversation_id: {request.conversation_id}")
     
-    # 再次實例化或獲取必要的服務，確保它們在背景任務中可用
+    # 重新實例化或獲取必要的服務
     openai_client = get_openai_client()
     memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
     memory_system = MemorySystem(supabase, openai_client, memories_table)
@@ -63,7 +100,18 @@ async def run_post_chat_tasks(
     try:
         controller = await get_core_controller()
         
-        # *** 以下是你的原代碼中，從「反思分析」開始的所有邏輯 ***
+        # 額外：將即時儲存也放入背景，只在回覆後執行
+        await memory_system.save_emotional_state(
+            request.user_id,
+            emotion_analysis,
+            context=request.user_message
+        )
+        prompt_engine.personality_engine.learn_from_interaction(
+            request.user_message,
+            assistant_message,
+            emotion_analysis
+        )
+        await asyncio.to_thread(prompt_engine.personality_engine.save_personality) # 確保同步寫入被安全處理
         
         # === 階段1：反思分析 ===
         reflection_module = await controller.get_module("reflection")
@@ -81,7 +129,6 @@ async def run_post_chat_tasks(
                 # === 階段1.5：反思儲存（三層架構）===
                 reflection_storage = get_reflection_storage()
                 if reflection_storage and reflection_result:
-                    # 註：這裡可以考慮使用 asyncio.gather 來並行儲存，進一步優化背景速度
                     storage_result = await reflection_storage.store_reflection(
                         reflection_data=reflection_result,
                         conversation_id=request.conversation_id,
@@ -98,43 +145,36 @@ async def run_post_chat_tasks(
                 if behavior_module and reflection_result:
                     behavior_response = await behavior_module.process({
                         "reflection": reflection_result,
-                        # ... 其他上下文 ...
+                        "emotion_analysis": emotion_analysis,
+                        "conversation_context": {
+                            "user_message": request.user_message,
+                            "assistant_message": assistant_message
+                        }
                     })
                     if behavior_response.get("success"):
                         logger.info(f"🎯 背景：人格調整已完成")
-        
-        # === 額外：將即時儲存也放入背景，只在回覆後執行 ===
-        await memory_system.save_emotional_state(
-            request.user_id,
-            emotion_analysis,
-            context=request.user_message
-        )
-        prompt_engine.personality_engine.learn_from_interaction(
-            request.user_message,
-            assistant_message,
-            emotion_analysis
-        )
-        await asyncio.to_thread(prompt_engine.personality_engine.save_personality) # 確保同步寫入被安全處理
         
         # === 階段3：記憶儲存（含反思與行為調整）===
         new_memory = get_new_memory_core()
         if new_memory:
             result = new_memory.store_conversation(
-                # ... 儲存參數 ...
+                conversation_id=request.conversation_id,
+                user_id=request.user_id,
+                user_msg=request.user_message,
+                assistant_msg=assistant_message,
                 reflection=reflection_result
             )
             if result.get("success"):
-                logger.info(f"💾 背景：新記憶模組已儲存")
+                logger.info(f"💾 背景：新記憶模組已儲存（Token: {result.get('token_count', 0)}）")
                 
     except Exception as e:
         logger.warning(f"⚠️ 背景任務處理失敗: {e}", exc_info=True)
 
-
 # =========================================================
-# ✅ 主流程：/chat 路由（只負責回覆）
+# ✅ 主流程：/chat 路由（只負責回覆 - 已整合雙 AI 邏輯）
 # =========================================================
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, background_tasks: BackgroundTasks): # ✅ 注入 BackgroundTasks
+async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     try:
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}")
         openai_client = get_openai_client()
@@ -144,23 +184,64 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks): # ✅ �
         prompt_engine = PromptEngine(request.conversation_id, memories_table)
 
         # 1. 執行所有「讀取」任務（這必須是同步的）
-        recalled_memories = await memory_system.recall_memories(...)
-        conversation_history = memory_system.get_conversation_history(...)
-        file_content = "" # 從 Redis 檢索檔案內容的邏輯也保留
+        recalled_memories = await memory_system.recall_memories(
+            request.user_message,
+            request.conversation_id
+        )
+        conversation_history = memory_system.get_conversation_history(
+            request.conversation_id,
+            limit=5
+        )
+
+        # Retrieve file content from Redis (保留原邏輯)
+        file_content = ""
+        try:
+            keys = redis_interface.redis.keys(f"upload:{request.conversation_id}:*")
+            if keys:
+                latest_key = keys[-1]
+                file_data_json = redis_interface.redis.get(latest_key)
+                if file_data_json:
+                    file_data = json.loads(file_data_json)
+                    file_content = file_data.get("content", "")
+                    logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+        except Exception as e:
+            logger.warning(f"⚠️ 從 Redis 檢索檔案內容失敗: {e}")
 
         messages, emotion_analysis = await prompt_engine.build_prompt(
-            request.user_message, recalled_memories, conversation_history, file_content
+            request.user_message,
+            recalled_memories,
+            conversation_history,
+            file_content
         )
+        
+        # ✅ 【雙 AI 引擎啟動】：根據 AI ID 選擇要觀察的 AI 寶貝模型
+        if request.ai_id == "story_master_v1":
+            # 這是你第一個新的故事光光寶貝
+            selected_model = "gpt-4o" # 使用更強大的模型來編織複雜故事
+            selected_temperature = 0.95
+            logger.info("✨ 啟用：Story Master 故事光光寶貝")
+        else:
+            # 預設的小晨光寶貝 (維持快速和經濟)
+            selected_model = "gpt-4o-mini"
+            selected_temperature = 0.8
+            logger.info("🌟 啟用：Xiaochenguang 預設光光寶貝")
 
         # 2. 呼叫 OpenAI 獲得回覆（主流程的等待點）
         assistant_message = await generate_response(
-            openai_client, messages, model="gpt-4o-mini", max_tokens=1000, temperature=0.8
+            openai_client,
+            messages,
+            model=selected_model, # <--- 替換成選擇的模型
+            max_tokens=1000,
+            temperature=selected_temperature # <--- 替換成選擇的溫度
         )
         
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
         await memory_system.save_memory(
-            request.conversation_id, request.user_message, assistant_message,
-            emotion_analysis, ai_id=os.getenv("AI_ID", "xiaochenguang_v1")
+            request.conversation_id, 
+            request.user_message, 
+            assistant_message,
+            emotion_analysis, 
+            ai_id=request.ai_id # ✅ 使用傳入的 AI ID
         )
 
         # ✅ 【核心動作】將所有耗時的「搬家隊伍」推入後門通道！
@@ -180,8 +261,6 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks): # ✅ �
         )
 
     except Exception as e:
-        # 保持你的錯誤處理邏輯
-        import traceback
         traceback_str = traceback.format_exc()
         logger.error(f"🔥 Chat Endpoint 發生嚴重錯誤: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="載體內部光流異常，請檢查日誌。")
