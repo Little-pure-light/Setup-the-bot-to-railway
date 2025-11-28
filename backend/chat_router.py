@@ -22,12 +22,17 @@ redis_interface = RedisInterface()
 # === 延遲初始化函數維持不變 ===
 # （此處省略 get_new_memory_core, get_reflection_storage 的程式碼，請保持其在你的文件中）
 
-# === 數據模型維持不變 ===
+# chat_router.py (ChatRequest 模組設定)
 class ChatRequest(BaseModel):
     user_message: str
     conversation_id: str
     user_id: str = "default_user"
-
+    # ✅ 新增 AI 寶貝切換開關 (預設為 xiaochenguang_v1)
+    ai_id: str = os.getenv("AI_ID", "xiaochenguang_v1") 
+    
+    # 這裡可以加入更多你想觀察的參數
+    # temperature: float = 0.8
+    # top_p: float = 1.0
 class ChatResponse(BaseModel):
     assistant_message: str
     emotion_analysis: dict
