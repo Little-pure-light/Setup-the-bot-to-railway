@@ -3,14 +3,15 @@ import os
 import logging
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import APIRouter, HTTPException, Request # 保留原始 FastAPI 導入
-from pydantic import BaseModel # 保留原始 Pydantic 導入
-from modules.soul import XiaoChenGuangSoul # 保留原始 Soul 導入
-from modules.emotion_detector import EnhancedEmotionDetector # 保留原始 Emotion Detector 導入
-from modules.personality_engine import PersonalityEngine # 保留原始 Personality Engine 導入
-from backend.supabase_handler import get_supabase # 保留原始 Supabase 導入
-supabase_client = get_supabase() # 保留原始 Supabase 客戶端
-router = APIRouter() # 保留原始 Router 實例
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel
+# ✅ Import from backend.modules to ensure correct path resolution
+from backend.modules.soul import XiaoChenGuangSoul
+from backend.modules.emotion_detector import EnhancedEmotionDetector
+from backend.modules.personality_engine import PersonalityEngine
+from backend.supabase_handler import get_supabase
+supabase_client = get_supabase()
+router = APIRouter()
 
 # 設定日誌
 logger = logging.getLogger("prompt_engine")
@@ -21,9 +22,9 @@ class PromptRequest(BaseModel):
 
 class PromptEngine:
     def __init__(self, conversation_id: str, memories_table: str):
-        self.soul = XiaoChenGuangSoul()
+        self.soul = XiaoChenGuangSoul(profile_path="backend/profile/user_profile.json")
         self.emotion_detector = EnhancedEmotionDetector()
-        self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
+        self.personality_engine = PersonalityEngine() # ✅ Fixed: No arguments needed
 
     # =========================================================
     # ✅ 【已更新】build_prompt 函數 - 納入「入學教育」與「共創法則」
@@ -78,10 +79,10 @@ class PromptEngine:
 ### 當前情感分析
 - 主要情緒: {emotion_analysis["dominant_emotion"]}
 - 強度: {emotion_analysis["intensity"]:.2f}
-- 信心度: {emotion_analysis["confidence"]:.2f}
-- 回應語調: {emotion_style["tone"]}
-- 同理心等級: {emotion_style["empathy_level"]:.2f}
-- 能量等級: {emotion_style["energy_level"]:.2f}
+- 信心度: {emotion_analysis.get("confidence", 0.5):.2f}
+- 回應語調: {emotion_style.get("tone", "neutral")}
+- 同理心等級: {emotion_style.get("empathy_level", 0.5):.2f}
+- 能量等級: {emotion_style.get("energy_level", 0.5):.2f}
 
 {personality_context}
 
