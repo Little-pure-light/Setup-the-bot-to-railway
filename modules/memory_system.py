@@ -71,7 +71,7 @@ class MemorySystem:
         """獲取對話歷史"""
         try:
             result = self.supabase.table(self.memories_table)\
-                .select("user_message, assistant_messagesage, created_at")\
+                .select("user_message, assistant_message, created_at")\
                 .eq("conversation_id", conversation_id)\
                 .eq("memory_type", "conversation")\
                 .order("created_at", desc=True)\
@@ -82,7 +82,7 @@ class MemorySystem:
                 history = []
                 for msg in reversed(result.data):
                     history.append(f"用戶: {msg['user_message']}")
-                    history.append(f"小宸光: {msg['assistant_messagesage']}")
+                    history.append(f"小宸光: {msg['assistant_message']}")
                 return "\n".join(history)
             return ""
             
@@ -133,7 +133,7 @@ class MemorySystem:
                 for memory in result.data:
                     user_msg = memory['user_message'].lower()
                     if any(word in user_msg for word in query_words):
-                        relevant.append(f"相關記憶: {memory['user_message']} -> {memory['assistant_messagesage']}")
+                        relevant.append(f"相關記憶: {memory['user_message']} -> {memory['assistant_message']}")
                         if len(relevant) >= limit:
                             break
                 
@@ -157,7 +157,7 @@ class MemorySystem:
                     .limit(5)\
                     .execute()
                 if recent_result.data:
-                    raw_memories = "\n".join([f"相關記憶: {m['user_message']} -> {m['assistant_messagesage']}" for m in recent_result.data])
+                    raw_memories = "\n".join([f"相關記憶: {m['user_message']} -> {m['assistant_message']}" for m in recent_result.data])
             
             if not raw_memories:
                 return ""
