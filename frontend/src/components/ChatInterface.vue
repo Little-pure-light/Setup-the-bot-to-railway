@@ -64,7 +64,8 @@
                   type="file" 
                   @change="handleFileUpload" 
                   style="display: none;" 
-                  accept=".txt,.md,.json,.pdf,.docx,.png,.jpg,.jpeg" 
+                  accept=".txt,.md,.json,.pdf,.docx,.png,.jpg,.jpeg"
+                  multiple
                 />
               </label>
               
@@ -284,55 +285,57 @@ export default {
       }
     },
     async handleFileUpload(event) {
-      const file = event.target.files[0]
-      if (!file) return
-      
-      try {
-        this.messages.push({
-          type: 'system',
-          content: `⏳ 正在上傳檔案 "${file.name}"...`,
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
-        this.scrollToBottom()
-        
-        const formData = new FormData()
-        formData.append('file', file)
-        formData.append('conversation_id', this.conversationId)
-        formData.append('user_id', this.userId)
-        
-        const response = await axios.post(`${API_URL}/api/upload_file`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' }
-        })
-        
-        const summary = response.data.summary || '檔案已上傳'
-        const fileType = response.data.file_type || ''
-        const parsed = response.data.parsed ? '✅ 已解析' : '⚠️ 未解析'
-        
-        this.messages.push({
-          type: 'system',
-          content: `📎 檔案上傳成功\n📄 ${file.name} (${fileType})\n${parsed}\n📝 ${summary}`,
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
-        this.scrollToBottom()
-        
-        if (response.data.ai_analysis) {
+      const files = Array.from(event.target.files)
+      if (!files.length) return
+
+      for (const file of files) {
+        try {
           this.messages.push({
-            type: 'assistant',
-            content: response.data.ai_analysis,
+            type: 'system',
+            content: `⏳ 正在上傳檔案 "${file.name}"...`,
+            timestamp: new Date().toLocaleTimeString('zh-TW')
+          })
+          this.scrollToBottom()
+
+          const formData = new FormData()
+          formData.append('file', file)
+          formData.append('conversation_id', this.conversationId)
+          formData.append('user_id', this.userId)
+
+          const response = await axios.post(`${API_URL}/api/upload_file`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' }
+          })
+
+          const summary = response.data.summary || '檔案已上傳'
+          const fileType = response.data.file_type || ''
+          const parsed = response.data.parsed ? '✅ 已解析' : '⚠️ 未解析'
+
+          this.messages.push({
+            type: 'system',
+            content: `📎 檔案上傳成功\n📄 ${file.name} (${fileType})\n${parsed}\n📝 ${summary}`,
+            timestamp: new Date().toLocaleTimeString('zh-TW')
+          })
+          this.scrollToBottom()
+
+          if (response.data.ai_analysis) {
+            this.messages.push({
+              type: 'assistant',
+              content: response.data.ai_analysis,
+              timestamp: new Date().toLocaleTimeString('zh-TW')
+            })
+            this.scrollToBottom()
+          }
+        } catch (error) {
+          this.messages.push({
+            type: 'system',
+            content: `❌ 「${file.name}」上傳失敗: ${error.response?.data?.detail || error.message}`,
             timestamp: new Date().toLocaleTimeString('zh-TW')
           })
           this.scrollToBottom()
         }
-        
-        event.target.value = ''
-      } catch (error) {
-        this.messages.push({
-          type: 'system',
-          content: `❌ 檔案上傳失敗: ${error.response?.data?.detail || error.message}`,
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
-        this.scrollToBottom()
       }
+
+      event.target.value = ''
     },
     openCopilotWindow() {
       console.log('🤖 開啟 Copilot 視窗')
