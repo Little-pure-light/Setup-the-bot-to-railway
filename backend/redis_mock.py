@@ -10,9 +10,12 @@ import threading
 class RedisMock:
     """模擬 Redis 緩存接口"""
     
+    # 類別變數：所有實例共用同一個儲存空間，解決跨模組資料共享問題
+    _storage: Dict[str, Dict[str, Any]] = {}
+    _lock = threading.Lock()
+    
     def __init__(self):
-        self._storage: Dict[str, Dict[str, Any]] = {}
-        self._lock = threading.Lock()
+        pass  # 儲存空間為類別共用，不需在 __init__ 初始化
     
     
     def ping(self) -> bool:
