@@ -1,0 +1,31 @@
+# 環境變數與密碼（絕對不能推上 GitHub）
+.env
+.env.*
+*.env
+
+# Python 暫存檔
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Node.js
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# VS Code
+.vscode/
+*.code-workspace
+
+# 系統檔
+.DS_Store
+Thumbs.db
+
+# Log 檔
+*.log
+logs/
