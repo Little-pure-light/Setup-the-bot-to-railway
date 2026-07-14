@@ -1,5 +1,6 @@
 import os
-from openai import OpenAI
+from openai import OpenAI, AsyncOpenAI
+from typing import AsyncGenerator
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Request
 
@@ -40,6 +41,32 @@ async def generate_response(client: OpenAI, messages: list, model: str = "gpt-4o
     except Exception as e:
         print(f"❌ OpenAI API 錯誤: {e}")
         raise
+
+
+async def generate_response_stream(
+    messages: list,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.8,
+    max_tokens: int = 2000
+) -> AsyncGenerator[str, None]:
+    """
+    OpenAI Streaming 回應產生器，逐字 yield 內容。
+    """
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        stream = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            stream=True
+        )
+        async for chunk in stream:
+            content = chunk.choices[0].delta.content
+            if content:
+                yield content
+    except Exception as e:
+        yield f"[ERROR] {str(e)}"
 
 # ✅ 新增一個 POST API 路由：/api/openai/chat
 @router.post("/openai/chat")

@@ -1,5 +1,6 @@
 import asyncio # ✅ 新增匯入，用於後台任務
-from fastapi import APIRouter, HTTPException, BackgroundTasks # ✅ 匯入 BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Query # ✅ 匯入 BackgroundTasks, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 import os
@@ -10,7 +11,7 @@ import traceback # 確保 traceback 也在
 # *** 請確保這些模組在你的 backend/ 目錄中可被正確匯入 ***
 from backend.supabase_handler import get_supabase
 supabase = get_supabase()
-from backend.openai_handler import get_openai_client, generate_response
+from backend.openai_handler import get_openai_client, generate_response, generate_response_stream
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
 from backend.modules.memory.redis_interface import RedisInterface
@@ -174,9 +175,9 @@ async def run_post_chat_tasks(
 # ✅ 主流程：/chat 路由（只負責回覆 - 已整合雙 AI 邏輯）
 # =========================================================
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
+async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: bool = Query(default=False)):
     try:
-        logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}")
+        logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
         openai_client = get_openai_client()
         memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
 
@@ -213,38 +214,74 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             conversation_history,
             file_content
         )
-        
-        # ✅ 【雙 AI 引擎啟動】：根據 AI ID 選擇要觀察的 AI 寶貝模型
+
+        # ✅ 根據 AI ID 選擇模型
         if request.ai_id == "story_master_v1":
-            # 這是你第一個新的故事光光寶貝
-            selected_model = "gpt-4o" # 使用更強大的模型來編織複雜故事
+            selected_model = "gpt-4o"
             selected_temperature = 0.95
             logger.info("✨ 啟用：Story Master 故事光光寶貝")
         else:
-            # 預設的小晨光寶貝 (維持快速和經濟)
             selected_model = "gpt-4o-mini"
             selected_temperature = 0.8
             logger.info("🌟 啟用：Xiaochenguang 預設光光寶貝")
 
-        # 2. 呼叫 OpenAI 獲得回覆（主流程的等待點）
+        # =========================================================
+        # ✅ Streaming 模式
+        # =========================================================
+        if stream:
+            async def stream_generator():
+                full_response = ""
+                try:
+                    async for chunk in generate_response_stream(
+                        messages,
+                        model=selected_model,
+                        temperature=selected_temperature,
+                        max_tokens=2000
+                    ):
+                        full_response += chunk
+                        yield chunk
+                finally:
+                    # Streaming 結束後，執行記憶儲存與背景任務
+                    if full_response and not full_response.startswith("[ERROR]"):
+                        try:
+                            await memory_system.save_memory(
+                                request.conversation_id,
+                                request.user_message,
+                                full_response,
+                                emotion_analysis,
+                                ai_id=request.ai_id
+                            )
+                        except Exception as e:
+                            logger.warning(f"⚠️ Streaming 後記憶儲存失敗: {e}")
+                        background_tasks.add_task(
+                            run_post_chat_tasks,
+                            request,
+                            full_response,
+                            emotion_analysis
+                        )
+
+            return StreamingResponse(stream_generator(), media_type="text/plain; charset=utf-8")
+
+        # =========================================================
+        # ✅ 原本的非 streaming 模式（保留向後相容）
+        # =========================================================
         assistant_message = await generate_response(
             openai_client,
             messages,
-            model=selected_model, # <--- 替換成選擇的模型
+            model=selected_model,
             max_tokens=1000,
-            temperature=selected_temperature # <--- 替換成選擇的溫度
+            temperature=selected_temperature
         )
-        
+
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
         await memory_system.save_memory(
             request.conversation_id, 
             request.user_message, 
             assistant_message,
             emotion_analysis, 
-            ai_id=request.ai_id # ✅ 使用傳入的 AI ID
+            ai_id=request.ai_id
         )
 
-        # ✅ 【核心動作】將所有耗時的「搬家隊伍」推入後門通道！
         background_tasks.add_task(
             run_post_chat_tasks,
             request, 
@@ -252,12 +289,11 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             emotion_analysis
         )
 
-        # 4. 立即返回給用戶，不再等待背景任務
         return ChatResponse(
             assistant_message=assistant_message,
             emotion_analysis=emotion_analysis,
             conversation_id=request.conversation_id,
-            reflection=None # 不再等待 reflection 結果
+            reflection=None
         )
 
     except Exception as e:

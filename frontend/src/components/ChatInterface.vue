@@ -30,7 +30,7 @@
               :class="['message-wrapper', `message-${msg.type}`]"
             >
               <div class="message-bubble">
-                <p class="message-text">{{ msg.content }}</p>
+                <p :class="['message-text', { streaming: msg.streaming }]">{{ msg.content }}</p>
                 <div class="message-footer">
                   <span v-if="msg.emotion" class="emotion-tag">
                     {{ getEmotionEmoji(msg.emotion.dominant_emotion) }}
@@ -215,54 +215,71 @@ export default {
     },
     async sendMessage() {
       if (!this.userInput.trim()) return
-      
+
       this.isLoading = true
-      
+
       this.messages.push({
         type: 'user',
         content: this.userInput,
         timestamp: new Date().toLocaleTimeString('zh-TW')
       })
-      
+
       const userMessage = this.userInput
       this.userInput = ''
       this.scrollToBottom()
-      
+
+      // 先建立一個空的 assistant 訊息佔位，之後逐字填入
+      const assistantMsgIndex = this.messages.length
+      this.messages.push({
+        type: 'assistant',
+        content: '',
+        emotion: null,
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+        streaming: true
+      })
+
       try {
-        const response = await axios.post(CHAT_API, {
-          user_message: userMessage,
-          conversation_id: this.conversationId,
-          user_id: this.userId
+        const response = await fetch(`${API_URL}/api/chat?stream=true`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            user_message: userMessage,
+            conversation_id: this.conversationId,
+            user_id: this.userId
+          })
         })
-        
-        this.messages.push({
-          type: 'assistant',
-          content: response.data.assistant_message,
-          emotion: response.data.emotion_analysis,
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
-        
-        if (response.data.reflection) {
-          this.latestReflection = response.data.reflection
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`)
         }
-        
+
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder()
+        let fullText = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value, { stream: true })
+          fullText += chunk
+          // 即時更新畫面（打字機效果）
+          this.messages[assistantMsgIndex].content = fullText
+          this.scrollToBottom()
+        }
+
+        // Streaming 結束，移除 streaming 旗標
+        this.messages[assistantMsgIndex].streaming = false
+
+        // 載入最新記憶（背景任務已在後端儲存）
         this.loadMemories()
         this.loadEmotionalStates()
+
       } catch (error) {
-        let errorMessage = '抱歉，發生錯誤了 😢'
-        if (error.response?.status === 405) {
-          errorMessage = '❌ 方法不被允許 (405)'
-        } else if (error.response?.status === 404) {
-          errorMessage = '❌ 未找到端點 (404)'
-        } else if (error.response?.status === 500) {
-          errorMessage = '❌ 伺服器錯誤 (500)'
-        }
-        
-        this.messages.push({
-          type: 'system',
-          content: errorMessage,
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
+        // 把佔位訊息改成錯誤訊息
+        this.messages[assistantMsgIndex].type = 'system'
+        this.messages[assistantMsgIndex].content = `❌ 發生錯誤: ${error.message}`
+        this.messages[assistantMsgIndex].streaming = false
+        this.scrollToBottom()
       } finally {
         this.isLoading = false
         this.scrollToBottom()
@@ -629,6 +646,19 @@ export default {
 .loading-text {
   font-size: 0.9rem;
   color: #6b7280;
+}
+
+/* Streaming 打字游標效果 */
+.message-text.streaming::after {
+  content: '▍';
+  display: inline-block;
+  animation: blink 0.7s infinite;
+  color: #667eea;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
 /* 功能按鈕區（修正：flex-wrap 響應式） */
