@@ -229,36 +229,40 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
         # ✅ Streaming 模式
         # =========================================================
         if stream:
+            async def _post_stream_tasks(full_response: str):
+                """Streaming 結束後，可靠地執行記憶儲存與背景任務"""
+                if not full_response or full_response.startswith("[ERROR]"):
+                    return
+                try:
+                    await memory_system.save_memory(
+                        request.conversation_id,
+                        request.user_message,
+                        full_response,
+                        emotion_analysis,
+                        ai_id=request.ai_id
+                    )
+                    logger.info("💾 Streaming 後記憶儲存完成")
+                except Exception as e:
+                    logger.warning(f"⚠️ Streaming 後記憶儲存失敗: {e}")
+                try:
+                    await run_post_chat_tasks(request, full_response, emotion_analysis)
+                except Exception as e:
+                    logger.warning(f"⚠️ Streaming 後背景任務失敗: {e}")
+
             async def stream_generator():
                 full_response = ""
-                try:
-                    async for chunk in generate_response_stream(
-                        messages,
-                        model=selected_model,
-                        temperature=selected_temperature,
-                        max_tokens=2000
-                    ):
-                        full_response += chunk
-                        yield chunk
-                finally:
-                    # Streaming 結束後，執行記憶儲存與背景任務
-                    if full_response and not full_response.startswith("[ERROR]"):
-                        try:
-                            await memory_system.save_memory(
-                                request.conversation_id,
-                                request.user_message,
-                                full_response,
-                                emotion_analysis,
-                                ai_id=request.ai_id
-                            )
-                        except Exception as e:
-                            logger.warning(f"⚠️ Streaming 後記憶儲存失敗: {e}")
-                        background_tasks.add_task(
-                            run_post_chat_tasks,
-                            request,
-                            full_response,
-                            emotion_analysis
-                        )
+                async for chunk in generate_response_stream(
+                    messages,
+                    model=selected_model,
+                    temperature=selected_temperature,
+                    max_tokens=2000
+                ):
+                    full_response += chunk
+                    yield chunk
+
+                # Streaming 完全結束後，用 asyncio.create_task 確保背景任務被執行
+                asyncio.create_task(_post_stream_tasks(full_response))
+                logger.info(f"✅ Streaming 完成，已排程背景任務（長度: {len(full_response)}字）")
 
             return StreamingResponse(stream_generator(), media_type="text/plain; charset=utf-8")
 
