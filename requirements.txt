@@ -12,3 +12,4 @@ redis>=5.0.0
 pdfplumber
 pinecone
 python-docx
+tavily-python

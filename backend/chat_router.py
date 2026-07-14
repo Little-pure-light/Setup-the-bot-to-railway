@@ -11,11 +11,12 @@ import traceback # 確保 traceback 也在
 # *** 請確保這些模組在你的 backend/ 目錄中可被正確匯入 ***
 from backend.supabase_handler import get_supabase
 supabase = get_supabase()
-from backend.openai_handler import get_openai_client, generate_response, generate_response_stream
+from backend.openai_handler import get_openai_client, generate_response, generate_response_stream, generate_response_with_tools
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
 from backend.modules.memory.redis_interface import RedisInterface
-from backend.core_controller import get_core_controller # 確保 core_controller 放在頂層
+from backend.core_controller import get_core_controller
+from backend.tools import web_search, TOOL_DEFINITIONS
 
 router = APIRouter()
 logger = logging.getLogger("chat_router")
@@ -267,15 +268,69 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
             return StreamingResponse(stream_generator(), media_type="text/plain; charset=utf-8")
 
         # =========================================================
-        # ✅ 原本的非 streaming 模式（保留向後相容）
+        # ✅ 原本的非 streaming 模式（含 Tool Calling）
         # =========================================================
-        assistant_message = await generate_response(
-            openai_client,
+        # 第一輪：讓 AI 決定要不要用工具
+        tool_response = await generate_response_with_tools(
             messages,
+            tools=TOOL_DEFINITIONS,
             model=selected_model,
-            max_tokens=1000,
-            temperature=selected_temperature
+            temperature=selected_temperature,
+            max_tokens=1000
         )
+
+        # 如果 AI 決定呼叫工具
+        if tool_response["finish_reason"] == "tool_calls" and tool_response["tool_calls"]:
+            logger.info(f"🔧 AI 決定呼叫工具，數量：{len(tool_response['tool_calls'])}")
+
+            # 把 AI 的 tool_calls 訊息加進對話
+            messages.append(tool_response["raw_message"])
+
+            # 執行每個工具並收集結果
+            for tool_call in tool_response["tool_calls"]:
+                fn_name = tool_call.function.name
+                fn_args = json.loads(tool_call.function.arguments)
+                tool_result = ""
+
+                logger.info(f"🔧 執行工具：{fn_name}，參數：{fn_args}")
+
+                try:
+                    if fn_name == "web_search":
+                        tool_result = await web_search(query=fn_args.get("query", ""))
+                    else:
+                        tool_result = f"（未知工具：{fn_name}）"
+                except Exception as e:
+                    tool_result = f"（工具執行失敗：{str(e)[:100]}）"
+                    logger.warning(f"⚠️ 工具 {fn_name} 執行失敗: {e}")
+
+                # 把工具結果加進對話
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result
+                })
+                logger.info(f"✅ 工具 {fn_name} 完成，結果長度：{len(tool_result)}")
+
+            # 第二輪：讓 AI 根據工具結果生成最終回答
+            assistant_message = await generate_response(
+                openai_client,
+                messages,
+                model=selected_model,
+                max_tokens=1000,
+                temperature=selected_temperature
+            )
+        else:
+            # AI 不需要工具，直接用第一輪的回答
+            assistant_message = tool_response["content"]
+            if not assistant_message:
+                # 備用：直接呼叫一般模式
+                assistant_message = await generate_response(
+                    openai_client,
+                    messages,
+                    model=selected_model,
+                    max_tokens=1000,
+                    temperature=selected_temperature
+                )
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
         await memory_system.save_memory(

@@ -1,6 +1,7 @@
 import os
+import json
 from openai import OpenAI, AsyncOpenAI
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional, List, Dict, Any
 from dotenv import load_dotenv
 from fastapi import APIRouter, HTTPException, Request
 
@@ -67,6 +68,45 @@ async def generate_response_stream(
                 yield content
     except Exception as e:
         yield f"[ERROR] {str(e)}"
+
+
+async def generate_response_with_tools(
+    messages: List[Dict[str, Any]],
+    tools: List[Dict[str, Any]],
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.8,
+    max_tokens: int = 1000
+) -> Dict[str, Any]:
+    """
+    支援 Tool Calling 的 OpenAI 呼叫。
+
+    回傳:
+        {
+            "content": str,           # 最終回答文字
+            "tool_calls": list,       # AI 決定要呼叫的工具（可能為空）
+            "finish_reason": str      # "stop" 或 "tool_calls"
+        }
+    """
+    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        choice = response.choices[0]
+        return {
+            "content": choice.message.content or "",
+            "tool_calls": choice.message.tool_calls or [],
+            "finish_reason": choice.finish_reason,
+            "raw_message": choice.message
+        }
+    except Exception as e:
+        print(f"❌ generate_response_with_tools 錯誤: {e}")
+        raise
 
 # ✅ 新增一個 POST API 路由：/api/openai/chat
 @router.post("/openai/chat")
