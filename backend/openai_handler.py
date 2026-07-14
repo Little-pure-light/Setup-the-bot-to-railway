@@ -79,12 +79,14 @@ async def generate_response_with_tools(
 ) -> Dict[str, Any]:
     """
     支援 Tool Calling 的 OpenAI 呼叫。
+    若發生任何錯誤，回傳 finish_reason="error" 讓上層降級處理。
 
     回傳:
         {
             "content": str,           # 最終回答文字
             "tool_calls": list,       # AI 決定要呼叫的工具（可能為空）
-            "finish_reason": str      # "stop" 或 "tool_calls"
+            "finish_reason": str,     # "stop", "tool_calls", 或 "error"
+            "raw_message": object     # 原始 message 物件（可能為 None）
         }
     """
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
@@ -105,8 +107,25 @@ async def generate_response_with_tools(
             "raw_message": choice.message
         }
     except Exception as e:
+        err_msg = str(e)
+        if "context_length_exceeded" in err_msg or "maximum context" in err_msg.lower():
+            print(f"⚠️ Token 超過限制，嘗試不帶工具重新呼叫")
+            # Token 超限：降級為不帶工具的普通呼叫
+            return {
+                "content": "",
+                "tool_calls": [],
+                "finish_reason": "error",
+                "raw_message": None,
+                "error": "context_length_exceeded"
+            }
         print(f"❌ generate_response_with_tools 錯誤: {e}")
-        raise
+        return {
+            "content": "",
+            "tool_calls": [],
+            "finish_reason": "error",
+            "raw_message": None,
+            "error": err_msg
+        }
 
 # ✅ 新增一個 POST API 路由：/api/openai/chat
 @router.post("/openai/chat")
