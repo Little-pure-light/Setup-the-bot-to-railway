@@ -22,6 +22,7 @@ class PineconeHandler:
     - 使用 Pinecone v3/v7 API：from pinecone import Pinecone
     - 自動建立/檢查 index（serverless, aws/us-east-1）
     - 提供向後相容 method 別名（見底部 alias）
+    - 若缺少 PINECONE_API_KEY，則進入停用模式（不丟錯誤，所有操作靜悄悄 skip）
     """
 
     def __init__(self):
@@ -30,19 +31,33 @@ class PineconeHandler:
         self.pinecone_api_key = os.getenv("PINECONE_API_KEY")
         self.openai_api_key = os.getenv("OPENAI_API_KEY")
         self.index_name = os.getenv("PINECONE_INDEX_NAME", "xiaochenguang-reflections-v2")
-        self.region = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")  # serverless region
+        self.region = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
+        self.enabled = False
+        self.pc = None
+        self.openai = None
+        self.index = None
+
+        # 沒有 Pinecone API Key 就進入停用模式，不影響其他功能
         if not self.pinecone_api_key:
-            raise ValueError("缺少 PINECONE_API_KEY")
+            print("⚠️ [PineconeHandler] 未設定 PINECONE_API_KEY，Pinecone 向量儲存已停用（Redis + Supabase 仍正常運作）")
+            return
+
         if not self.openai_api_key:
-            raise ValueError("缺少 OPENAI_API_KEY")
+            print("⚠️ [PineconeHandler] 未設定 OPENAI_API_KEY，Pinecone 向量儲存已停用")
+            return
 
-        # 初始化新版客戶端
-        self.pc = Pinecone(api_key=self.pinecone_api_key)
-        self.openai = OpenAI(api_key=self.openai_api_key)
+        try:
+            # 初始化新版客戶端
+            self.pc = Pinecone(api_key=self.pinecone_api_key)
+            self.openai = OpenAI(api_key=self.openai_api_key)
 
-        # 確保/連線索引
-        self._ensure_index()
-        self.index = self.pc.Index(self.index_name)
+            # 確保/連線索引
+            self._ensure_index()
+            self.index = self.pc.Index(self.index_name)
+            self.enabled = True
+            print(f"✅ [PineconeHandler] 已連線，index: {self.index_name}")
+        except Exception as e:
+            print(f"⚠️ [PineconeHandler] 初始化失敗，Pinecone 向量儲存已停用: {e}")
 
     # ---------------- Core ----------------
 
@@ -66,6 +81,8 @@ class PineconeHandler:
 
     def generate_embedding(self, text: str) -> List[float]:
         """產生 1536 維 embedding（新版 OpenAI 語法）"""
+        if not self.enabled:
+            return []
         resp = self.openai.embeddings.create(model=EMBED_MODEL, input=text)
         return resp.data[0].embedding
 
@@ -74,9 +91,10 @@ class PineconeHandler:
         上傳一筆向量（以 reflection_id 為向量 id）
         metadata 僅允許基本型別；複雜型別會自動 json 化
         """
+        if not self.enabled:
+            return
         embedding = self.generate_embedding(content)
         clean_meta = self._sanitize_metadata(metadata)
-
         self.index.upsert([{
             "id": reflection_id,
             "values": embedding,
@@ -85,14 +103,17 @@ class PineconeHandler:
 
     def query_similar(self, text: str, top_k: int = 5) -> List[Dict[str, Any]]:
         """以文字查詢相似向量（回傳 matches 清單）"""
+        if not self.enabled:
+            return []
         vec = self.generate_embedding(text)
         res = self.index.query(vector=vec, top_k=top_k, include_metadata=True)
-        # 新 SDK 回傳 dict-like；統一成 list[dict]
         matches = res.get("matches", []) if isinstance(res, dict) else getattr(res, "matches", [])
         return matches or []
 
     def delete_reflection(self, reflection_id: str) -> None:
         """刪除特定 id 的向量"""
+        if not self.enabled:
+            return
         self.index.delete(ids=[reflection_id])
 
     # ---------------- Utils ----------------
