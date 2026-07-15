@@ -2,11 +2,39 @@
 <html lang="zh-TW">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>小宸光 AI 靈魂系統</title>
+
+  <!-- PWA 設定 -->
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#667eea">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="小宸光">
+  <meta name="mobile-web-app-capable" content="yes">
+
+  <!-- iOS 圖示 -->
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="512x512" href="/icons/icon-512.png">
+
+  <!-- 一般圖示 -->
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="icon" type="image/png" sizes="512x512" href="/icons/icon-512.png">
 </head>
 <body>
   <div id="app"></div>
   <script type="module" src="/src/main.js"></script>
+
+  <!-- 註冊 Service Worker -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js')
+          .then(reg => console.log('✅ [PWA] Service Worker 已註冊:', reg.scope))
+          .catch(err => console.warn('⚠️ [PWA] Service Worker 註冊失敗:', err));
+      });
+    }
+  </script>
 </body>
 </html>
