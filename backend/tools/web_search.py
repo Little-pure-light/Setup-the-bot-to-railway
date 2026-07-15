@@ -15,8 +15,7 @@ SEARCH_TIMEOUT_SECONDS = 10  # 搜尋逾時設定
 async def web_search(query: str, max_results: int = 3) -> str:
     """
     使用 Tavily API 搜尋網路，回傳格式化的搜尋結果字串。
-    所有錯誤都會優雅降級，不會讓上層崩潰。
-
+    所有錯誤都會優雅降級，不會讓上層崩潰。    自動將中文查詢轉成英文，提升搜尋品質。
     參數:
         query: 搜尋關鍵字
         max_results: 最多回傳幾筆結果（預設 3）
