@@ -177,13 +177,13 @@ export default {
   },
   data() {
     return {
-      messages: [],
+      messages: this.loadMessagesFromStorage(),
       userInput: '',
       isLoading: false,
       memories: [],
       emotionalStates: [],
       latestReflection: null,
-      conversationId: this.generateConversationId(),
+      conversationId: this.getOrCreateConversationId(),
       userId: this.getOrCreateUserId(),
       copilotWindowVisible: false
     }
@@ -193,7 +193,6 @@ export default {
       return 'conv_' + Date.now() + '_' + Math.random().toString(36).substring(7)
     },
     getOrCreateUserId() {
-      // 從 localStorage 讀取持久化的 user_id，沒有就建一個新的並存起來
       let uid = localStorage.getItem('xiaochenguang_user_id')
       if (!uid) {
         uid = 'user_' + Date.now() + '_' + Math.random().toString(36).substring(5)
@@ -203,6 +202,41 @@ export default {
         console.log('✅ [UserId] 載入已存在的使用者 ID:', uid)
       }
       return uid
+    },
+    getOrCreateConversationId() {
+      // 同一個用戶回來繼續同一個對話，除非主動「結束對話」
+      let cid = localStorage.getItem('xiaochenguang_conversation_id')
+      if (!cid) {
+        cid = this.generateConversationId()
+        localStorage.setItem('xiaochenguang_conversation_id', cid)
+        console.log('🆕 [ConvId] 建立新對話 ID:', cid)
+      } else {
+        console.log('✅ [ConvId] 繼續上次的對話:', cid)
+      }
+      return cid
+    },
+    loadMessagesFromStorage() {
+      // 從 localStorage 載入上次的對話記錄
+      try {
+        const saved = localStorage.getItem('xiaochenguang_messages')
+        if (saved) {
+          const msgs = JSON.parse(saved)
+          console.log(`✅ [Messages] 載入 ${msgs.length} 則對話記錄`)
+          return msgs
+        }
+      } catch (e) {
+        console.warn('⚠️ [Messages] 載入對話記錄失敗，重新開始')
+      }
+      return []
+    },
+    saveMessagesToStorage() {
+      // 把對話記錄存進 localStorage（最多保留最近 100 則）
+      try {
+        const toSave = this.messages.slice(-100)
+        localStorage.setItem('xiaochenguang_messages', JSON.stringify(toSave))
+      } catch (e) {
+        console.warn('⚠️ [Messages] 儲存對話記錄失敗:', e.message)
+      }
     },
     scrollToBottom() {
       this.$nextTick(() => {
@@ -295,6 +329,8 @@ export default {
       } finally {
         this.isLoading = false
         this.scrollToBottom()
+        // 每次對話結束後自動儲存
+        this.saveMessagesToStorage()
       }
     },
     async loadMemories() {
@@ -375,40 +411,55 @@ export default {
       this.copilotWindowVisible = false
     },
     async archiveConversation() {
-      if (!confirm('確定要結束並封存此對話嗎？對話將被上傳到 IPFS 永久保存。')) {
+      if (!confirm('確定要結束此對話並開始新對話嗎？')) {
         return
       }
-      
+
       try {
+        // 嘗試封存到 IPFS（失敗不影響開新對話）
         this.messages.push({
           type: 'system',
-          content: '⏳ 正在封存對話到 IPFS...',
+          content: '⏳ 正在封存對話...',
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
         this.scrollToBottom()
-        
-        const response = await axios.post(`${API_URL}/api/archive_conversation`, {
-          conversation_id: this.conversationId,
-          user_id: this.userId,
-          include_attachments: true
-        })
-        
-        const cid = response.data.ipfs_cid
-        const gatewayUrl = response.data.gateway_url
-        
+
+        try {
+          const response = await axios.post(`${API_URL}/api/archive_conversation`, {
+            conversation_id: this.conversationId,
+            user_id: this.userId,
+            include_attachments: true
+          })
+          const cid = response.data.ipfs_cid
+          if (cid) {
+            this.messages.push({
+              type: 'system',
+              content: `✅ 對話已封存\n🔗 CID: ${cid}`,
+              timestamp: new Date().toLocaleTimeString('zh-TW')
+            })
+          }
+        } catch (archiveErr) {
+          console.warn('⚠️ 封存失敗，但仍開始新對話:', archiveErr.message)
+        }
+
+        // 清除 localStorage，開始新對話
+        localStorage.removeItem('xiaochenguang_messages')
+        localStorage.removeItem('xiaochenguang_conversation_id')
+
+        // 重置對話狀態
+        this.messages = []
+        this.conversationId = this.getOrCreateConversationId()
         this.messages.push({
           type: 'system',
-          content: `✅ 對話已封存到 IPFS\n🔗 CID: ${cid}\n🌐 查看: ${gatewayUrl}`,
+          content: '✨ 已開始新對話，小宸光在這裡陪你～',
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
         this.scrollToBottom()
-        
-        alert(`對話已成功封存！\n\nIPFS CID: ${cid}\n\n你可以通過以下網址查看:\n${gatewayUrl}`)
-        
+
       } catch (error) {
         this.messages.push({
           type: 'system',
-          content: `❌ 封存失敗: ${error.response?.data?.detail || error.message}`,
+          content: `❌ 操作失敗: ${error.message}`,
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
         this.scrollToBottom()
