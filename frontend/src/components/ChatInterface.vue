@@ -152,7 +152,7 @@
 
 <script>
 import axios from 'axios'
-import { CHAT_API } from '../config.js'
+import { CHAT_API, API_BASE, API_SECRET, getAuthHeaders } from '../config.js'
 import CopilotWindow from './CopilotWindow.vue'
 
 const getApiUrl = () => {
@@ -184,13 +184,25 @@ export default {
       emotionalStates: [],
       latestReflection: null,
       conversationId: this.generateConversationId(),
-      userId: 'user_' + Date.now(),
+      userId: this.getOrCreateUserId(),
       copilotWindowVisible: false
     }
   },
   methods: {
     generateConversationId() {
       return 'conv_' + Date.now() + '_' + Math.random().toString(36).substring(7)
+    },
+    getOrCreateUserId() {
+      // 從 localStorage 讀取持久化的 user_id，沒有就建一個新的並存起來
+      let uid = localStorage.getItem('xiaochenguang_user_id')
+      if (!uid) {
+        uid = 'user_' + Date.now() + '_' + Math.random().toString(36).substring(5)
+        localStorage.setItem('xiaochenguang_user_id', uid)
+        console.log('🆕 [UserId] 建立新使用者 ID:', uid)
+      } else {
+        console.log('✅ [UserId] 載入已存在的使用者 ID:', uid)
+      }
+      return uid
     },
     scrollToBottom() {
       this.$nextTick(() => {
@@ -241,7 +253,7 @@ export default {
       try {
         const response = await fetch(`${API_URL}/api/chat?stream=true`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: getAuthHeaders(),
           body: JSON.stringify({
             user_message: userMessage,
             conversation_id: this.conversationId,

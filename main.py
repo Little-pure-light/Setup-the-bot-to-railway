@@ -2,8 +2,9 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import datetime
 import logging
@@ -35,6 +36,22 @@ async def lifespan(app: FastAPI):
     logger.info("👋 小晨光 AI 系統關閉中...")
 
 app = FastAPI(lifespan=lifespan)
+
+# ✅ 選擇性 API Secret 保護中介軟體
+# 若 Railway 設定了 API_SECRET 環境變數，所有 /api/* 請求需帶 Authorization: Bearer <token>
+API_SECRET = os.getenv("API_SECRET", "")
+
+@app.middleware("http")
+async def api_auth_middleware(request: Request, call_next):
+    if API_SECRET and request.url.path.startswith("/api/"):
+        # 排除健康檢查
+        if request.url.path not in ["/api/health"]:
+            auth_header = request.headers.get("Authorization", "")
+            token = auth_header.replace("Bearer ", "").strip()
+            if token != API_SECRET:
+                logger.warning(f"⛔ 未授權存取：{request.url.path}，來源：{request.client.host if request.client else 'unknown'}")
+                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    return await call_next(request)
 
 # ✅ CORS 設定（支援 Cloudflare Pages 與 Replit）
 app.add_middleware(

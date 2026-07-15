@@ -286,6 +286,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
                                 continue
 
                             tool_result = ""
+                            tool_call_id = getattr(tool_call, 'id', 'unknown')
+                            logger.info(f"🔧 [Streaming] 開始執行工具：{fn_name}，tool_call_id={tool_call_id}，參數：{fn_args}")
                             try:
                                 if fn_name == "web_search":
                                     tool_result = await web_search(query=fn_args.get("query", ""))
@@ -293,14 +295,14 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
                                     tool_result = f"[UNKNOWN_TOOL] 不認識的工具：{fn_name}"
                             except Exception as e:
                                 tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
-                                logger.warning(f"⚠️ [Streaming] 工具 {fn_name} 失敗: {e}")
+                                logger.warning(f"⚠️ [Streaming] 工具 {fn_name} 失敗，tool_call_id={tool_call_id}: {e}")
 
                             stream_messages.append({
                                 "role": "tool",
-                                "tool_call_id": tool_call.id,
+                                "tool_call_id": tool_call_id,
                                 "content": tool_result
                             })
-                            logger.info(f"✅ [Streaming] 工具 {fn_name} 完成，結果長度：{len(tool_result)}")
+                            logger.info(f"✅ [Streaming] 工具 {fn_name} 完成，tool_call_id={tool_call_id}，結果長度：{len(tool_result)}")
 
                         final_messages = stream_messages
 
@@ -375,7 +377,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
                         })
                         continue
 
-                    logger.info(f"🔧 執行工具：{fn_name}，參數：{fn_args}")
+                    logger.info(f"🔧 執行工具：{fn_name}，tool_call_id={fn_name and tool_call.id}，參數：{fn_args}")
                     tool_result = ""
 
                     try:
@@ -386,14 +388,14 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
                             logger.warning(f"⚠️ 未知工具：{fn_name}")
                     except Exception as e:
                         tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
-                        logger.warning(f"⚠️ 工具 {fn_name} 執行異常: {e}")
+                        logger.warning(f"⚠️ 工具 {fn_name} 執行異常，tool_call_id={tool_call.id}: {e}")
 
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_call.id,
                         "content": tool_result
                     })
-                    logger.info(f"✅ 工具 {fn_name} 完成，結果長度：{len(tool_result)}")
+                    logger.info(f"✅ 工具 {fn_name} 完成，tool_call_id={tool_call.id}，結果長度：{len(tool_result)}")
 
                 # 第二輪：讓 AI 根據工具結果生成最終回答
                 assistant_message = await generate_response(
