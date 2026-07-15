@@ -227,7 +227,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
             logger.info("🌟 啟用：Xiaochenguang 預設光光寶貝")
 
         # =========================================================
-        # ✅ Streaming 模式
+        # ✅ Streaming 模式（含 Tool Calling）
         # =========================================================
         if stream:
             async def _post_stream_tasks(full_response: str):
@@ -252,8 +252,75 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
 
             async def stream_generator():
                 full_response = ""
+                final_messages = messages  # 預設使用原始 messages
+
+                # === 第一步：非 Streaming 判斷是否需要工具 ===
+                try:
+                    tool_response = await generate_response_with_tools(
+                        messages,
+                        tools=TOOL_DEFINITIONS,
+                        model=selected_model,
+                        temperature=selected_temperature,
+                        max_tokens=1000
+                    )
+
+                    if tool_response["finish_reason"] == "tool_calls" and tool_response["tool_calls"]:
+                        logger.info(f"🔧 [Streaming] AI 決定呼叫工具，數量：{len(tool_response['tool_calls'])}")
+
+                        # 把 AI 的 tool_calls 訊息加進 messages
+                        stream_messages = list(messages)
+                        stream_messages.append(tool_response["raw_message"])
+
+                        # 執行每個工具
+                        for tool_call in tool_response["tool_calls"]:
+                            try:
+                                fn_name = tool_call.function.name
+                                fn_args = json.loads(tool_call.function.arguments)
+                            except (AttributeError, json.JSONDecodeError) as e:
+                                logger.warning(f"⚠️ [Streaming] 解析 tool_call 格式失敗: {e}")
+                                stream_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": getattr(tool_call, 'id', 'unknown'),
+                                    "content": "[TOOL_PARSE_ERROR] 工具呼叫格式錯誤"
+                                })
+                                continue
+
+                            tool_result = ""
+                            try:
+                                if fn_name == "web_search":
+                                    tool_result = await web_search(query=fn_args.get("query", ""))
+                                else:
+                                    tool_result = f"[UNKNOWN_TOOL] 不認識的工具：{fn_name}"
+                            except Exception as e:
+                                tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
+                                logger.warning(f"⚠️ [Streaming] 工具 {fn_name} 失敗: {e}")
+
+                            stream_messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "content": tool_result
+                            })
+                            logger.info(f"✅ [Streaming] 工具 {fn_name} 完成，結果長度：{len(tool_result)}")
+
+                        final_messages = stream_messages
+
+                    elif tool_response["finish_reason"] == "stop" and tool_response["content"]:
+                        # AI 不需要工具，且第一輪已有回答 → 直接 yield 不再 streaming
+                        # （避免多呼叫一次 API，直接把第一輪回答逐字輸出）
+                        for char in tool_response["content"]:
+                            full_response += char
+                            yield char
+                        asyncio.create_task(_post_stream_tasks(full_response))
+                        logger.info(f"✅ [Streaming] 不需工具，直接輸出第一輪回答")
+                        return
+
+                except Exception as e:
+                    logger.warning(f"⚠️ [Streaming] Tool calling 判斷失敗，降級為直接 Streaming: {e}")
+                    # 降級：直接 streaming，不帶工具
+
+                # === 第二步：用 Streaming 輸出最終答案 ===
                 async for chunk in generate_response_stream(
-                    messages,
+                    final_messages,
                     model=selected_model,
                     temperature=selected_temperature,
                     max_tokens=2000
