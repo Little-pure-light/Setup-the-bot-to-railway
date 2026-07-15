@@ -43,7 +43,7 @@ async def web_search(query: str, max_results: int = 3) -> str:
         response = await asyncio.wait_for(
             loop.run_in_executor(None, lambda: client.search(
                 query=query,
-                search_depth="basic",
+                search_depth="advanced",
                 max_results=max_results,
                 include_answer=True
             )),

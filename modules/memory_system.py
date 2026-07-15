@@ -143,12 +143,14 @@ class MemorySystem:
             print(f"❌ 傳統搜尋失敗：{e}")
             return ""
 
-    async def recall_memories(self, user_message: str, conversation_id: str) -> str:
-        """根據使用者輸入，從記憶資料庫中召回相關對話記憶"""
+    async def recall_memories(self, user_message: str, conversation_id: str, user_id: str = "default_user") -> str:
+        """根據使用者輸入，從記憶資料庫中召回相關對話記憶（支援跨對話 user_id 召回）"""
         try:
+            # 第一優先：從當前對話找相關記憶
             raw_memories = await self.search_relevant_memories(conversation_id, user_message, limit=3)
-            
+
             if not raw_memories:
+                # 第二優先：從當前對話找最近記憶
                 recent_result = self.supabase.table(self.memories_table)\
                     .select("user_message, assistant_message")\
                     .eq("conversation_id", conversation_id)\
@@ -158,7 +160,19 @@ class MemorySystem:
                     .execute()
                 if recent_result.data:
                     raw_memories = "\n".join([f"相關記憶: {m['user_message']} -> {m['assistant_message']}" for m in recent_result.data])
-            
+
+            if not raw_memories and user_id and user_id != "default_user":
+                # 第三優先：跨對話，用 user_id 找最近的歷史對話
+                cross_result = self.supabase.table(self.memories_table)\
+                    .select("user_message, assistant_message")\
+                    .eq("user_id", user_id)\
+                    .eq("memory_type", "conversation")\
+                    .order("created_at", desc=True)\
+                    .limit(5)\
+                    .execute()
+                if cross_result.data:
+                    raw_memories = "\n".join([f"相關記憶: {m['user_message']} -> {m['assistant_message']}" for m in cross_result.data])
+
             if not raw_memories:
                 return ""
             

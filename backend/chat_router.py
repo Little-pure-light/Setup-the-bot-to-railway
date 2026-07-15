@@ -188,7 +188,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
         # 1. 執行所有「讀取」任務（這必須是同步的）
         recalled_memories = await memory_system.recall_memories(
             request.user_message,
-            request.conversation_id
+            request.conversation_id,
+            user_id=request.user_id
         )
         conversation_history = memory_system.get_conversation_history(
             request.conversation_id,
