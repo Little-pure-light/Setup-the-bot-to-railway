@@ -11,9 +11,31 @@
             <p>靈魂孵化器系統</p>
           </div>
         </div>
-        <button @click="goToHealthCheck" class="status-btn">
-          📋 系統狀態
-        </button>
+        <div class="header-right">
+          <div v-if="authUser" class="user-chip" :title="authUser.email || authUser.id">
+            <span class="user-dot"></span>
+            <span class="user-label">{{ authEmailLabel }}</span>
+          </div>
+          <button
+            v-if="authUser"
+            @click="handleLogout"
+            class="status-btn auth-btn"
+            type="button"
+          >
+            登出
+          </button>
+          <button
+            v-else
+            @click="showLoginModal = true"
+            class="status-btn auth-btn"
+            type="button"
+          >
+            🔐 登入
+          </button>
+          <button @click="goToHealthCheck" class="status-btn" type="button">
+            📋 系統狀態
+          </button>
+        </div>
       </div>
 
       <!-- 主內容區 -->
@@ -147,6 +169,13 @@
       :user-id="userId"
       @close="closeCopilotWindow"
     />
+
+    <!-- Email 登入 -->
+    <LoginModal
+      :visible="showLoginModal"
+      @close="showLoginModal = false"
+      @success="onLoginSuccess"
+    />
   </div>
 </template>
 
@@ -154,6 +183,16 @@
 import axios from 'axios'
 import { CHAT_API, API_BASE, API_SECRET, getAuthHeaders } from '../config.js'
 import CopilotWindow from './CopilotWindow.vue'
+import LoginModal from './LoginModal.vue'
+import {
+  getSession,
+  getUserAuthHeaders,
+  onAuthStateChange,
+  resolveUserId,
+  signOut,
+  syncUserProfile,
+  isAuthConfigured,
+} from '../lib/auth.js'
 
 const getApiUrl = () => {
   const url = import.meta.env.VITE_API_URL
@@ -173,7 +212,8 @@ console.log('🚀 [ChatInterface] 最終 API_URL:', API_URL)
 export default {
   name: 'ChatInterface',
   components: {
-    CopilotWindow
+    CopilotWindow,
+    LoginModal,
   },
   data() {
     return {
@@ -187,23 +227,43 @@ export default {
       latestReflection: null,
       conversationId: this.getOrCreateConversationId(),
       userId: this.getOrCreateUserId(),
-      copilotWindowVisible: false
+      copilotWindowVisible: false,
+      showLoginModal: false,
+      authUser: null,
+      authUnsubscribe: null,
+      personalitySummary: null,
     }
+  },
+  computed: {
+    authEmailLabel() {
+      if (!this.authUser) return ''
+      const email = this.authUser.email || ''
+      if (email.length > 22) return email.slice(0, 18) + '…'
+      return email || '已登入'
+    },
   },
   methods: {
     generateConversationId() {
       return 'conv_' + Date.now() + '_' + Math.random().toString(36).substring(7)
     },
     getOrCreateUserId() {
+      // 優先使用已登入綁定的 id；否則建立/沿用訪客 id
       let uid = localStorage.getItem('xiaochenguang_user_id')
       if (!uid) {
-        uid = 'user_' + Date.now() + '_' + Math.random().toString(36).substring(5)
-        localStorage.setItem('xiaochenguang_user_id', uid)
-        console.log('🆕 [UserId] 建立新使用者 ID:', uid)
+        uid = resolveUserId(null)
+        console.log('🆕 [UserId] 建立訪客 ID:', uid)
       } else {
         console.log('✅ [UserId] 載入已存在的使用者 ID:', uid)
       }
       return uid
+    },
+    async buildRequestHeaders() {
+      // 已登入：帶 Supabase JWT；否則回退 API_SECRET
+      try {
+        return await getUserAuthHeaders()
+      } catch {
+        return getAuthHeaders()
+      }
     },
     getOrCreateConversationId() {
       // 同一個用戶回來繼續同一個對話，除非主動「結束對話」
@@ -299,7 +359,7 @@ export default {
           `${API_URL}/api/chat?stream=true&use_tools=true`,
           {
             method: 'POST',
-            headers: getAuthHeaders(),
+            headers: await this.buildRequestHeaders(),
             signal: this.streamAbortController.signal,
             body: JSON.stringify({
               user_message: userMessage,
@@ -382,7 +442,11 @@ export default {
     async loadHistoryFromBackend() {
       // 從後端 Supabase 載入歷史對話（用於 localStorage 空的情況，如換裝置/清快取）
       try {
-        const response = await axios.get(`${API_URL}/api/recent-history/${this.userId}?limit=30`)
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/recent-history/${this.userId}?limit=30`,
+          { headers }
+        )
         const { messages, conversation_id } = response.data
 
         if (messages && messages.length > 0) {
@@ -400,9 +464,104 @@ export default {
         console.warn('⚠️ [History] 從後端載入歷史失敗，以空白對話開始:', error.message)
       }
     },
+    async loadPersonality() {
+      try {
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/personality/${this.userId}`,
+          { headers }
+        )
+        this.personalitySummary = response.data?.personality || null
+        if (this.personalitySummary) {
+          console.log('✅ [Personality] 已載入個人人格')
+        }
+      } catch (error) {
+        this.personalitySummary = null
+        console.warn('⚠️ [Personality] 載入失敗:', error.message)
+      }
+    },
+    /**
+     * 登入後：用 JWT 一次同步記憶 + 人格（跨裝置）
+     * @param {{ notify?: boolean }} options notify=false 時不插入系統提示（頁面重載）
+     */
+    async applyAuthSync(options = {}) {
+      const notify = options.notify !== false
+      try {
+        const data = await syncUserProfile()
+        this.userId = data.user_id
+        localStorage.setItem('xiaochenguang_user_id', data.user_id)
+
+        if (data.conversation_id) {
+          this.conversationId = data.conversation_id
+          localStorage.setItem('xiaochenguang_conversation_id', data.conversation_id)
+        }
+
+        if (data.messages && data.messages.length > 0) {
+          this.messages = data.messages
+          this.saveMessagesToStorage()
+        }
+
+        this.personalitySummary = data.personality || null
+
+        if (notify) {
+          const traitHint = data.personality?.traits
+            ? Object.keys(data.personality.traits).slice(0, 3).join('、')
+            : ''
+          this.messages.push({
+            type: 'system',
+            content:
+              `🔐 已登入並同步個人資料` +
+              (data.message_count ? `（${data.message_count} 筆記憶）` : '') +
+              (traitHint ? `\n🎭 人格特質已載入：${traitHint}` : '\n🎭 人格資料已就緒'),
+            timestamp: new Date().toLocaleTimeString('zh-TW'),
+          })
+          this.scrollToBottom()
+        }
+
+        await this.loadMemories()
+        await this.loadEmotionalStates()
+        console.log('✅ [Auth] 跨裝置同步完成')
+      } catch (error) {
+        console.warn('⚠️ [Auth] 同步失敗，改走一般歷史載入:', error.message)
+        await this.loadHistoryFromBackend()
+        await this.loadPersonality()
+      }
+    },
+    async onLoginSuccess({ user }) {
+      this.showLoginModal = false
+      this.authUser = user || null
+      if (user?.id) {
+        this.userId = user.id
+        localStorage.setItem('xiaochenguang_user_id', user.id)
+      }
+      // 登入後強制從雲端載入，避免舊裝置 local 訊息覆蓋
+      localStorage.removeItem('xiaochenguang_messages')
+      this.messages = []
+      await this.applyAuthSync({ notify: true })
+    },
+    async handleLogout() {
+      try {
+        await signOut()
+      } catch (e) {
+        console.warn('登出時發生錯誤:', e.message)
+      }
+      this.authUser = null
+      this.personalitySummary = null
+      this.userId = resolveUserId(null)
+      this.messages.push({
+        type: 'system',
+        content: '👋 已登出。訪客模式下對話不會跨裝置同步。',
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+      })
+      this.scrollToBottom()
+    },
     async loadMemories() {
       try {
-        const response = await axios.get(`${API_URL}/api/memories/${this.conversationId}?limit=10`)
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/memories/${this.conversationId}?limit=10`,
+          { headers }
+        )
         this.memories = response.data
       } catch (error) {
         this.memories = []
@@ -410,7 +569,11 @@ export default {
     },
     async loadEmotionalStates() {
       try {
-        const response = await axios.get(`${API_URL}/api/emotional-states/${this.userId}?limit=10`)
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/emotional-states/${this.userId}?limit=10`,
+          { headers }
+        )
         this.emotionalStates = response.data
       } catch (error) {
         this.emotionalStates = []
@@ -543,17 +706,62 @@ export default {
     }
   },
   async mounted() {
-    // 如果 localStorage 沒有記錄，嘗試從後端（Supabase）載入歷史
-    if (this.messages.length === 0) {
-      await this.loadHistoryFromBackend()
+    // 初始化 Auth 狀態
+    try {
+      const session = await getSession()
+      if (session?.user) {
+        this.authUser = session.user
+        this.userId = session.user.id
+        localStorage.setItem('xiaochenguang_user_id', session.user.id)
+        // 已登入：自動同步記憶與人格（跨裝置），重載不重複提示
+        await this.applyAuthSync({ notify: false })
+      } else if (this.messages.length === 0) {
+        await this.loadHistoryFromBackend()
+      }
+    } catch (e) {
+      console.warn('⚠️ [Auth] 初始化失敗:', e.message)
+      if (this.messages.length === 0) {
+        await this.loadHistoryFromBackend()
+      }
     }
+
+    this.authUnsubscribe = onAuthStateChange(async (session) => {
+      if (session?.user) {
+        // 避免與 onLoginSuccess 重複同步：僅在 user 變更時處理
+        if (!this.authUser || this.authUser.id !== session.user.id) {
+          this.authUser = session.user
+          this.userId = session.user.id
+          localStorage.setItem('xiaochenguang_user_id', session.user.id)
+        } else {
+          this.authUser = session.user
+        }
+      } else {
+        this.authUser = null
+      }
+    })
+
+    // 未登入且 Auth 已設定時，輕量提示可登入同步
+    if (!this.authUser && isAuthConfigured() && this.messages.length === 0) {
+      this.messages.push({
+        type: 'system',
+        content: '💡 登入後可跨裝置同步個人記憶與人格～點右上角「登入」開始。',
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+      })
+    }
+
     this.loadMemories()
     this.loadEmotionalStates()
+    if (this.authUser) {
+      this.loadPersonality()
+    }
     this.$nextTick(() => this.scrollToBottom())
     window.addEventListener('beforeunload', this.handleBeforeUnload)
   },
   beforeUnmount() {
     window.removeEventListener('beforeunload', this.handleBeforeUnload)
+    if (typeof this.authUnsubscribe === 'function') {
+      this.authUnsubscribe()
+    }
   }
 }
 </script>
@@ -622,6 +830,39 @@ export default {
   opacity: 0.9;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  max-width: 180px;
+}
+
+.user-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6ee7b7;
+  flex-shrink: 0;
+}
+
+.user-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-btn {
   padding: 0.5rem 1rem;
   background: rgba(255, 255, 255, 0.2);
@@ -632,6 +873,10 @@ export default {
   cursor: pointer;
   transition: all 0.3s;
   font-size: 0.9rem;
+}
+
+.status-btn.auth-btn {
+  background: rgba(255, 255, 255, 0.28);
 }
 
 .status-btn:hover {

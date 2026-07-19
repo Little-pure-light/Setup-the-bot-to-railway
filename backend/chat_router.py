@@ -78,7 +78,9 @@ async def run_post_chat_tasks(
     openai_client = get_openai_client()
     memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
     memory_system = MemorySystem(supabase, openai_client, memories_table)
-    prompt_engine = PromptEngine(request.conversation_id, memories_table)
+    prompt_engine = PromptEngine(
+        request.conversation_id, memories_table, user_id=request.user_id
+    )
     
     reflection_result = None
     
@@ -169,7 +171,9 @@ async def chat(
         memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
 
         memory_system = MemorySystem(supabase, openai_client, memories_table)
-        prompt_engine = PromptEngine(request.conversation_id, memories_table)
+        prompt_engine = PromptEngine(
+            request.conversation_id, memories_table, user_id=request.user_id
+        )
 
         # 1. 執行所有「讀取」任務（必須在串流前完成）
         recalled_memories = await memory_system.recall_memories(

@@ -1,9 +1,18 @@
 import json
 from datetime import datetime
+from typing import Optional
+
 
 class PersonalityEngine:
-    def __init__(self, conversation_id, supabase_client, memories_table):
+    def __init__(
+        self,
+        conversation_id,
+        supabase_client,
+        memories_table,
+        user_id: Optional[str] = None,
+    ):
         self.conversation_id = conversation_id
+        self.user_id = user_id
         self.supabase = supabase_client
         self.memories_table = memories_table
         self.personality_traits = {
@@ -23,41 +32,67 @@ class PersonalityEngine:
         self.load_personality()
 
     def load_personality(self):
-        """從Supabase載入個性記憶"""
+        """從 Supabase 載入個性記憶（優先 user_id，跨裝置同步）"""
         try:
-            result = self.supabase.table(self.memories_table)\
-                .select("*")\
-                .eq("conversation_id", self.conversation_id)\
-                .eq("memory_type", "personality")\
-                .execute()
-            
-            if result.data:
-                data = json.loads(result.data[0]['document_content'])
-                self.personality_traits = data.get('traits', self.personality_traits)
-                self.knowledge_domains = data.get('domains', self.knowledge_domains)
-                self.emotional_profile = data.get('emotions', self.emotional_profile)
-                self.emotion_history = data.get('emotion_history', [])
-            
-            try:
-                personality_result = self.supabase.table("user_preferences")\
-                    .select("personality_profile")\
-                    .eq("conversation_id", self.conversation_id)\
+            result = None
+            # 1) 優先以 user_id 載入（跨對話 / 跨裝置）
+            if self.user_id and self.user_id not in ("default_user", ""):
+                result = self.supabase.table(self.memories_table)\
+                    .select("*")\
+                    .eq("user_id", self.user_id)\
+                    .eq("memory_type", "personality")\
+                    .order("created_at", desc=True)\
+                    .limit(1)\
                     .execute()
-                
-                if personality_result.data and personality_result.data[0].get('personality_profile'):
-                    profile_data = json.loads(personality_result.data[0]['personality_profile'])
+
+            # 2) 回退 conversation_id
+            if not result or not result.data:
+                result = self.supabase.table(self.memories_table)\
+                    .select("*")\
+                    .eq("conversation_id", self.conversation_id)\
+                    .eq("memory_type", "personality")\
+                    .execute()
+
+            if result.data:
+                raw = result.data[0].get("document_content") or "{}"
+                data = json.loads(raw) if isinstance(raw, str) else raw
+                self.personality_traits = data.get("traits", self.personality_traits)
+                self.knowledge_domains = data.get("domains", self.knowledge_domains)
+                self.emotional_profile = data.get("emotions", self.emotional_profile)
+                self.emotion_history = data.get("emotion_history", [])
+                print(f"✅ 個性已載入 - key={'user' if self.user_id else 'conv'}")
+
+            try:
+                personality_result = None
+                if self.user_id and self.user_id not in ("default_user", ""):
+                    personality_result = self.supabase.table("user_preferences")\
+                        .select("personality_profile")\
+                        .eq("user_id", self.user_id)\
+                        .limit(1)\
+                        .execute()
+                if not personality_result or not personality_result.data:
+                    personality_result = self.supabase.table("user_preferences")\
+                        .select("personality_profile")\
+                        .eq("conversation_id", self.conversation_id)\
+                        .execute()
+
+                if personality_result.data and personality_result.data[0].get("personality_profile"):
+                    profile_raw = personality_result.data[0]["personality_profile"]
+                    profile_data = (
+                        json.loads(profile_raw) if isinstance(profile_raw, str) else profile_raw
+                    )
                     if isinstance(profile_data, list):
                         self.db_personality_traits = profile_data
                     print(f"✅ 載入 {len(self.db_personality_traits)} 個個性特徵")
-            except:
+            except Exception:
                 self.db_personality_traits = ["溫柔體貼", "活潑開朗", "細心耐心"]
                 print("✅ 使用預設個性特徵")
-            
+
         except Exception as e:
             print(f"載入個性失敗: {e}")
 
     def save_personality(self):
-        """保存個性到Supabase"""
+        """保存個性到 Supabase（寫入 user_id 以支援跨裝置）"""
         try:
             data = {
                 "conversation_id": self.conversation_id,
@@ -73,24 +108,36 @@ class PersonalityEngine:
                 "created_at": datetime.now().isoformat(),
                 "platform": "Web"
             }
-            
-            existing = self.supabase.table(self.memories_table)\
-                .select("id")\
-                .eq("conversation_id", self.conversation_id)\
-                .eq("memory_type", "personality")\
-                .execute()
-            
-            if existing.data:
-                self.supabase.table(self.memories_table)\
-                    .update(data)\
+            if self.user_id and self.user_id not in ("default_user", ""):
+                data["user_id"] = self.user_id
+
+            existing = None
+            if self.user_id and self.user_id not in ("default_user", ""):
+                existing = self.supabase.table(self.memories_table)\
+                    .select("id")\
+                    .eq("user_id", self.user_id)\
+                    .eq("memory_type", "personality")\
+                    .limit(1)\
+                    .execute()
+
+            if not existing or not existing.data:
+                existing = self.supabase.table(self.memories_table)\
+                    .select("id")\
                     .eq("conversation_id", self.conversation_id)\
                     .eq("memory_type", "personality")\
                     .execute()
+
+            if existing.data:
+                self.supabase.table(self.memories_table)\
+                    .update(data)\
+                    .eq("id", existing.data[0]["id"])\
+                    .execute()
             else:
                 self.supabase.table(self.memories_table).insert(data).execute()
-                
-            print(f"✅ 個性已儲存 - 用戶: {self.conversation_id[:8]}...")
-            
+
+            key = (self.user_id or self.conversation_id or "")[:8]
+            print(f"✅ 個性已儲存 - 用戶: {key}...")
+
         except Exception as e:
             print(f"❌ 儲存個性失敗: {e}")
 
