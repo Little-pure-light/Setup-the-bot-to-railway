@@ -44,6 +44,14 @@ async def generate_response(client: OpenAI, messages: list, model: str = "gpt-4o
         raise
 
 
+def _build_async_openai_client() -> AsyncOpenAI:
+    """建立 AsyncOpenAI 客戶端（支援 org）"""
+    kwargs = {"api_key": OPENAI_API_KEY}
+    if OPENAI_ORG_ID:
+        kwargs["organization"] = OPENAI_ORG_ID
+    return AsyncOpenAI(**kwargs)
+
+
 async def generate_response_stream(
     messages: list,
     model: str = "gpt-4o-mini",
@@ -51,22 +59,31 @@ async def generate_response_stream(
     max_tokens: int = 2000
 ) -> AsyncGenerator[str, None]:
     """
-    OpenAI Streaming 回應產生器，逐字 yield 內容。
+    OpenAI Streaming 回應產生器（stream=True），逐 token yield 文字片段。
+    客戶端可用 ReadableStream 即時拼接顯示。
     """
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if not OPENAI_API_KEY:
+        yield "[ERROR] 缺少 OPENAI_API_KEY"
+        return
+
+    client = _build_async_openai_client()
     try:
         stream = await client.chat.completions.create(
             model=model,
             messages=messages,
             temperature=temperature,
             max_tokens=max_tokens,
-            stream=True
+            stream=True,
         )
         async for chunk in stream:
-            content = chunk.choices[0].delta.content
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+            content = getattr(delta, "content", None)
             if content:
                 yield content
     except Exception as e:
+        print(f"❌ OpenAI Streaming 錯誤: {e}")
         yield f"[ERROR] {str(e)}"
 
 
@@ -89,7 +106,16 @@ async def generate_response_with_tools(
             "raw_message": object     # 原始 message 物件（可能為 None）
         }
     """
-    client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if not OPENAI_API_KEY:
+        return {
+            "content": "",
+            "tool_calls": [],
+            "finish_reason": "error",
+            "raw_message": None,
+            "error": "missing_api_key",
+        }
+
+    client = _build_async_openai_client()
     try:
         response = await client.chat.completions.create(
             model=model,
@@ -97,7 +123,7 @@ async def generate_response_with_tools(
             tools=tools,
             tool_choice="auto",
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=max_tokens,
         )
         choice = response.choices[0]
         return {
