@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from backend.supabase_handler import get_supabase
 from backend.openai_handler import get_openai_client
-from backend.modules.memory.redis_interface import RedisInterface
+from backend.redis_interface import RedisInterface
 import logging
 import json
 import base64

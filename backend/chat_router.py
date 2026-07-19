@@ -14,7 +14,7 @@ supabase = get_supabase()
 from backend.openai_handler import get_openai_client, generate_response, generate_response_stream, generate_response_with_tools
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
-from backend.modules.memory.redis_interface import RedisInterface
+from backend.redis_interface import RedisInterface
 from backend.core_controller import get_core_controller
 from backend.tools import web_search, TOOL_DEFINITIONS
 
@@ -22,21 +22,8 @@ router = APIRouter()
 logger = logging.getLogger("chat_router")
 redis_interface = RedisInterface()
 
-_new_memory_core = None
 _reflection_storage = None
 
-def get_new_memory_core():
-    """獲取新記憶模組核心（延遲初始化）"""
-    global _new_memory_core
-    if _new_memory_core is None:
-        try:
-            from backend.modules.memory.core import MemoryCore
-            _new_memory_core = MemoryCore()
-            logger.info("✅ 新記憶模組已啟用")
-        except Exception as e:
-            logger.warning(f"⚠️ 新記憶模組初始化失敗: {e}")
-            _new_memory_core = None
-    return _new_memory_core
 
 def get_reflection_storage():
     """獲取反思儲存服務（延遲初始化）"""
@@ -44,16 +31,12 @@ def get_reflection_storage():
     if _reflection_storage is None:
         try:
             from backend.modules.reflection_storage import ReflectionStorage
-            from backend.modules.memory.redis_interface import RedisInterface
             from backend.modules.pinecone_handler import PineconeHandler
-            
-            redis_interface = RedisInterface()
-            pinecone_handler = PineconeHandler()
-            
+
             _reflection_storage = ReflectionStorage(
-                redis_interface=redis_interface,
+                redis_interface=RedisInterface(),
                 supabase_client=supabase,
-                pinecone_handler=pinecone_handler
+                pinecone_handler=PineconeHandler()
             )
             logger.info("✅ 反思儲存服務已啟用")
         except Exception as e:
@@ -155,20 +138,18 @@ async def run_post_chat_tasks(
                     })
                     if behavior_response.get("success"):
                         logger.info(f"🎯 背景：人格調整已完成")
-        
-        # === 階段3：記憶儲存（含反思與行為調整）===
-        new_memory = get_new_memory_core()
-        if new_memory:
-            result = new_memory.store_conversation(
+
+        # === 階段3：以統一 MemorySystem 更新短期快取（含反思）===
+        if reflection_result:
+            memory_system._cache_short_term(
                 conversation_id=request.conversation_id,
                 user_id=request.user_id,
-                user_msg=request.user_message,
-                assistant_msg=assistant_message,
-                reflection=reflection_result
+                user_input=request.user_message,
+                bot_response=assistant_message,
+                reflection=reflection_result,
             )
-            if result.get("success"):
-                logger.info(f"💾 背景：新記憶模組已儲存（Token: {result.get('token_count', 0)}）")
-                
+            logger.info("💾 背景：已將反思寫入短期記憶快取")
+
     except Exception as e:
         logger.warning(f"⚠️ 背景任務處理失敗: {e}", exc_info=True)
 
@@ -241,7 +222,8 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
                         request.user_message,
                         full_response,
                         emotion_analysis,
-                        ai_id=request.ai_id
+                        ai_id=request.ai_id,
+                        user_id=request.user_id,
                     )
                     logger.info("💾 Streaming 後記憶儲存完成")
                 except Exception as e:
@@ -425,11 +407,12 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
         await memory_system.save_memory(
-            request.conversation_id, 
-            request.user_message, 
+            request.conversation_id,
+            request.user_message,
             assistant_message,
-            emotion_analysis, 
-            ai_id=request.ai_id
+            emotion_analysis,
+            ai_id=request.ai_id,
+            user_id=request.user_id,
         )
 
         background_tasks.add_task(

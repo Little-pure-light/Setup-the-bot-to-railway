@@ -205,8 +205,8 @@ export default {
         memory: '💾',
         reflection: '🧠',
         behavior: '🎯',
-        knowledge_hub: '📚',
-        finetune: '🔧'
+        knowledge: '📚',
+        knowledge_hub: '📚'
       }
       return icons[name] || '📦'
     },
@@ -215,8 +215,8 @@ export default {
         memory: '記憶模組',
         reflection: '反思模組',
         behavior: '行為調節模組',
-        knowledge_hub: '知識中樞',
-        finetune: '微調模組'
+        knowledge: '知識中樞',
+        knowledge_hub: '知識中樞'
       }
       return names[name] || name
     },
