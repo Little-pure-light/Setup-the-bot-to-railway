@@ -41,8 +41,8 @@
               </div>
             </div>
             
-            <!-- Loading 狀態 -->
-            <div v-if="isLoading" class="message-wrapper message-assistant">
+            <!-- Loading：僅在等待第一個串流 token 時顯示 -->
+            <div v-if="isLoading && !isStreaming" class="message-wrapper message-assistant">
               <div class="message-bubble">
                 <div class="loading-dots">
                   <span></span>
@@ -180,6 +180,8 @@ export default {
       messages: this.loadMessagesFromStorage(),
       userInput: '',
       isLoading: false,
+      isStreaming: false,
+      streamAbortController: null,
       memories: [],
       emotionalStates: [],
       latestReflection: null,
@@ -260,9 +262,16 @@ export default {
       return emojiMap[emotion] || '😐'
     },
     async sendMessage() {
-      if (!this.userInput.trim()) return
+      if (!this.userInput.trim() || this.isLoading || this.isStreaming) return
+
+      // 取消上一次未完成的串流（理論上已阻擋，雙保險）
+      if (this.streamAbortController) {
+        this.streamAbortController.abort()
+      }
+      this.streamAbortController = new AbortController()
 
       this.isLoading = true
+      this.isStreaming = false
 
       this.messages.push({
         type: 'user',
@@ -274,7 +283,7 @@ export default {
       this.userInput = ''
       this.scrollToBottom()
 
-      // 先建立一個空的 assistant 訊息佔位，之後逐字填入
+      // 空的 assistant 佔位，串流 token 會即時寫入
       const assistantMsgIndex = this.messages.length
       this.messages.push({
         type: 'assistant',
@@ -285,51 +294,88 @@ export default {
       })
 
       try {
-        const response = await fetch(`${API_URL}/api/chat?stream=true`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({
-            user_message: userMessage,
-            conversation_id: this.conversationId,
-            user_id: this.userId
-          })
-        })
+        // stream=true：OpenAI 真實串流；use_tools=true：保留 web_search 等工具
+        const response = await fetch(
+          `${API_URL}/api/chat?stream=true&use_tools=true`,
+          {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            signal: this.streamAbortController.signal,
+            body: JSON.stringify({
+              user_message: userMessage,
+              conversation_id: this.conversationId,
+              user_id: this.userId
+            })
+          }
+        )
 
         if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
+          const errText = await response.text().catch(() => '')
+          throw new Error(`HTTP ${response.status}${errText ? ': ' + errText.slice(0, 120) : ''}`)
+        }
+
+        if (!response.body) {
+          throw new Error('瀏覽器不支援串流回應（ReadableStream）')
         }
 
         const reader = response.body.getReader()
-        const decoder = new TextDecoder()
+        const decoder = new TextDecoder('utf-8')
         let fullText = ''
+        let receivedFirstChunk = false
 
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
+
           const chunk = decoder.decode(value, { stream: true })
+          if (!chunk) continue
+
+          if (!receivedFirstChunk) {
+            receivedFirstChunk = true
+            this.isStreaming = true
+            this.isLoading = false
+          }
+
           fullText += chunk
           // 即時更新畫面（打字機效果）
           this.messages[assistantMsgIndex].content = fullText
           this.scrollToBottom()
         }
 
-        // Streaming 結束，移除 streaming 旗標
+        // flush 解碼器殘餘
+        const tail = decoder.decode()
+        if (tail) {
+          fullText += tail
+          this.messages[assistantMsgIndex].content = fullText
+        }
+
         this.messages[assistantMsgIndex].streaming = false
 
-        // 載入最新記憶（背景任務已在後端儲存）
+        if (!fullText.trim()) {
+          this.messages[assistantMsgIndex].content = '（沒有收到回覆內容，請再試一次）'
+        } else if (fullText.startsWith('[ERROR]')) {
+          this.messages[assistantMsgIndex].type = 'system'
+        }
+
+        // 後端背景任務會存記憶；稍後刷新側欄
         this.loadMemories()
         this.loadEmotionalStates()
 
       } catch (error) {
-        // 把佔位訊息改成錯誤訊息
-        this.messages[assistantMsgIndex].type = 'system'
-        this.messages[assistantMsgIndex].content = `❌ 發生錯誤: ${error.message}`
+        if (error.name === 'AbortError') {
+          this.messages[assistantMsgIndex].content =
+            (this.messages[assistantMsgIndex].content || '') + '\n（串流已中斷）'
+        } else {
+          this.messages[assistantMsgIndex].type = 'system'
+          this.messages[assistantMsgIndex].content = `❌ 發生錯誤: ${error.message}`
+        }
         this.messages[assistantMsgIndex].streaming = false
         this.scrollToBottom()
       } finally {
         this.isLoading = false
+        this.isStreaming = false
+        this.streamAbortController = null
         this.scrollToBottom()
-        // 每次對話結束後自動儲存
         this.saveMessagesToStorage()
       }
     },

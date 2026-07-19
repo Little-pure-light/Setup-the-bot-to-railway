@@ -154,10 +154,15 @@ async def run_post_chat_tasks(
         logger.warning(f"⚠️ 背景任務處理失敗: {e}", exc_info=True)
 
 # =========================================================
-# ✅ 主流程：/chat 路由（只負責回覆 - 已整合雙 AI 邏輯）
+# ✅ 主流程：/chat 路由（支援 stream=true 真實 OpenAI 串流）
 # =========================================================
-@router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: bool = Query(default=False)):
+@router.post("/chat")
+async def chat(
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
+    stream: bool = Query(default=True, description="是否使用 OpenAI streaming 即時回傳"),
+    use_tools: bool = Query(default=True, description="串流前是否允許 tool calling（如 web_search）"),
+):
     try:
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
         openai_client = get_openai_client()
@@ -166,7 +171,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
         memory_system = MemorySystem(supabase, openai_client, memories_table)
         prompt_engine = PromptEngine(request.conversation_id, memories_table)
 
-        # 1. 執行所有「讀取」任務（這必須是同步的）
+        # 1. 執行所有「讀取」任務（必須在串流前完成）
         recalled_memories = await memory_system.recall_memories(
             request.user_message,
             request.conversation_id,
@@ -177,17 +182,18 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
             limit=5
         )
 
-        # Retrieve file content from Redis (保留原邏輯)
+        # Retrieve file content from Redis
         file_content = ""
         try:
-            keys = redis_interface.redis.keys(f"upload:{request.conversation_id}:*")
-            if keys:
-                latest_key = keys[-1]
-                file_data_json = redis_interface.redis.get(latest_key)
-                if file_data_json:
-                    file_data = json.loads(file_data_json)
-                    file_content = file_data.get("content", "")
-                    logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+            if redis_interface.redis:
+                keys = redis_interface.redis.keys(f"upload:{request.conversation_id}:*")
+                if keys:
+                    latest_key = keys[-1]
+                    file_data_json = redis_interface.redis.get(latest_key)
+                    if file_data_json:
+                        file_data = json.loads(file_data_json)
+                        file_content = file_data.get("content", "")
+                        logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
         except Exception as e:
             logger.warning(f"⚠️ 從 Redis 檢索檔案內容失敗: {e}")
 
@@ -209,11 +215,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
             logger.info("🌟 啟用：Xiaochenguang 預設光光寶貝")
 
         # =========================================================
-        # ✅ Streaming 模式（含 Tool Calling）
+        # ✅ Streaming 模式：OpenAI stream=True 真實 token 串流
+        # - 預設直接串流（低延遲、即時打字）
+        # - use_tools=true 時：先非串流 tool calling，再 stream 最終答案
         # =========================================================
         if stream:
             async def _post_stream_tasks(full_response: str):
-                """Streaming 結束後，可靠地執行記憶儲存與背景任務"""
+                """串流結束後：記憶儲存 + 反思等背景任務"""
                 if not full_response or full_response.startswith("[ERROR]"):
                     return
                 try:
@@ -233,91 +241,97 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks, stream: 
                 except Exception as e:
                     logger.warning(f"⚠️ Streaming 後背景任務失敗: {e}")
 
-            async def stream_generator():
-                full_response = ""
-                final_messages = messages  # 預設使用原始 messages
-
-                # === 第一步：非 Streaming 判斷是否需要工具 ===
+            async def _prepare_messages_with_optional_tools(base_messages: list) -> list:
+                """可選 tool calling；完成後仍用 stream=True 輸出最終回答"""
+                if not use_tools:
+                    return base_messages
                 try:
                     tool_response = await generate_response_with_tools(
-                        messages,
+                        base_messages,
                         tools=TOOL_DEFINITIONS,
                         model=selected_model,
                         temperature=selected_temperature,
-                        max_tokens=1000
+                        max_tokens=1000,
                     )
+                    if not (
+                        tool_response.get("finish_reason") == "tool_calls"
+                        and tool_response.get("tool_calls")
+                    ):
+                        # 不需工具：丟棄預檢全文，改走真正 OpenAI 串流
+                        return base_messages
 
-                    if tool_response["finish_reason"] == "tool_calls" and tool_response["tool_calls"]:
-                        logger.info(f"🔧 [Streaming] AI 決定呼叫工具，數量：{len(tool_response['tool_calls'])}")
+                    logger.info(
+                        f"🔧 [Streaming] 工具呼叫 x{len(tool_response['tool_calls'])}"
+                    )
+                    stream_messages = list(base_messages)
+                    stream_messages.append(tool_response["raw_message"])
 
-                        # 把 AI 的 tool_calls 訊息加進 messages
-                        stream_messages = list(messages)
-                        stream_messages.append(tool_response["raw_message"])
-
-                        # 執行每個工具
-                        for tool_call in tool_response["tool_calls"]:
-                            try:
-                                fn_name = tool_call.function.name
-                                fn_args = json.loads(tool_call.function.arguments)
-                            except (AttributeError, json.JSONDecodeError) as e:
-                                logger.warning(f"⚠️ [Streaming] 解析 tool_call 格式失敗: {e}")
-                                stream_messages.append({
-                                    "role": "tool",
-                                    "tool_call_id": getattr(tool_call, 'id', 'unknown'),
-                                    "content": "[TOOL_PARSE_ERROR] 工具呼叫格式錯誤"
-                                })
-                                continue
-
-                            tool_result = ""
-                            tool_call_id = getattr(tool_call, 'id', 'unknown')
-                            logger.info(f"🔧 [Streaming] 開始執行工具：{fn_name}，tool_call_id={tool_call_id}，參數：{fn_args}")
-                            try:
-                                if fn_name == "web_search":
-                                    tool_result = await web_search(query=fn_args.get("query", ""))
-                                else:
-                                    tool_result = f"[UNKNOWN_TOOL] 不認識的工具：{fn_name}"
-                            except Exception as e:
-                                tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
-                                logger.warning(f"⚠️ [Streaming] 工具 {fn_name} 失敗，tool_call_id={tool_call_id}: {e}")
-
+                    for tool_call in tool_response["tool_calls"]:
+                        try:
+                            fn_name = tool_call.function.name
+                            fn_args = json.loads(tool_call.function.arguments)
+                        except (AttributeError, json.JSONDecodeError) as e:
+                            logger.warning(f"⚠️ [Streaming] 解析 tool_call 失敗: {e}")
                             stream_messages.append({
                                 "role": "tool",
-                                "tool_call_id": tool_call_id,
-                                "content": tool_result
+                                "tool_call_id": getattr(tool_call, "id", "unknown"),
+                                "content": "[TOOL_PARSE_ERROR] 工具呼叫格式錯誤",
                             })
-                            logger.info(f"✅ [Streaming] 工具 {fn_name} 完成，tool_call_id={tool_call_id}，結果長度：{len(tool_result)}")
+                            continue
 
-                        final_messages = stream_messages
+                        tool_call_id = getattr(tool_call, "id", "unknown")
+                        try:
+                            if fn_name == "web_search":
+                                tool_result = await web_search(query=fn_args.get("query", ""))
+                            else:
+                                tool_result = f"[UNKNOWN_TOOL] 不認識的工具：{fn_name}"
+                        except Exception as e:
+                            tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
+                            logger.warning(f"⚠️ [Streaming] 工具 {fn_name} 失敗: {e}")
 
-                    elif tool_response["finish_reason"] == "stop" and tool_response["content"]:
-                        # AI 不需要工具，且第一輪已有回答 → 直接 yield 不再 streaming
-                        # （避免多呼叫一次 API，直接把第一輪回答逐字輸出）
-                        for char in tool_response["content"]:
-                            full_response += char
-                            yield char
-                        asyncio.create_task(_post_stream_tasks(full_response))
-                        logger.info(f"✅ [Streaming] 不需工具，直接輸出第一輪回答")
-                        return
-
+                        stream_messages.append({
+                            "role": "tool",
+                            "tool_call_id": tool_call_id,
+                            "content": tool_result,
+                        })
+                    return stream_messages
                 except Exception as e:
-                    logger.warning(f"⚠️ [Streaming] Tool calling 判斷失敗，降級為直接 Streaming: {e}")
-                    # 降級：直接 streaming，不帶工具
+                    logger.warning(f"⚠️ [Streaming] Tool 階段失敗，改直接串流: {e}")
+                    return base_messages
 
-                # === 第二步：用 Streaming 輸出最終答案 ===
-                async for chunk in generate_response_stream(
-                    final_messages,
-                    model=selected_model,
-                    temperature=selected_temperature,
-                    max_tokens=2000
-                ):
-                    full_response += chunk
-                    yield chunk
+            async def stream_generator():
+                full_response = ""
+                try:
+                    final_messages = await _prepare_messages_with_optional_tools(messages)
+                    # 真實 OpenAI stream=True：逐 token 推給前端
+                    async for chunk in generate_response_stream(
+                        final_messages,
+                        model=selected_model,
+                        temperature=selected_temperature,
+                        max_tokens=2000,
+                    ):
+                        full_response += chunk
+                        yield chunk
+                except Exception as e:
+                    err = f"[ERROR] Streaming 失敗: {e}"
+                    logger.error(err, exc_info=True)
+                    full_response = err
+                    yield err
+                finally:
+                    asyncio.create_task(_post_stream_tasks(full_response))
+                    logger.info(
+                        f"✅ Streaming 完成，已排程背景任務（長度: {len(full_response)} 字）"
+                    )
 
-                # Streaming 完全結束後，用 asyncio.create_task 確保背景任務被執行
-                asyncio.create_task(_post_stream_tasks(full_response))
-                logger.info(f"✅ Streaming 完成，已排程背景任務（長度: {len(full_response)}字）")
-
-            return StreamingResponse(stream_generator(), media_type="text/plain; charset=utf-8")
+            return StreamingResponse(
+                stream_generator(),
+                media_type="text/plain; charset=utf-8",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                },
+            )
 
         # =========================================================
         # ✅ 原本的非 streaming 模式（含 Tool Calling + 完整錯誤處理）
