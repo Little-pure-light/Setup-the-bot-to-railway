@@ -333,6 +333,27 @@ export default {
         this.saveMessagesToStorage()
       }
     },
+    async loadHistoryFromBackend() {
+      // 從後端 Supabase 載入歷史對話（用於 localStorage 空的情況，如換裝置/清快取）
+      try {
+        const response = await axios.get(`${API_URL}/api/recent-history/${this.userId}?limit=30`)
+        const { messages, conversation_id } = response.data
+
+        if (messages && messages.length > 0) {
+          this.messages = messages
+          // 如果後端有回傳 conversation_id，延續那個對話
+          if (conversation_id) {
+            this.conversationId = conversation_id
+            localStorage.setItem('xiaochenguang_conversation_id', conversation_id)
+          }
+          this.saveMessagesToStorage()
+          console.log(`✅ [History] 從後端載入 ${messages.length} 則歷史對話`)
+        }
+      } catch (error) {
+        // 載入失敗不影響正常使用
+        console.warn('⚠️ [History] 從後端載入歷史失敗，以空白對話開始:', error.message)
+      }
+    },
     async loadMemories() {
       try {
         const response = await axios.get(`${API_URL}/api/memories/${this.conversationId}?limit=10`)
@@ -475,9 +496,14 @@ export default {
       window.open('/status', '_blank')
     }
   },
-  mounted() {
+  async mounted() {
+    // 如果 localStorage 沒有記錄，嘗試從後端（Supabase）載入歷史
+    if (this.messages.length === 0) {
+      await this.loadHistoryFromBackend()
+    }
     this.loadMemories()
     this.loadEmotionalStates()
+    this.$nextTick(() => this.scrollToBottom())
     window.addEventListener('beforeunload', this.handleBeforeUnload)
   },
   beforeUnmount() {

@@ -99,6 +99,59 @@ async def get_memories(conversation_id: str, limit: int = 20):
         logger.exception("❌ 讀取記憶失敗")
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# GET /recent-history/{user_id} - 根據 user_id 取得最近的對話歷史（用於跨裝置載入）
+@router.get("/recent-history/{user_id}")
+async def get_recent_history(user_id: str, limit: int = 30):
+    """
+    根據 user_id 取得最近的對話歷史，用於頁面載入時從後端恢復對話。
+    回傳格式：[{role, content, timestamp}]，按時間正序排列
+    """
+    try:
+        logger.info(f"🔍 查詢最近歷史：user_id={user_id}, limit={limit}")
+        memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
+
+        result = supabase.table(memories_table)\
+            .select("user_message, assistant_message, created_at, conversation_id")\
+            .eq("user_id", user_id)\
+            .eq("memory_type", "conversation")\
+            .order("created_at", desc=True)\
+            .limit(limit)\
+            .execute()
+
+        if not result.data:
+            return {"messages": [], "conversation_id": None}
+
+        # 整理成前端可用的格式（時間正序）
+        rows = list(reversed(result.data))
+        messages = []
+        for row in rows:
+            ts = row.get("created_at", "")[:19].replace("T", " ")
+            if row.get("user_message"):
+                messages.append({
+                    "type": "user",
+                    "content": row["user_message"],
+                    "timestamp": ts,
+                    "streaming": False
+                })
+            if row.get("assistant_message"):
+                messages.append({
+                    "type": "assistant",
+                    "content": row["assistant_message"],
+                    "timestamp": ts,
+                    "streaming": False
+                })
+
+        # 取最新那筆的 conversation_id
+        latest_conv_id = result.data[0].get("conversation_id") if result.data else None
+
+        logger.info(f"✅ 最近歷史查詢成功：{len(messages)} 則訊息")
+        return {"messages": messages, "conversation_id": latest_conv_id}
+
+    except Exception as e:
+        logger.exception("❌ 讀取最近歷史失敗")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # GET /emotional-states/{user_id} - 讀取情緒狀態 (已存在，保留)
 @router.get("/emotional-states/{user_id}")
 async def get_emotional_states(user_id: str, limit: int = 10):
