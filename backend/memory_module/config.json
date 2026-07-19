@@ -1,14 +1,13 @@
 {
   "name": "memory",
   "enabled": true,
-  "version": "1.0.0",
+  "version": "2.0.0",
   "type": "memory_module",
-  "description": "記憶模組 - 負責短期與長期記憶的儲存、Token化與召回功能",
+  "description": "統一記憶系統適配層 — 委派 modules.memory_system.MemorySystem",
   "dependencies": [],
   "health_check": "/api/health/memory",
   "settings": {
-    "redis_ttl": 86400,
-    "max_token_length": 8192,
-    "embedding_model": "text-embedding-3-small"
+    "embedding_model": "text-embedding-3-small",
+    "redis_ttl": 86400
   }
 }

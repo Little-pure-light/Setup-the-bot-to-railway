@@ -43,7 +43,6 @@ class CoreController:
             "reflection_module": ("reflection_module.main", "ReflectionModule"),
             "knowledge_hub": ("knowledge_hub.main", "KnowledgeHub"),
             "behavior_module": ("behavior_module.main", "BehaviorModule"),
-            "finetune_module": ("finetune_module.main", "FineTuneModule")
         }
         
         for module_dir, (module_path, class_name) in module_mapping.items():

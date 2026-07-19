@@ -34,6 +34,10 @@ class RedisMock:
                 "created_at": datetime.now()
             }
             return True
+
+    def setex(self, key: str, time: int, value: str) -> bool:
+        """設置鍵值並指定過期秒數（與 redis-py 相容）"""
+        return self.set(key, value, ex=time)
     
     def get(self, key: str) -> Optional[str]:
         """獲取鍵值"""
@@ -216,6 +220,23 @@ class RedisMock:
             
             # Redis 的 lrange 支持負數索引
             return item["value"][start:stop+1 if stop >= 0 else None]
+
+    def ltrim(self, key: str, start: int, stop: int) -> bool:
+        """修剪列表，只保留 [start, stop] 範圍"""
+        with self._lock:
+            if key not in self._storage:
+                return True
+            item = self._storage[key]
+            if not isinstance(item["value"], list):
+                return True
+            end = stop + 1 if stop >= 0 else None
+            item["value"] = item["value"][start:end]
+            return True
+
+    def scan(self, cursor=0, match: str = None, count: int = 100):
+        """簡易 SCAN 實作，回傳 (next_cursor, keys)"""
+        keys = self.keys(match or "*")
+        return 0, keys
     
     def llen(self, key: str) -> int:
         """獲取列表長度"""

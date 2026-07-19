@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from backend.supabase_handler import get_supabase
-from backend.modules.memory.redis_interface import RedisInterface
+from backend.redis_interface import RedisInterface
 from backend.modules.ipfs_handler import get_ipfs_handler
 import logging
 import json
