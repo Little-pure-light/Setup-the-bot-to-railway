@@ -95,6 +95,7 @@ export default {
       if (!this.loading) this.$emit('close')
     },
     async submit() {
+      if (this.loading) return
       this.error = ''
       this.info = ''
       if (!isAuthConfigured()) {

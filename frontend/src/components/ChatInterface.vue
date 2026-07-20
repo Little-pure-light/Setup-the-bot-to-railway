@@ -416,6 +416,7 @@ import {
   sanitizeForSpeech,
   waitForVoices,
 } from '../lib/voice.js'
+import { parseStreamBuffer } from '../lib/streamParse.js'
 
 const getApiUrl = () => {
   const url = import.meta.env.VITE_API_URL
@@ -666,51 +667,33 @@ export default {
      * 從串流緩衝區拆出工具事件 + meta，回傳可見文字
      */
     consumeStreamBuffer(fullText) {
-      const lines = fullText.split('\n')
-      const visible = []
-      let meta = null
-      for (const line of lines) {
-        if (line.startsWith('__XCG_EVENT__')) {
-          try {
-            const ev = JSON.parse(line.slice('__XCG_EVENT__'.length))
-            if (ev?.type === 'tool_status') {
-              this.toolStatusPhase = ev.status || 'running'
-              this.toolStatusMessage = ev.message || ''
-              if (ev.step != null) this.toolStep = Number(ev.step) || 0
-              if (ev.total != null) this.toolTotal = Number(ev.total) || 0
-              if (Array.isArray(ev.tools)) {
-                // 合併更新，避免閃爍
-                this.activeTools = ev.tools.map((t) => ({
-                  ...t,
-                  icon: t.icon || this.toolIcon(t.name),
-                  display_name: t.display_name || this.toolDisplayName(t.name),
-                }))
-              }
-              if (ev.status === 'done' || ev.status === 'skipped') {
-                setTimeout(() => {
-                  if (this.toolStatusPhase === 'done' || this.toolStatusPhase === 'skipped') {
-                    this.toolStatusPhase = ''
-                    this.toolStatusMessage = ''
-                  }
-                }, ev.status === 'skipped' ? 600 : 1800)
-              }
-            }
-          } catch (_) { /* ignore bad event */ }
-          continue
-        }
-        if (line.startsWith('__XCG_META__')) {
-          try {
-            meta = JSON.parse(line.slice('__XCG_META__'.length))
-          } catch (_) {
-            meta = null
+      const parsed = parseStreamBuffer(fullText || '')
+      for (const ev of parsed.events || []) {
+        if (ev?.type === 'tool_status') {
+          this.toolStatusPhase = ev.status || 'running'
+          this.toolStatusMessage = ev.message || ''
+          if (ev.step != null) this.toolStep = Number(ev.step) || 0
+          if (ev.total != null) this.toolTotal = Number(ev.total) || 0
+          if (Array.isArray(ev.tools)) {
+            this.activeTools = ev.tools.map((t) => ({
+              ...t,
+              icon: t.icon || this.toolIcon(t.name),
+              display_name: t.display_name || this.toolDisplayName(t.name),
+            }))
           }
-          continue
+          if (ev.status === 'done' || ev.status === 'skipped') {
+            setTimeout(() => {
+              if (this.toolStatusPhase === 'done' || this.toolStatusPhase === 'skipped') {
+                this.toolStatusPhase = ''
+                this.toolStatusMessage = ''
+              }
+            }, ev.status === 'skipped' ? 600 : 1800)
+          }
         }
-        // meta 可能接在同一行尾端（無獨立換行）— 由 extractStreamMeta 處理
-        visible.push(line)
       }
-      let text = visible.join('\n')
-      // 若最後還黏著 meta 前綴
+      let text = parsed.text
+      let meta = parsed.meta
+      // meta 可能接在同一行尾端（無獨立換行）
       const extracted = this.extractStreamMeta(text)
       if (extracted.meta) {
         meta = extracted.meta
