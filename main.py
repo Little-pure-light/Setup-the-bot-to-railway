@@ -29,6 +29,7 @@ try:
     from backend.usage_router import router as usage_router
     from backend.tools_router import router as tools_router
     from backend.history_router import router as history_router
+    from backend.voice_router import router as voice_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -124,6 +125,7 @@ try:
     app.include_router(usage_router, prefix="/api")
     app.include_router(tools_router, prefix="/api")
     app.include_router(history_router, prefix="/api")
+    app.include_router(voice_router, prefix="/api")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
@@ -167,6 +169,10 @@ async def api_health():
             "history_conversations": "/api/history/conversations",
             "history_search": "/api/history/search",
             "history_summarize": "/api/history/summarize",
+            "voice_status": "/api/voice/status",
+            "voice_settings": "/api/voice/settings/{user_id}",
+            "voice_prepare_speech": "/api/voice/prepare-speech",
+            "voice_events": "/api/voice/events",
             "health": "/api/health"
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()

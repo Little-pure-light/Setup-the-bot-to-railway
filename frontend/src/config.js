@@ -15,6 +15,13 @@ export const CHAT_API = `${API_BASE}/api/chat`
 /** 預設走 OpenAI 真實串流（stream=true） */
 export const CHAT_STREAM_API = `${API_BASE}/api/chat?stream=true&use_tools=true`
 
+/** 語音 API */
+export const VOICE_STATUS_API = `${API_BASE}/api/voice/status`
+export const VOICE_PREPARE_SPEECH_API = `${API_BASE}/api/voice/prepare-speech`
+export const VOICE_EVENTS_API = `${API_BASE}/api/voice/events`
+export const voiceSettingsApi = (userId) =>
+  `${API_BASE}/api/voice/settings/${encodeURIComponent(userId || 'default_user')}`
+
 // 選擇性 API Secret（若後端有設定 API_SECRET，前端需帶此 token）
 export const API_SECRET = import.meta.env.VITE_API_SECRET || ''
 

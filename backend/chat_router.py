@@ -59,7 +59,12 @@ class ChatRequest(BaseModel):
     conversation_id: str
     user_id: str = "default_user"
     # ✅ 新增 AI 寶貝切換開關
-    ai_id: str = os.getenv("AI_ID", "xiaochenguang_v1") 
+    ai_id: str = os.getenv("AI_ID", "xiaochenguang_v1")
+    # 🎙️ 語音 / 車載
+    voice_mode: bool = False  # 語音友善回覆（簡短口語）
+    car_mode: bool = False  # 車載：更短、重點前置
+    input_method: str = "text"  # text | voice
+    speak_response: bool = False  # 前端是否會朗讀（供後端日誌/策略）
     
 class ChatResponse(BaseModel):
     assistant_message: str
@@ -69,6 +74,7 @@ class ChatResponse(BaseModel):
     usage: Optional[dict] = None
     usage_summary: Optional[dict] = None
     tools_used: Optional[list] = None
+    speech_text: Optional[str] = None  # TTS 友善純文字
 
 
 def _tool_event_payload(
@@ -402,6 +408,28 @@ async def chat(
             file_content
         )
 
+        # 🎙️ 語音 / 車載：注入口語化、可朗讀的回覆規範
+        if request.voice_mode or request.car_mode:
+            try:
+                from backend.voice_router import build_voice_system_hint
+
+                voice_hint = build_voice_system_hint(
+                    voice_mode=request.voice_mode or request.car_mode,
+                    car_mode=request.car_mode,
+                )
+                if voice_hint and messages and messages[0].get("role") == "system":
+                    messages[0]["content"] = (
+                        f"{messages[0].get('content', '')}\n\n{voice_hint}"
+                    )
+                logger.info(
+                    "🎙️ 語音模式已啟用 voice_mode=%s car_mode=%s input=%s",
+                    request.voice_mode,
+                    request.car_mode,
+                    request.input_method,
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ 注入語音提示失敗: {e}")
+
         # ✅ 根據 AI ID 選擇模型
         if request.ai_id == "story_master_v1":
             selected_model = "gpt-4o"
@@ -411,6 +439,10 @@ async def chat(
             selected_model = "gpt-4o-mini"
             selected_temperature = 0.8
             logger.info("🌟 啟用：Xiaochenguang 預設光光寶貝")
+
+        # 車載模式：略降 max_tokens，回覆更短、更快
+        voice_max_tokens = 600 if request.car_mode else (800 if request.voice_mode else 2000)
+        stream_max_tokens = 800 if request.car_mode else (1200 if request.voice_mode else 2000)
 
         # =========================================================
         # ✅ Streaming 模式：OpenAI stream=True 真實 token 串流
@@ -576,7 +608,7 @@ async def chat(
                         final_messages,
                         model=selected_model,
                         temperature=selected_temperature,
-                        max_tokens=2000,
+                        max_tokens=stream_max_tokens,
                     ):
                         if not isinstance(event, dict):
                             # 相容舊字串
@@ -630,10 +662,24 @@ async def chat(
                     except Exception as e:
                         logger.warning(f"⚠️ 記錄 streaming token 失敗: {e}")
 
+                    speech_text = None
+                    if request.voice_mode or request.car_mode or request.speak_response:
+                        try:
+                            from backend.voice_router import sanitize_for_speech
+
+                            speech_text, _ = sanitize_for_speech(
+                                full_response, strip_emojis=True, max_chars=800
+                            )
+                        except Exception:
+                            speech_text = full_response
+
                     meta = {
                         "blocked": False,
                         "usage": usage_payload,
                         "tools_used": tools_used_meta,
+                        "speech_text": speech_text,
+                        "voice_mode": request.voice_mode,
+                        "car_mode": request.car_mode,
                     }
                     try:
                         yield USAGE_META_PREFIX + json.dumps(meta, ensure_ascii=False)
@@ -725,7 +771,7 @@ async def chat(
                     openai_client,
                     messages,
                     model=selected_model,
-                    max_tokens=1000,
+                    max_tokens=voice_max_tokens if request.voice_mode or request.car_mode else 1000,
                     temperature=selected_temperature,
                     return_usage=True,
                 )
@@ -744,7 +790,7 @@ async def chat(
                 openai_client,
                 messages,
                 model=selected_model,
-                max_tokens=1000,
+                max_tokens=voice_max_tokens if request.voice_mode or request.car_mode else 1000,
                 temperature=selected_temperature,
                 return_usage=True,
             )
@@ -766,7 +812,12 @@ async def chat(
             model=selected_model,
             usage=merged_usage,
             endpoint="chat",
-            meta={"stream": False, "use_tools": use_tools},
+            meta={
+                "stream": False,
+                "use_tools": use_tools,
+                "voice_mode": request.voice_mode,
+                "car_mode": request.car_mode,
+            },
         )
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
@@ -786,11 +837,23 @@ async def chat(
             emotion_analysis
         )
 
+        speech_text = None
+        if request.voice_mode or request.car_mode or request.speak_response:
+            try:
+                from backend.voice_router import sanitize_for_speech
+
+                speech_text, _ = sanitize_for_speech(
+                    assistant_message or "", strip_emojis=True, max_chars=800
+                )
+            except Exception:
+                speech_text = assistant_message
+
         return ChatResponse(
             assistant_message=assistant_message,
             emotion_analysis=emotion_analysis,
             conversation_id=request.conversation_id,
             reflection=None,
+            speech_text=speech_text,
             usage=usage_payload,
             usage_summary=usage_payload.get("daily"),
             tools_used=tools_used or None,
