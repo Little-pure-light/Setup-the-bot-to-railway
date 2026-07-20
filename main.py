@@ -27,6 +27,7 @@ try:
     from backend.archive_conversation import router as archive_router
     from backend.auth_router import router as auth_router
     from backend.usage_router import router as usage_router
+    from backend.tools_router import router as tools_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -120,6 +121,7 @@ try:
     app.include_router(archive_router, prefix="/api")
     app.include_router(auth_router, prefix="/api")
     app.include_router(usage_router, prefix="/api")
+    app.include_router(tools_router, prefix="/api")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
@@ -157,6 +159,7 @@ async def api_health():
             "personality": "/api/personality/{user_id}",
             "usage_summary": "/api/usage/summary",
             "usage_user": "/api/usage/user/{user_id}",
+            "tools": "/api/tools",
             "health": "/api/health"
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
