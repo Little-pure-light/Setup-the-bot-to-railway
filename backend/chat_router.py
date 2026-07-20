@@ -16,7 +16,7 @@ from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
 from backend.redis_interface import RedisInterface
 from backend.core_controller import get_core_controller
-from backend.tools import web_search, TOOL_DEFINITIONS
+from backend.tools import get_tool_registry, get_openai_tool_definitions
 from backend.token_tracker import get_token_tracker, estimate_cost_usd
 from backend.moderation import moderate_text, format_block_message
 
@@ -24,8 +24,9 @@ router = APIRouter()
 logger = logging.getLogger("chat_router")
 redis_interface = RedisInterface()
 
-# 串流結尾附加用量 meta 的標記（前端可解析）
+# 串流事件 / 用量 meta 標記（前端可解析）
 USAGE_META_PREFIX = "\n__XCG_META__"
+TOOL_EVENT_PREFIX = "__XCG_EVENT__"
 
 _reflection_storage = None
 
@@ -67,6 +68,37 @@ class ChatResponse(BaseModel):
     reflection: Optional[dict] = None
     usage: Optional[dict] = None
     usage_summary: Optional[dict] = None
+    tools_used: Optional[list] = None
+
+
+def _tool_event_payload(status: str, results_or_calls) -> str:
+    """產生前端可解析的工具狀態事件行。"""
+    tools = []
+    for item in results_or_calls or []:
+        if hasattr(item, "name"):
+            # ToolCallResult
+            tools.append(
+                {
+                    "name": item.name,
+                    "ok": getattr(item, "ok", None),
+                    "duration_ms": getattr(item, "duration_ms", None),
+                    "arguments": getattr(item, "arguments", {}) or {},
+                }
+            )
+        else:
+            # raw openai tool_call
+            try:
+                name = item.function.name
+                args_raw = item.function.arguments or "{}"
+                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+            except Exception:
+                name = "unknown"
+                args = {}
+            tools.append({"name": name, "arguments": args, "ok": None})
+    return TOOL_EVENT_PREFIX + json.dumps(
+        {"type": "tool_status", "status": status, "tools": tools},
+        ensure_ascii=False,
+    )
 
 
 def _merge_usage(*usages: Optional[Dict[str, Any]]) -> Dict[str, int]:
@@ -367,13 +399,23 @@ async def chat(
                     logger.warning(f"⚠️ Streaming 後背景任務失敗: {e}")
 
             async def _prepare_messages_with_optional_tools(base_messages: list):
-                """可選 tool calling；完成後仍用 stream=True 輸出最終回答。回傳 (messages, tool_usage)"""
+                """
+                可選 tool calling；完成後仍用 stream=True 輸出最終回答。
+                回傳 (messages, tool_usage, tool_results, events)
+                events: 要先推給前端的狀態行列表
+                """
                 if not use_tools:
-                    return base_messages, None
+                    return base_messages, None, [], []
+                events = []
                 try:
+                    registry = get_tool_registry()
+                    tool_defs = get_openai_tool_definitions()
+                    if not tool_defs:
+                        return base_messages, None, [], []
+
                     tool_response = await generate_response_with_tools(
                         base_messages,
-                        tools=TOOL_DEFINITIONS,
+                        tools=tool_defs,
                         model=selected_model,
                         temperature=selected_temperature,
                         max_tokens=1000,
@@ -383,55 +425,61 @@ async def chat(
                         tool_response.get("finish_reason") == "tool_calls"
                         and tool_response.get("tool_calls")
                     ):
-                        # 不需工具：丟棄預檢全文，改走真正 OpenAI 串流
-                        # 仍記錄 tool 預檢用量（若有）
-                        return base_messages, tool_usage
+                        return base_messages, tool_usage, [], events
 
                     logger.info(
                         f"🔧 [Streaming] 工具呼叫 x{len(tool_response['tool_calls'])}"
                     )
+                    events.append(
+                        _tool_event_payload("running", tool_response["tool_calls"])
+                    )
+
                     stream_messages = list(base_messages)
                     stream_messages.append(tool_response["raw_message"])
 
-                    for tool_call in tool_response["tool_calls"]:
-                        try:
-                            fn_name = tool_call.function.name
-                            fn_args = json.loads(tool_call.function.arguments)
-                        except (AttributeError, json.JSONDecodeError) as e:
-                            logger.warning(f"⚠️ [Streaming] 解析 tool_call 失敗: {e}")
-                            stream_messages.append({
+                    tool_results = await registry.execute_openai_tool_calls(
+                        tool_response["tool_calls"]
+                    )
+                    for tr in tool_results:
+                        stream_messages.append(
+                            {
                                 "role": "tool",
-                                "tool_call_id": getattr(tool_call, "id", "unknown"),
-                                "content": "[TOOL_PARSE_ERROR] 工具呼叫格式錯誤",
-                            })
-                            continue
-
-                        tool_call_id = getattr(tool_call, "id", "unknown")
-                        try:
-                            if fn_name == "web_search":
-                                tool_result = await web_search(query=fn_args.get("query", ""))
-                            else:
-                                tool_result = f"[UNKNOWN_TOOL] 不認識的工具：{fn_name}"
-                        except Exception as e:
-                            tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
-                            logger.warning(f"⚠️ [Streaming] 工具 {fn_name} 失敗: {e}")
-
-                        stream_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tool_call_id,
-                            "content": tool_result,
-                        })
-                    return stream_messages, tool_usage
+                                "tool_call_id": tr.tool_call_id,
+                                "content": tr.content,
+                            }
+                        )
+                    events.append(_tool_event_payload("done", tool_results))
+                    return stream_messages, tool_usage, tool_results, events
                 except Exception as e:
                     logger.warning(f"⚠️ [Streaming] Tool 階段失敗，改直接串流: {e}")
-                    return base_messages, None
+                    return base_messages, None, [], events
 
             async def stream_generator():
                 full_response = ""
                 stream_usage = None
                 tool_usage = None
+                tools_used_meta = []
                 try:
-                    final_messages, tool_usage = await _prepare_messages_with_optional_tools(messages)
+                    (
+                        final_messages,
+                        tool_usage,
+                        tool_results,
+                        tool_events,
+                    ) = await _prepare_messages_with_optional_tools(messages)
+
+                    for ev in tool_events:
+                        yield ev + "\n"
+
+                    tools_used_meta = [
+                        {
+                            "name": r.name,
+                            "ok": r.ok,
+                            "duration_ms": r.duration_ms,
+                            "arguments": r.arguments,
+                        }
+                        for r in (tool_results or [])
+                    ]
+
                     # 真實 OpenAI stream=True：逐 token 推給前端
                     async for event in generate_response_stream(
                         final_messages,
@@ -494,6 +542,7 @@ async def chat(
                     meta = {
                         "blocked": False,
                         "usage": usage_payload,
+                        "tools_used": tools_used_meta,
                     }
                     try:
                         yield USAGE_META_PREFIX + json.dumps(meta, ensure_ascii=False)
@@ -520,12 +569,18 @@ async def chat(
         # =========================================================
         assistant_message = None
         collected_usages = []
+        tools_used = []
 
         try:
+            registry = get_tool_registry()
+            tool_defs = get_openai_tool_definitions() if use_tools else []
+            if not tool_defs:
+                raise ValueError("tools_disabled")
+
             # 第一輪：讓 AI 決定要不要用工具
             tool_response = await generate_response_with_tools(
                 messages,
-                tools=TOOL_DEFINITIONS,
+                tools=tool_defs,
                 model=selected_model,
                 temperature=selected_temperature,
                 max_tokens=1000
@@ -545,39 +600,28 @@ async def chat(
                 # 把 AI 的 tool_calls 訊息加進對話
                 messages.append(tool_response["raw_message"])
 
-                # 執行每個工具並收集結果
-                for tool_call in tool_response["tool_calls"]:
-                    try:
-                        fn_name = tool_call.function.name
-                        fn_args = json.loads(tool_call.function.arguments)
-                    except (AttributeError, json.JSONDecodeError) as e:
-                        logger.warning(f"⚠️ 解析 tool_call 格式失敗: {e}")
-                        messages.append({
+                tool_results = await registry.execute_openai_tool_calls(
+                    tool_response["tool_calls"]
+                )
+                for tr in tool_results:
+                    messages.append(
+                        {
                             "role": "tool",
-                            "tool_call_id": getattr(tool_call, 'id', 'unknown'),
-                            "content": "[TOOL_PARSE_ERROR] 工具呼叫格式錯誤"
-                        })
-                        continue
-
-                    logger.info(f"🔧 執行工具：{fn_name}，tool_call_id={fn_name and tool_call.id}，參數：{fn_args}")
-                    tool_result = ""
-
-                    try:
-                        if fn_name == "web_search":
-                            tool_result = await web_search(query=fn_args.get("query", ""))
-                        else:
-                            tool_result = f"[UNKNOWN_TOOL] 不認識的工具：{fn_name}"
-                            logger.warning(f"⚠️ 未知工具：{fn_name}")
-                    except Exception as e:
-                        tool_result = "[TOOL_EXEC_ERROR] 工具執行失敗"
-                        logger.warning(f"⚠️ 工具 {fn_name} 執行異常，tool_call_id={tool_call.id}: {e}")
-
-                    messages.append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "content": tool_result
-                    })
-                    logger.info(f"✅ 工具 {fn_name} 完成，tool_call_id={tool_call.id}，結果長度：{len(tool_result)}")
+                            "tool_call_id": tr.tool_call_id,
+                            "content": tr.content,
+                        }
+                    )
+                    tools_used.append(
+                        {
+                            "name": tr.name,
+                            "ok": tr.ok,
+                            "duration_ms": tr.duration_ms,
+                            "arguments": tr.arguments,
+                        }
+                    )
+                    logger.info(
+                        f"✅ 工具 {tr.name} 完成 id={tr.tool_call_id} ok={tr.ok} {tr.duration_ms}ms"
+                    )
 
                 # 第二輪：讓 AI 根據工具結果生成最終回答
                 final_result = await generate_response(
@@ -652,6 +696,7 @@ async def chat(
             reflection=None,
             usage=usage_payload,
             usage_summary=usage_payload.get("daily"),
+            tools_used=tools_used or None,
         )
 
     except Exception as e:

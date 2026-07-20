@@ -1,103 +1,214 @@
 """
 Web Search 工具
-使用 Tavily API 進行網路搜尋
+優先 Tavily API（可靠、適合 AI agent）；可選 DuckDuckGo 備援。
 """
+from __future__ import annotations
+
 import os
 import logging
 import asyncio
+import re
 from typing import Optional
+from urllib.parse import urlparse
 
 logger = logging.getLogger("tools.web_search")
 
-SEARCH_TIMEOUT_SECONDS = 10  # 搜尋逾時設定
+SEARCH_TIMEOUT_SECONDS = float(os.getenv("WEB_SEARCH_TIMEOUT", "12"))
+DEFAULT_MAX_RESULTS = 5
 
 
-async def web_search(query: str, max_results: int = 3) -> str:
-    """
-    使用 Tavily API 搜尋網路，回傳格式化的搜尋結果字串。
-    所有錯誤都會優雅降級，不會讓上層崩潰。    自動將中文查詢轉成英文，提升搜尋品質。
-    參數:
-        query: 搜尋關鍵字
-        max_results: 最多回傳幾筆結果（預設 3）
+def _sanitize_query(query: str) -> Optional[str]:
+    q = (query or "").strip()
+    if not q:
+        return None
+    if len(q) > 300:
+        q = q[:300]
+    # 阻擋明顯非搜尋用途
+    if re.search(r"(?i)(file://|javascript:|data:)", q):
+        return None
+    return q
 
-    回傳:
-        搜尋結果的純文字摘要，若失敗則回傳降級訊息
-    """
-    api_key = os.getenv("TAVILY_API_KEY")
 
-    if not api_key:
-        logger.warning("⚠️ 未設定 TAVILY_API_KEY，web_search 跳過")
-        return "[SEARCH_UNAVAILABLE] 搜尋功能未啟用"
+def _clamp_max_results(max_results: Optional[int]) -> int:
+    try:
+        n = int(max_results if max_results is not None else DEFAULT_MAX_RESULTS)
+    except (TypeError, ValueError):
+        n = DEFAULT_MAX_RESULTS
+    return max(1, min(5, n))
 
+
+def _format_results(answer: str, results: list, max_results: int) -> str:
+    parts = []
+    if answer and len(answer.strip()) > 5:
+        parts.append(f"📋 摘要：{answer.strip()}")
+
+    if results:
+        parts.append("\n🔍 相關資料：")
+        for i, r in enumerate(results[:max_results], 1):
+            title = r.get("title", "（無標題）")
+            content = (r.get("content") or r.get("snippet") or r.get("body") or "")[
+                :300
+            ].strip()
+            url = r.get("url") or r.get("href") or ""
+            # 只顯示 http(s)
+            if url:
+                scheme = urlparse(url).scheme.lower()
+                if scheme not in ("http", "https"):
+                    url = ""
+            if content:
+                line = f"{i}. **{title}**\n   {content}"
+                if url:
+                    line += f"\n   來源：{url}"
+                parts.append(line)
+
+    if not parts:
+        return "[SEARCH_EMPTY] 沒有找到相關搜尋結果"
+    return "\n".join(parts)
+
+
+async def _search_tavily(query: str, max_results: int, api_key: str) -> str:
     try:
         from tavily import TavilyClient
     except ImportError:
         logger.error("❌ tavily-python 套件未安裝")
         return "[SEARCH_UNAVAILABLE] 搜尋套件未安裝"
 
-    try:
-        client = TavilyClient(api_key=api_key)
-
-        # 用 asyncio 跑同步 API + timeout 保護
-        loop = asyncio.get_event_loop()
-        response = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: client.search(
+    client = TavilyClient(api_key=api_key)
+    loop = asyncio.get_event_loop()
+    response = await asyncio.wait_for(
+        loop.run_in_executor(
+            None,
+            lambda: client.search(
                 query=query,
                 search_depth="advanced",
                 max_results=max_results,
-                include_answer=True
-            )),
-            timeout=SEARCH_TIMEOUT_SECONDS
+                include_answer=True,
+            ),
+        ),
+        timeout=SEARCH_TIMEOUT_SECONDS,
+    )
+
+    if not isinstance(response, dict):
+        logger.warning(f"⚠️ Tavily 回傳格式非預期：{type(response)}")
+        return "[SEARCH_EMPTY] 搜尋回傳格式異常"
+
+    answer = response.get("answer", "") or ""
+    results = response.get("results", []) or []
+    text = _format_results(answer, results, max_results)
+    logger.info(f"✅ web_search(Tavily) 完成：{query[:40]}（{len(results)} 筆）")
+    return text
+
+
+async def _search_duckduckgo(query: str, max_results: int) -> str:
+    """
+    備援：DuckDuckGo Instant Answer / HTML-less API（無 key）。
+    僅作 Tavily 不可用時的降級。
+    """
+    import urllib.parse
+    import urllib.request
+    import json
+
+    # DuckDuckGo Instant Answer API
+    params = urllib.parse.urlencode(
+        {
+            "q": query,
+            "format": "json",
+            "no_html": 1,
+            "skip_disambig": 1,
+        }
+    )
+    url = f"https://api.duckduckgo.com/?{params}"
+
+    def _fetch():
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "XiaochenguangBot/1.0"},
         )
+        with urllib.request.urlopen(req, timeout=SEARCH_TIMEOUT_SECONDS) as resp:
+            return json.loads(resp.read().decode("utf-8", errors="replace"))
 
-        # 檢查回傳格式
-        if not isinstance(response, dict):
-            logger.warning(f"⚠️ Tavily 回傳格式非預期：{type(response)}")
-            return "[SEARCH_EMPTY] 搜尋回傳格式異常"
+    loop = asyncio.get_event_loop()
+    data = await asyncio.wait_for(loop.run_in_executor(None, _fetch), timeout=SEARCH_TIMEOUT_SECONDS)
 
-        parts = []
+    answer = (data.get("AbstractText") or data.get("Answer") or "").strip()
+    results = []
+    for topic in (data.get("RelatedTopics") or [])[:max_results]:
+        if isinstance(topic, dict) and topic.get("Text"):
+            results.append(
+                {
+                    "title": (topic.get("Text") or "")[:80],
+                    "content": topic.get("Text") or "",
+                    "url": topic.get("FirstURL") or "",
+                }
+            )
+        elif isinstance(topic, dict) and "Topics" in topic:
+            for sub in topic.get("Topics") or []:
+                if isinstance(sub, dict) and sub.get("Text"):
+                    results.append(
+                        {
+                            "title": (sub.get("Text") or "")[:80],
+                            "content": sub.get("Text") or "",
+                            "url": sub.get("FirstURL") or "",
+                        }
+                    )
+                if len(results) >= max_results:
+                    break
 
-        # AI 摘要答案
-        answer = response.get("answer", "")
-        if answer and len(answer.strip()) > 5:
-            parts.append(f"📋 摘要：{answer.strip()}")
+    text = _format_results(answer, results, max_results)
+    if text.startswith("[SEARCH_EMPTY]"):
+        return "[SEARCH_EMPTY] DuckDuckGo 備援也沒有結果"
+    logger.info(f"✅ web_search(DuckDuckGo) 完成：{query[:40]}")
+    return "（備援搜尋）\n" + text
 
-        # 各筆來源
-        results = response.get("results", [])
-        if results:
-            parts.append("\n🔍 相關資料：")
-            for i, r in enumerate(results[:max_results], 1):
-                title = r.get("title", "（無標題）")
-                content = r.get("content", "")[:300].strip()
-                url = r.get("url", "")
-                if content:
-                    parts.append(f"{i}. **{title}**\n   {content}\n   來源：{url}")
 
-        if not parts:
-            logger.info(f"ℹ️ web_search 查詢無結果：{query}")
-            return "[SEARCH_EMPTY] 沒有找到相關搜尋結果"
+async def web_search(query: str, max_results: int = DEFAULT_MAX_RESULTS) -> str:
+    """
+    使用 Tavily API 搜尋網路；失敗時可降級 DuckDuckGo。
+    錯誤一律優雅降級，不拋出到上層。
+    """
+    clean = _sanitize_query(query)
+    if not clean:
+        return "[SEARCH_INVALID] 無效的搜尋關鍵字"
 
-        result_text = "\n".join(parts)
-        logger.info(f"✅ web_search 完成：{query}（{len(results)} 筆）")
-        return result_text
+    n = _clamp_max_results(max_results)
+    api_key = os.getenv("TAVILY_API_KEY")
+    allow_fallback = os.getenv("WEB_SEARCH_FALLBACK", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
 
-    except asyncio.TimeoutError:
-        logger.warning(f"⏰ web_search 逾時（{SEARCH_TIMEOUT_SECONDS}秒）：{query}")
-        return "[SEARCH_TIMEOUT] 搜尋逾時，請稍後再試"
+    if api_key:
+        try:
+            return await _search_tavily(clean, n, api_key)
+        except asyncio.TimeoutError:
+            logger.warning(f"⏰ Tavily 逾時：{clean[:40]}")
+            if not allow_fallback:
+                return "[SEARCH_TIMEOUT] 搜尋逾時，請稍後再試"
+        except Exception as e:
+            err_msg = str(e)
+            if "401" in err_msg or "unauthorized" in err_msg.lower() or "invalid api key" in err_msg.lower():
+                logger.error("❌ Tavily API Key 無效")
+                if not allow_fallback:
+                    return "[SEARCH_AUTH_ERROR] 搜尋服務驗證失敗"
+            elif "429" in err_msg or "rate limit" in err_msg.lower():
+                logger.warning("⚠️ Tavily Rate Limit")
+                if not allow_fallback:
+                    return "[SEARCH_RATE_LIMIT] 搜尋次數已達上限，請稍後再試"
+            else:
+                logger.error(f"❌ Tavily 錯誤：{e}")
+                if not allow_fallback:
+                    return "[SEARCH_ERROR] 搜尋發生錯誤"
+    else:
+        logger.warning("⚠️ 未設定 TAVILY_API_KEY，嘗試備援搜尋")
 
-    except Exception as e:
-        err_msg = str(e)
-        # 判斷常見錯誤類型
-        if "401" in err_msg or "unauthorized" in err_msg.lower() or "invalid api key" in err_msg.lower():
-            logger.error("❌ Tavily API Key 無效")
-            return "[SEARCH_AUTH_ERROR] 搜尋服務驗證失敗"
-        elif "429" in err_msg or "rate limit" in err_msg.lower():
-            logger.warning("⚠️ Tavily Rate Limit 超限")
-            return "[SEARCH_RATE_LIMIT] 搜尋次數已達上限，請稍後再試"
-        elif "connect" in err_msg.lower() or "network" in err_msg.lower() or "connection" in err_msg.lower():
-            logger.warning(f"⚠️ web_search 網路連線失敗：{e}")
-            return "[SEARCH_NETWORK_ERROR] 網路連線失敗，無法搜尋"
-        else:
-            logger.error(f"❌ web_search 未知錯誤：{e}")
-            return f"[SEARCH_ERROR] 搜尋發生錯誤"
+    if allow_fallback:
+        try:
+            return await _search_duckduckgo(clean, n)
+        except Exception as e:
+            logger.warning(f"⚠️ 備援搜尋失敗: {e}")
+            if not api_key:
+                return "[SEARCH_UNAVAILABLE] 搜尋功能未啟用（缺少 TAVILY_API_KEY）"
+            return "[SEARCH_ERROR] 搜尋發生錯誤，備援也失敗"
 
+    return "[SEARCH_UNAVAILABLE] 搜尋功能未啟用"

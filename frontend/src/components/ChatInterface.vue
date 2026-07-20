@@ -66,6 +66,9 @@
                     {{ getEmotionEmoji(msg.emotion.dominant_emotion) }}
                     {{ msg.emotion.dominant_emotion }}
                   </span>
+                  <span v-if="msg.tools_used && msg.tools_used.length" class="tools-tag" :title="formatToolsUsed(msg.tools_used)">
+                    🔧 {{ msg.tools_used.map(t => toolDisplayName(t.name)).join(' · ') }}
+                  </span>
                   <span v-if="msg.usage" class="usage-tag" :title="formatUsageDetail(msg.usage)">
                     🪙 in {{ msg.usage.prompt_tokens || 0 }} / out {{ msg.usage.completion_tokens || 0 }}
                     · ${{ formatCost(msg.usage.cost_usd) }}
@@ -76,7 +79,7 @@
             </div>
             
             <!-- Loading：僅在等待第一個串流 token 時顯示 -->
-            <div v-if="isLoading && !isStreaming" class="message-wrapper message-assistant">
+            <div v-if="isLoading && !isStreaming && !toolStatusActive" class="message-wrapper message-assistant">
               <div class="message-bubble">
                 <div class="loading-dots">
                   <span></span>
@@ -84,6 +87,32 @@
                   <span></span>
                 </div>
                 <span class="loading-text">小宸光正在思考...</span>
+              </div>
+            </div>
+
+            <!-- 工具使用狀態 -->
+            <div v-if="toolStatusActive" class="message-wrapper message-system">
+              <div class="message-bubble tool-status-bubble">
+                <div class="tool-status-header">
+                  <span class="tool-spin">🔧</span>
+                  <strong>{{ toolStatusLabel }}</strong>
+                </div>
+                <div class="tool-status-list">
+                  <div
+                    v-for="(t, i) in activeTools"
+                    :key="i"
+                    class="tool-status-item"
+                  >
+                    <span class="tool-name">{{ toolDisplayName(t.name) }}</span>
+                    <span class="tool-args" v-if="toolArgsPreview(t)">{{ toolArgsPreview(t) }}</span>
+                    <span
+                      class="tool-state"
+                      :class="t.ok === false ? 'fail' : (t.ok === true ? 'ok' : 'run')"
+                    >
+                      {{ t.ok === true ? '完成' : (t.ok === false ? '失敗' : '執行中…') }}
+                    </span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -264,6 +293,8 @@ export default {
       personalitySummary: null,
       lastUsage: null,
       usageSummary: null,
+      activeTools: [],
+      toolStatusPhase: '', // running | done | ''
     }
   },
   computed: {
@@ -272,6 +303,14 @@ export default {
       const email = this.authUser.email || ''
       if (email.length > 22) return email.slice(0, 18) + '…'
       return email || '已登入'
+    },
+    toolStatusActive() {
+      return this.toolStatusPhase === 'running' && this.activeTools.length > 0
+    },
+    toolStatusLabel() {
+      if (this.toolStatusPhase === 'running') return '正在使用工具…'
+      if (this.toolStatusPhase === 'done') return '工具已完成'
+      return ''
     },
     tokenChipText() {
       if (this.lastUsage && (this.lastUsage.total_tokens || this.lastUsage.prompt_tokens)) {
@@ -311,6 +350,77 @@ export default {
     formatUsageDetail(usage) {
       if (!usage) return ''
       return `input ${usage.prompt_tokens || 0} · output ${usage.completion_tokens || 0} · total ${usage.total_tokens || 0} · $${this.formatCost(usage.cost_usd)} · ${usage.model || ''}`
+    },
+    toolDisplayName(name) {
+      const map = {
+        web_search: 'Web 搜尋',
+        get_current_time: '目前時間',
+        calculate: '計算機',
+      }
+      return map[name] || name || '工具'
+    },
+    toolArgsPreview(t) {
+      const args = t?.arguments || {}
+      if (args.query) return String(args.query).slice(0, 40)
+      if (args.expression) return String(args.expression).slice(0, 40)
+      if (args.timezone) return String(args.timezone)
+      return ''
+    },
+    formatToolsUsed(tools) {
+      if (!tools?.length) return ''
+      return tools
+        .map((t) => {
+          const state = t.ok === false ? '失敗' : '完成'
+          const ms = t.duration_ms != null ? ` ${t.duration_ms}ms` : ''
+          return `${this.toolDisplayName(t.name)} (${state}${ms})`
+        })
+        .join('\n')
+    },
+    /**
+     * 從串流緩衝區拆出工具事件 + meta，回傳可見文字
+     */
+    consumeStreamBuffer(fullText) {
+      const lines = fullText.split('\n')
+      const visible = []
+      let meta = null
+      for (const line of lines) {
+        if (line.startsWith('__XCG_EVENT__')) {
+          try {
+            const ev = JSON.parse(line.slice('__XCG_EVENT__'.length))
+            if (ev?.type === 'tool_status') {
+              this.toolStatusPhase = ev.status || 'running'
+              this.activeTools = Array.isArray(ev.tools) ? ev.tools : []
+              if (ev.status === 'done') {
+                // 稍後清掉 running 橫幅，保留到內容開始
+                setTimeout(() => {
+                  if (this.toolStatusPhase === 'done') {
+                    this.toolStatusPhase = ''
+                  }
+                }, 1200)
+              }
+            }
+          } catch (_) { /* ignore bad event */ }
+          continue
+        }
+        if (line.startsWith('__XCG_META__')) {
+          try {
+            meta = JSON.parse(line.slice('__XCG_META__'.length))
+          } catch (_) {
+            meta = null
+          }
+          continue
+        }
+        // meta 可能接在同一行尾端（無獨立換行）— 由 extractStreamMeta 處理
+        visible.push(line)
+      }
+      let text = visible.join('\n')
+      // 若最後還黏著 meta 前綴
+      const extracted = this.extractStreamMeta(text)
+      if (extracted.meta) {
+        meta = extracted.meta
+        text = extracted.text
+      }
+      return { text, meta }
     },
     applyUsagePayload(usage) {
       if (!usage) return
@@ -470,6 +580,8 @@ export default {
 
       this.isLoading = true
       this.isStreaming = false
+      this.activeTools = []
+      this.toolStatusPhase = ''
 
       this.messages.push({
         type: 'user',
@@ -548,8 +660,14 @@ export default {
           }
 
           fullText += chunk
-          // 即時更新：隱藏尚未完整的 meta 尾端
-          const live = this.extractStreamMeta(fullText)
+          // 即時更新：解析工具事件 + 隱藏 meta
+          const live = this.consumeStreamBuffer(fullText)
+          // 有工具事件時也算開始回應
+          if (!receivedFirstChunk && (live.text || this.toolStatusActive)) {
+            receivedFirstChunk = true
+            this.isStreaming = true
+            this.isLoading = false
+          }
           this.messages[assistantMsgIndex].content = live.text
           this.scrollToBottom()
         }
@@ -560,9 +678,10 @@ export default {
           fullText += tail
         }
 
-        const { text: cleanText, meta } = this.extractStreamMeta(fullText)
+        const { text: cleanText, meta } = this.consumeStreamBuffer(fullText)
         this.messages[assistantMsgIndex].content = cleanText
         this.messages[assistantMsgIndex].streaming = false
+        this.toolStatusPhase = ''
 
         if (meta?.usage) {
           this.applyUsagePayload(meta.usage)
@@ -573,6 +692,10 @@ export default {
             cost_usd: meta.usage.cost_usd,
             model: meta.usage.model,
           }
+        }
+        if (meta?.tools_used?.length) {
+          this.messages[assistantMsgIndex].tools_used = meta.tools_used
+          this.activeTools = meta.tools_used
         }
         if (meta?.blocked) {
           this.messages[assistantMsgIndex].type = 'system'
@@ -1095,8 +1218,91 @@ export default {
   border-radius: 999px;
 }
 
+.tools-tag {
+  font-size: 0.7rem;
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+}
+
 .message-assistant .usage-tag {
   color: #5b21b6;
+}
+
+.tool-status-bubble {
+  background: linear-gradient(135deg, #ecfdf5 0%, #e0e7ff 100%) !important;
+  border: 1px solid #a7f3d0 !important;
+  color: #065f46 !important;
+  text-align: left !important;
+  max-width: 92% !important;
+}
+
+.tool-status-header {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.45rem;
+}
+
+.tool-spin {
+  display: inline-block;
+  animation: toolPulse 1s ease-in-out infinite;
+}
+
+@keyframes toolPulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.15); opacity: 0.75; }
+}
+
+.tool-status-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.tool-status-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+}
+
+.tool-name {
+  font-weight: 700;
+}
+
+.tool-args {
+  color: #4b5563;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool-state {
+  margin-left: auto;
+  font-size: 0.75rem;
+  padding: 0.05rem 0.4rem;
+  border-radius: 999px;
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.tool-state.ok {
+  background: #d1fae5;
+  color: #047857;
+}
+
+.tool-state.fail {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.tool-state.run {
+  background: #fef3c7;
+  color: #b45309;
 }
 
 .token-bar {
