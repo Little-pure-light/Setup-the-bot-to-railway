@@ -15,9 +15,14 @@ class MockQuery:
         self._order: Optional[tuple] = None
         self._columns = "*"
 
-    def select(self, columns: str = "*"):
+    def select(self, *columns, **kwargs):
         self.action = "select"
-        self._columns = columns
+        if columns:
+            self._columns = columns[0] if len(columns) == 1 else ", ".join(str(c) for c in columns)
+        elif "columns" in kwargs:
+            self._columns = kwargs["columns"]
+        else:
+            self._columns = "*"
         return self
 
     def insert(self, data: Any):
@@ -109,8 +114,11 @@ class MockTable:
         self._id += 1
         return n
 
-    def select(self, columns: str = "*"):
-        return MockQuery(self, "select").select(columns)
+    def select(self, *columns):
+        cols = "*"
+        if columns:
+            cols = columns[0] if len(columns) == 1 else ", ".join(str(c) for c in columns)
+        return MockQuery(self, "select").select(cols)
 
     def insert(self, data: Any):
         return MockQuery(self, "insert").insert(data)
