@@ -10,7 +10,7 @@
 | P1-06 | 完成 | d42c4c7 | Memory | 隔離+空回覆不存 |
 | P1-07 | 完成 | b4f2f72 | Vitest | Chat/History/Login + errorSanitize |
 | P1-08 | 完成 | fc611fe | Playwright | **Chromium mobile viewport**；尚未驗證 WebKit / 實體 iPhone |
-| P1-09 | 需驗證 | 5cb6d27 | CI yml | **Actions 綠燈前不得標完成** |
+| P1-09 | 完成 | 5cb6d27 + 2754829 | CI 綠燈 | [run 29757638185](https://github.com/Little-pure-light/Setup-the-bot-to-railway/actions/runs/29757638185) success |
 | P1-10 | 完成 | b8db763 | /live /ready | 設定層級；非完整 DB 探測 |
 | P1-11 | 需人工驗收 | 7ad4af3 | BACKUP/RESTORE | Supabase 還原尚未實作演練 |
 | P1-12 | 完成 | ed80734 | AGENTS + PR | |
@@ -21,8 +21,9 @@
 
 - Supabase 完整還原演練（`docs/RESTORE.md`）— **尚未執行**
 - Railway 部署後 `/live` `/ready` 與正式聊天 Smoke
-- GitHub Actions 全部 job 綠燈後，才可將 P1-09 改為「完成」
+- ~~GitHub Actions 綠燈~~（HEAD `2754829` run success）
 - WebKit / 實體 iPhone 語音與版面（P1-08 僅 Chromium viewport）
+- **PR 建立**：本機無 `gh` CLI；請開啟下方 compare 連結建立 PR（push 已觸發 Actions）
 
 ## 健康檢查解讀
 
