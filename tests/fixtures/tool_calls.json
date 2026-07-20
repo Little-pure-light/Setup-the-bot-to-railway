@@ -1,0 +1,10 @@
+{
+  "calculate": {
+    "name": "calculate",
+    "arguments": { "expression": "1+2*3" }
+  },
+  "convert_units": {
+    "name": "convert_units",
+    "arguments": { "value": 10, "from_unit": "km", "to_unit": "mi" }
+  }
+}
