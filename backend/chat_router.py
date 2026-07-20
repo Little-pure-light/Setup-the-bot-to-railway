@@ -859,6 +859,9 @@ async def chat(
             tools_used=tools_used or None,
         )
 
+    except HTTPException:
+        # 預算超額、驗證失敗等預期 HTTP 錯誤不可被吞成 500
+        raise
     except Exception as e:
         traceback_str = traceback.format_exc()
         logger.error(f"🔥 Chat Endpoint 發生嚴重錯誤: {e}", exc_info=True)
