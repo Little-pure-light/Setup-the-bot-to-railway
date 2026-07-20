@@ -32,3 +32,9 @@ logs/
 
 # Token 用量與本地資料
 data/
+
+# 測試產物
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
