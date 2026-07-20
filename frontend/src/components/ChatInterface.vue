@@ -40,6 +40,9 @@
           >
             🔐 登入
           </button>
+          <button @click="showHistoryPanel = true" class="status-btn" type="button">
+            📚 歷史
+          </button>
           <button @click="goToHealthCheck" class="status-btn" type="button">
             📋 系統狀態
           </button>
@@ -272,6 +275,16 @@
       <img :src="imagePreviewUrl" alt="preview" class="image-preview-full" />
       <button type="button" class="image-preview-close" @click="imagePreviewUrl = null">關閉</button>
     </div>
+
+    <!-- 對話歷史管理 -->
+    <HistoryPanel
+      :visible="showHistoryPanel"
+      :user-id="userId"
+      :api-base="API_URL"
+      @close="showHistoryPanel = false"
+      @load-conversation="onLoadHistoryConversation"
+      @conversation-deleted="onHistoryConversationDeleted"
+    />
   </div>
 </template>
 
@@ -280,6 +293,7 @@ import axios from 'axios'
 import { CHAT_API, API_BASE, API_SECRET, getAuthHeaders } from '../config.js'
 import CopilotWindow from './CopilotWindow.vue'
 import LoginModal from './LoginModal.vue'
+import HistoryPanel from './HistoryPanel.vue'
 import {
   getSession,
   getUserAuthHeaders,
@@ -310,6 +324,7 @@ export default {
   components: {
     CopilotWindow,
     LoginModal,
+    HistoryPanel,
   },
   data() {
     return {
@@ -325,6 +340,7 @@ export default {
       userId: this.getOrCreateUserId(),
       copilotWindowVisible: false,
       showLoginModal: false,
+      showHistoryPanel: false,
       authUser: null,
       authUnsubscribe: null,
       personalitySummary: null,
@@ -334,6 +350,7 @@ export default {
       toolStatusPhase: '', // running | done | ''
       imagePreviewUrl: null,
       isUploadingImage: false,
+      API_URL,
     }
   },
   computed: {
@@ -1149,7 +1166,52 @@ export default {
     },
     goToHealthCheck() {
       window.open('/status', '_blank')
-    }
+    },
+    onLoadHistoryConversation({ conversationId, messages }) {
+      if (!conversationId) return
+      this.conversationId = conversationId
+      localStorage.setItem('xiaochenguang_conversation_id', conversationId)
+      const mapped = (messages || []).map((m) => ({
+        type: m.type === 'user' ? 'user' : m.type === 'assistant' ? 'assistant' : 'system',
+        content: m.content || '',
+        timestamp: m.timestamp || new Date().toLocaleTimeString('zh-TW'),
+        streaming: false,
+      }))
+      this.messages =
+        mapped.length > 0
+          ? mapped
+          : [
+              {
+                type: 'system',
+                content: '已載入歷史對話（無訊息內容）',
+                timestamp: new Date().toLocaleTimeString('zh-TW'),
+              },
+            ]
+      this.messages.push({
+        type: 'system',
+        content: `📚 已從歷史載入對話 ${conversationId.slice(0, 12)}…，可繼續聊天`,
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+      })
+      this.saveMessagesToStorage()
+      this.loadMemories()
+      this.$nextTick(() => this.scrollToBottom())
+    },
+    onHistoryConversationDeleted(deletedId) {
+      if (deletedId && deletedId === this.conversationId) {
+        localStorage.removeItem('xiaochenguang_messages')
+        localStorage.removeItem('xiaochenguang_conversation_id')
+        this.messages = [
+          {
+            type: 'system',
+            content: '🗑️ 目前對話已從歷史刪除，已為你開啟新對話',
+            timestamp: new Date().toLocaleTimeString('zh-TW'),
+          },
+        ]
+        this.conversationId = this.getOrCreateConversationId()
+        this.saveMessagesToStorage()
+      }
+      this.loadMemories()
+    },
   },
   async mounted() {
     // 初始化 Auth 狀態
@@ -1200,6 +1262,10 @@ export default {
     this.refreshUsageSummary()
     if (this.authUser) {
       this.loadPersonality()
+    }
+    // 路由 /history 時自動打開歷史面板
+    if (this.$route?.meta?.openHistory || this.$route?.path === '/history') {
+      this.showHistoryPanel = true
     }
     this.$nextTick(() => this.scrollToBottom())
     window.addEventListener('beforeunload', this.handleBeforeUnload)

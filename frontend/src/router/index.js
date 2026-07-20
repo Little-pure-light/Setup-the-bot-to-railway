@@ -5,6 +5,7 @@ import ModulesMonitor from '../components/ModulesMonitor.vue';
 
 const routes = [
   { path: '/', component: ChatInterface },
+  { path: '/history', component: ChatInterface, meta: { openHistory: true } },
   { path: '/status', component: StatusPage },
   { path: '/monitor', component: ModulesMonitor },
 ];
