@@ -346,13 +346,17 @@ async def _try_kernel_chat(
         shadow=flags.shadow_mode and not flags.enabled,
     )
 
-    # Shadow：背景執行，主路徑仍 Legacy
+    # Shadow：背景執行，主路徑仍 Legacy；強制 shadow=True（無記憶/token/真實工具）
     if flags.shadow_mode and not flags.enabled:
         async def _shadow():
             try:
                 kreq.shadow = True
+                # shadow 使用同一 flags，kernel 內部會禁止副作用
                 await AIKernel(deps, flags=flags).run(kreq)
-                logger.info("🌑 Kernel shadow run ok conv=%s", request.conversation_id[:8])
+                logger.info(
+                    "🌑 Kernel shadow ok conv=%s (no side effects)",
+                    request.conversation_id[:8],
+                )
             except Exception as ex:
                 logger.info("🌑 Kernel shadow failed: %s", type(ex).__name__)
 

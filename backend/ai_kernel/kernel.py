@@ -37,11 +37,20 @@ class AIKernel:
         self.deps = deps
         self.flags = flags or get_kernel_flags()
 
+    def _is_shadow(self, request: KernelRequest) -> bool:
+        """Shadow：禁止任何副作用（記憶、token 寫入、真實工具、trace 持久化）。"""
+        return bool(request.shadow or self.flags.shadow_mode)
+
+    def _policy(self, request: KernelRequest) -> ToolPolicy:
+        return ToolPolicy(self.flags, shadow=self._is_shadow(request))
+
     async def run(self, request: KernelRequest) -> KernelResult:
         """非串流完整執行。"""
+        shadow = self._is_shadow(request)
+        request.shadow = shadow
         trace = KernelTrace(
             request_id=request.request_id,
-            enabled=self.flags.debug_enabled,
+            enabled=self.flags.debug_enabled and not shadow,
         )
         state: Dict[str, Any] = {"request": request, "trace": trace}
 
@@ -65,15 +74,15 @@ class AIKernel:
             logger.warning("kernel fatal: %s", type(e).__name__)
             raise KernelFatalError(type(e).__name__) from e
         finally:
-            store_trace(trace)
+            if not shadow:
+                store_trace(trace)
 
         result: KernelResult = state["result"]
         result.trace_id = trace.trace_id
 
-        # 副作用（shadow 跳過）
+        # 副作用（shadow 絕對跳過）
         if (
-            not request.shadow
-            and not self.flags.shadow_mode
+            not shadow
             and result.post_process_jobs
             and self.deps.post_process
         ):
@@ -86,11 +95,17 @@ class AIKernel:
 
     async def run_stream(self, request: KernelRequest) -> AsyncIterator[KernelEvent]:
         """
-        串流：先跑前置 stages，再 stream tokens，最後 post_process。
-        yield KernelEvent（Router 再轉協議）。
+        串流：
+        1) 前置 stages
+        2) 多輪 tool rounds（非串流）
+        3) **最終答案 model.stream**（恢復 token streaming）
+        4) post_process（非 shadow）
         """
+        shadow = self._is_shadow(request)
+        request.shadow = shadow
         trace = KernelTrace(
-            request_id=request.request_id, enabled=self.flags.debug_enabled
+            request_id=request.request_id,
+            enabled=self.flags.debug_enabled and not shadow,
         )
         state: Dict[str, Any] = {"request": request, "trace": trace}
         pipeline = (
@@ -113,49 +128,62 @@ class AIKernel:
                 type="usage",
                 data={"blocked": True, "usage": {}},
             )
-            store_trace(trace)
+            if not shadow:
+                store_trace(trace)
             return
         except Exception as e:
-            store_trace(trace)
+            if not shadow:
+                store_trace(trace)
             raise KernelFatalError(type(e).__name__) from e
 
         ctx = state["context"]
-        tools_used = []
+        tools_used: list = []
         usage_acc = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
         full = ""
+        final_messages = list(ctx.messages)
 
-        # Tool phase (non-stream) then stream final
         try:
-            if ctx.plan and ctx.plan.allow_tools and request.use_tools:
-                loop = AgentLoop(
-                    self.deps.model,
-                    self.deps.tools,
-                    ToolPolicy(self.flags),
-                    trace=trace,
-                )
-                # 若 plan 要用工具：先 agent loop 非串流拿最終內容
-                out = await loop.run(ctx, user_id=request.user_id)
-                for ev in out.get("events") or []:
-                    yield KernelEvent(
-                        type="tool_status",
-                        status=ev.get("status") or "",
-                        text=ev.get("message") or "",
-                        data=ev,
-                    )
-                full = out.get("content") or ""
-                tools_used = out.get("tools_used") or []
-                usage_acc = out.get("usage") or usage_acc
-                if full:
-                    yield KernelEvent(type="content", text=full)
-            else:
+            policy = self._policy(request)
+            loop = AgentLoop(
+                self.deps.model,
+                self.deps.tools,
+                policy,
+                trace=trace,
+            )
+            # 多輪工具（非串流）；最終答案一定走 stream
+            rounds = await loop.run_tool_rounds(
+                ctx, user_id=request.user_id, request=request
+            )
+            for ev in rounds.get("events") or []:
                 yield KernelEvent(
                     type="tool_status",
-                    status="skipped",
-                    text="本次無需使用工具",
-                    data={"status": "skipped", "tools": []},
+                    status=ev.get("status") or "",
+                    text=ev.get("message") or "",
+                    data=ev,
                 )
+            tools_used = rounds.get("tools_used") or []
+            usage_acc = rounds.get("usage") or usage_acc
+            final_messages = rounds.get("messages") or final_messages
+
+            # 若 tool rounds 已帶 early_content 且不需要再生成，仍用 stream 重播可選；
+            # 規格要求工具後最終答案 token streaming → 一律 stream 生成
+            need_gen = rounds.get("needs_final_generation", True)
+            early = (rounds.get("early_content") or "").strip()
+
+            # 工具後最終答案必須 token streaming（即使模型已給 early_content）
+            must_stream_final = bool(tools_used) or need_gen or not early
+
+            if tools_used:
+                yield KernelEvent(
+                    type="tool_status",
+                    status="done",
+                    text="工具完成，正在串流產生回覆…",
+                    data={"status": "done", "tools": [], "message": "streaming final"},
+                )
+
+            if must_stream_final:
                 async for event in self.deps.model.stream(
-                    ctx.messages,
+                    final_messages,
                     model=ctx.model_config_obj.model,
                     temperature=ctx.strategy.temperature,
                     max_tokens=ctx.strategy.max_tokens,
@@ -165,16 +193,32 @@ class AIKernel:
                         full += t
                         yield KernelEvent(type="content", text=t)
                     elif event.get("type") == "usage":
-                        usage_acc = event.get("usage") or usage_acc
+                        u = event.get("usage") or {}
+                        usage_acc = {
+                            "prompt_tokens": int(usage_acc.get("prompt_tokens") or 0)
+                            + int(u.get("prompt_tokens") or 0),
+                            "completion_tokens": int(
+                                usage_acc.get("completion_tokens") or 0
+                            )
+                            + int(u.get("completion_tokens") or 0),
+                            "total_tokens": int(usage_acc.get("total_tokens") or 0)
+                            + int(u.get("total_tokens") or 0),
+                        }
+            else:
+                # 無工具且模型已給完整文字：分塊 yield 維持串流協議
+                full = early
+                chunk = 24
+                for i in range(0, len(full), chunk):
+                    yield KernelEvent(type="content", text=full[i : i + chunk])
         except Exception as e:
             err = f"[ERROR] Streaming 失敗: {type(e).__name__}"
             full = err
             yield KernelEvent(type="content", text=err)
 
-        # usage record
-        usage_payload = {}
-        try:
-            if not request.shadow and not self.flags.shadow_mode:
+        # usage record — shadow 禁止
+        usage_payload: dict = {}
+        if not shadow:
+            try:
                 usage_payload = self.deps.budget.record(
                     user_id=request.user_id,
                     conversation_id=request.conversation_id,
@@ -183,8 +227,10 @@ class AIKernel:
                     endpoint="chat_stream_kernel",
                     meta={"kernel": True},
                 )
-        except Exception:
-            usage_payload = usage_acc
+            except Exception:
+                usage_payload = usage_acc
+        else:
+            usage_payload = dict(usage_acc)
 
         speech = None
         if request.voice_mode or request.car_mode or request.speak_response:
@@ -208,7 +254,7 @@ class AIKernel:
             user_id=request.user_id,
             user_message=request.user_message,
             ai_id=request.ai_id,
-            shadow=request.shadow or self.flags.shadow_mode,
+            shadow=shadow,
         )
 
         yield KernelEvent(
@@ -222,12 +268,12 @@ class AIKernel:
                 "car_mode": request.car_mode,
                 "kernel": True,
                 "trace_id": trace.trace_id,
+                "shadow": shadow,
             },
         )
 
         if (
-            not request.shadow
-            and not self.flags.shadow_mode
+            not shadow
             and result.post_process_jobs
             and self.deps.post_process
             and not should_skip_memory_write(full)
@@ -237,7 +283,8 @@ class AIKernel:
             except Exception as e:
                 logger.warning("stream post_process failed: %s", type(e).__name__)
 
-        store_trace(trace)
+        if not shadow:
+            store_trace(trace)
 
     # --- stages ---
 
@@ -337,19 +384,20 @@ class AIKernel:
     async def _stage_generate(self, state: dict) -> dict:
         req: KernelRequest = state["request"]
         ctx = state["context"]
+        shadow = self._is_shadow(req)
         loop = AgentLoop(
             self.deps.model,
             self.deps.tools,
-            ToolPolicy(self.flags),
+            self._policy(req),
             trace=state.get("trace"),
         )
-        out = await loop.run(ctx, user_id=req.user_id)
+        out = await loop.run(ctx, user_id=req.user_id, request=req, stream_final=False)
         content = out.get("content") or ""
         usage = out.get("usage") or {}
         tools_used = out.get("tools_used") or []
 
-        usage_payload = {}
-        if not req.shadow and not self.flags.shadow_mode:
+        usage_payload: dict = {}
+        if not shadow:
             try:
                 usage_payload = self.deps.budget.record(
                     user_id=req.user_id,
@@ -361,6 +409,8 @@ class AIKernel:
                 )
             except Exception:
                 usage_payload = usage
+        else:
+            usage_payload = dict(usage)
 
         speech = None
         if req.voice_mode or req.car_mode or req.speak_response:
@@ -392,13 +442,14 @@ class AIKernel:
     async def _stage_post_plan(self, state: dict) -> dict:
         req: KernelRequest = state["request"]
         result: KernelResult = state["result"]
+        shadow = self._is_shadow(req)
         result.post_process_jobs = build_post_process_jobs(
             result,
             request_id=req.request_id or result.trace_id,
             user_id=req.user_id,
             user_message=req.user_message,
             ai_id=req.ai_id,
-            shadow=req.shadow or self.flags.shadow_mode,
+            shadow=shadow,
         )
         return state
 
