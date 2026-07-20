@@ -49,14 +49,16 @@ class PromptEngine:
         if personality_vector:
             personality_context = self._format_personality_vector(personality_vector)
 
-        MAX_FILE_CONTENT_LENGTH = 2000
+        MAX_FILE_CONTENT_LENGTH = 3000
         
         if file_content:
             truncated = file_content[:MAX_FILE_CONTENT_LENGTH]
             has_more = len(file_content) > MAX_FILE_CONTENT_LENGTH
-            file_context = f"""### 相關檔案內容
+            is_vision = "視覺分析" in file_content or "上傳圖片" in file_content
+            heading = "### 相關圖片視覺分析（Vision）" if is_vision else "### 相關檔案內容"
+            file_context = f"""{heading}
 {truncated}
-{"...(檔案內容已截斷，僅顯示前 2000 字元)" if has_more else ""}
+{"...(內容已截斷，僅顯示前 3000 字元)" if has_more else ""}
 """
         else:
             file_context = ""
