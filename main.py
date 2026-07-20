@@ -88,21 +88,8 @@ AUTH_EXEMPT_PATHS = {
 }
 
 
-@app.middleware("http")
-async def request_id_middleware(request: Request, call_next):
-    """為每個請求附加 X-Request-ID，便於追蹤。"""
-    rid = request.headers.get("X-Request-ID") or new_request_id()
-    try:
-        from backend.logging_utils import request_id_var
-
-        request_id_var.set(rid)
-    except Exception:
-        pass
-    response = await call_next(request)
-    response.headers["X-Request-ID"] = rid
-    return response
-
-
+# 注意：Starlette 後註冊的 middleware 在請求路徑上較外層先執行。
+# 因此 request_id 必須「後」於 auth 註冊，才能包住 401 並寫入 X-Request-ID。
 @app.middleware("http")
 async def api_auth_middleware(request: Request, call_next):
     if API_SECRET and request.url.path.startswith("/api/"):
@@ -121,18 +108,42 @@ async def api_auth_middleware(request: Request, call_next):
                 except Exception:
                     allowed = False
             if not allowed:
+                # 外層 request_id middleware 已設定 context；此處雙保險
+                rid = get_request_id() or new_request_id()
                 logger.warning(
-                    f"⛔ 未授權存取：{request.url.path}，來源："
-                    f"{request.client.host if request.client else 'unknown'}"
+                    "⛔ 未授權存取 path=%s request_id=%s client=%s",
+                    request.url.path,
+                    rid,
+                    request.client.host if request.client else "unknown",
                 )
                 return JSONResponse(
                     status_code=401,
                     content={
                         "detail": "Unauthorized",
-                        "request_id": get_request_id() or None,
+                        "request_id": rid,
                     },
+                    headers={"X-Request-ID": rid},
                 )
     return await call_next(request)
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """
+    最外層：為每個請求附加 Request ID。
+    必須包住 auth，確保 401 也有 X-Request-ID。
+    """
+    rid = (request.headers.get("X-Request-ID") or "").strip() or new_request_id()
+    try:
+        from backend.logging_utils import request_id_var
+
+        request_id_var.set(rid)
+    except Exception:
+        pass
+    response = await call_next(request)
+    # 無論成功或 401，一律附上 header
+    response.headers["X-Request-ID"] = rid
+    return response
 
 # ✅ CORS 設定（支援 Cloudflare Pages 與 Replit）
 app.add_middleware(
@@ -193,10 +204,13 @@ async def liveness():
 @app.get("/ready")
 @app.get("/api/ready")
 async def readiness():
-    """Readiness：必要設定與依賴狀態（不消耗 OpenAI Token）。"""
-    from backend.health import readiness_payload
+    """
+    Readiness：環境變數 / 可選 DNS（非 DB 探測，不消耗 OpenAI Token）。
+    DNS 若啟用則於 asyncio.to_thread 執行。
+    """
+    from backend.health import readiness_payload_async
 
-    body = readiness_payload()
+    body = await readiness_payload_async()
     code = 200 if body.get("status") in ("ok", "degraded") else 503
     return JSONResponse(status_code=code, content=body)
 
