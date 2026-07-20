@@ -183,6 +183,64 @@
                 <span class="btn-icon">🗂️</span>
                 <span class="btn-text">結束對話</span>
               </button>
+
+              <button
+                type="button"
+                class="action-btn voice-speak-btn"
+                :class="{ active: autoSpeak }"
+                @click="toggleAutoSpeak"
+                :title="autoSpeak ? '關閉自動朗讀' : '開啟自動朗讀 AI 回覆'"
+              >
+                <span class="btn-icon">{{ autoSpeak ? '🔊' : '🔈' }}</span>
+                <span class="btn-text">{{ autoSpeak ? '朗讀中' : '語音輸出' }}</span>
+              </button>
+
+              <button
+                type="button"
+                class="action-btn car-mode-btn"
+                :class="{ active: carMode }"
+                @click="toggleCarMode"
+                :title="carMode ? '關閉車載自動語音' : '開啟車載模式（自動聽・說・送）'"
+              >
+                <span class="btn-icon">🚗</span>
+                <span class="btn-text">{{ carMode ? '車載 ON' : '車載模式' }}</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- 語音狀態列（車載友好） -->
+          <div
+            v-if="voiceSupported || carMode || isListening || isSpeaking"
+            class="voice-bar"
+            :class="{
+              listening: isListening,
+              speaking: isSpeaking,
+              car: carMode,
+              unsupported: !voiceSupported,
+            }"
+          >
+            <div class="voice-bar-left">
+              <span class="voice-pulse" v-if="isListening"></span>
+              <span class="voice-status-icon">
+                {{ isListening ? '🎙️' : isSpeaking ? '🔊' : carMode ? '🚗' : '🎧' }}
+              </span>
+              <span class="voice-status-text">{{ voiceStatusText }}</span>
+              <span v-if="interimTranscript" class="voice-interim">「{{ interimTranscript }}」</span>
+            </div>
+            <div class="voice-bar-right">
+              <button
+                v-if="isSpeaking"
+                type="button"
+                class="voice-mini-btn"
+                @click="stopTTS"
+              >停止朗讀</button>
+              <button
+                v-if="isListening"
+                type="button"
+                class="voice-mini-btn danger"
+                @click="stopListening"
+              >停止收音</button>
+              <span v-if="!speechRecognitionSupported" class="voice-warn">此瀏覽器不支援語音輸入</span>
             </div>
           </div>
 
@@ -205,14 +263,39 @@
           </div>
 
           <!-- 輸入區域 -->
-          <div class="input-wrapper">
+          <div class="input-wrapper" :class="{ 'car-input': carMode }">
+            <button
+              type="button"
+              class="mic-button"
+              :class="{
+                listening: isListening,
+                disabled: !speechRecognitionSupported || isLoading || isStreaming,
+                car: carMode,
+              }"
+              :disabled="!speechRecognitionSupported || isLoading || isStreaming"
+              @click="toggleListening"
+              :title="micButtonTitle"
+            >
+              <span class="mic-icon">{{ isListening ? '🟥' : '🎤' }}</span>
+              <span class="mic-label">{{ isListening ? '聆聽中' : (carMode ? '按住說' : '語音') }}</span>
+            </button>
             <input
               v-model="userInput"
               @keyup.enter="sendMessage"
               :disabled="isLoading"
-              placeholder="輸入您的訊息..."
+              :placeholder="carMode ? '車載模式：說完會自動送出…' : '輸入您的訊息，或點麥克風…'"
               class="message-input"
             />
+            <button
+              type="button"
+              class="tts-button"
+              :class="{ active: isSpeaking }"
+              :disabled="!speechSynthesisSupported"
+              @click="speakLastAssistant"
+              title="朗讀上一則 AI 回覆"
+            >
+              🔊
+            </button>
             <button
               @click="sendMessage"
               :disabled="isLoading || !userInput.trim()"
@@ -302,7 +385,14 @@
 
 <script>
 import axios from 'axios'
-import { CHAT_API, API_BASE, API_SECRET, getAuthHeaders } from '../config.js'
+import {
+  CHAT_API,
+  API_BASE,
+  API_SECRET,
+  getAuthHeaders,
+  VOICE_EVENTS_API,
+  VOICE_PREPARE_SPEECH_API,
+} from '../config.js'
 import CopilotWindow from './CopilotWindow.vue'
 import LoginModal from './LoginModal.vue'
 import HistoryPanel from './HistoryPanel.vue'
@@ -315,6 +405,17 @@ import {
   syncUserProfile,
   isAuthConfigured,
 } from '../lib/auth.js'
+import {
+  isSpeechRecognitionSupported,
+  isSpeechSynthesisSupported,
+  createSpeechRecognizer,
+  speakText,
+  stopSpeaking,
+  loadVoiceSettings,
+  saveVoiceSettings,
+  sanitizeForSpeech,
+  waitForVoices,
+} from '../lib/voice.js'
 
 const getApiUrl = () => {
   const url = import.meta.env.VITE_API_URL
@@ -366,9 +467,46 @@ export default {
       imagePreviewUrl: null,
       isUploadingImage: false,
       API_URL,
+      // 🎙️ 語音
+      speechRecognitionSupported: false,
+      speechSynthesisSupported: false,
+      isListening: false,
+      isSpeaking: false,
+      interimTranscript: '',
+      finalTranscriptBuffer: '',
+      autoSpeak: false,
+      carMode: false,
+      voiceAutoSend: true,
+      voiceLang: 'zh-TW',
+      voiceRate: 1.0,
+      lastInputMethod: 'text',
+      speechRecognizer: null,
+      voiceRestartTimer: null,
+      suppressAutoListen: false,
+      ignoreNextListenEnd: false,
+      voiceStatusHint: '',
     }
   },
   computed: {
+    voiceSupported() {
+      return this.speechRecognitionSupported || this.speechSynthesisSupported
+    },
+    voiceStatusText() {
+      if (this.voiceStatusHint) return this.voiceStatusHint
+      if (this.isListening) return '正在聽你說話…'
+      if (this.isSpeaking) return '正在朗讀回覆…'
+      if (this.carMode) return '車載模式：回覆後自動聽・說'
+      if (this.autoSpeak) return '自動朗讀已開啟'
+      if (!this.speechRecognitionSupported && !this.speechSynthesisSupported) {
+        return '此瀏覽器不支援語音 API'
+      }
+      return '語音就緒'
+    },
+    micButtonTitle() {
+      if (!this.speechRecognitionSupported) return '瀏覽器不支援語音輸入（建議 Chrome）'
+      if (this.isListening) return '點擊停止收音'
+      return this.carMode ? '開始語音輸入（說完自動送出）' : '開始語音輸入'
+    },
     authEmailLabel() {
       if (!this.authUser) return ''
       const email = this.authUser.email || ''
@@ -743,8 +881,13 @@ export default {
       }
       return emojiMap[emotion] || '😐'
     },
-    async sendMessage() {
+    async sendMessage(options = {}) {
       if (!this.userInput.trim() || this.isLoading || this.isStreaming) return
+
+      // 發送時暫停收音，避免把 AI 朗讀或自己回聲錄進去（略過 onEnd 自動再送）
+      this.ignoreNextListenEnd = true
+      this.stopListening({ silent: true })
+      this.stopTTS()
 
       // 取消上一次未完成的串流（理論上已阻擋，雙保險）
       if (this.streamAbortController) {
@@ -760,14 +903,21 @@ export default {
       this.toolStep = 0
       this.toolTotal = 0
 
+      const inputMethod = options.inputMethod || this.lastInputMethod || 'text'
+      const voiceMode = Boolean(this.carMode || this.autoSpeak || inputMethod === 'voice')
+      this.lastInputMethod = 'text'
+
       this.messages.push({
         type: 'user',
         content: this.userInput,
-        timestamp: new Date().toLocaleTimeString('zh-TW')
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+        inputMethod,
       })
 
       const userMessage = this.userInput
       this.userInput = ''
+      this.interimTranscript = ''
+      this.finalTranscriptBuffer = ''
       this.scrollToBottom()
 
       // 空的 assistant 佔位，串流 token 會即時寫入
@@ -791,7 +941,11 @@ export default {
             body: JSON.stringify({
               user_message: userMessage,
               conversation_id: this.conversationId,
-              user_id: this.userId
+              user_id: this.userId,
+              voice_mode: voiceMode,
+              car_mode: this.carMode,
+              input_method: inputMethod,
+              speak_response: this.autoSpeak || this.carMode,
             })
           }
         )
@@ -889,6 +1043,22 @@ export default {
         this.loadEmotionalStates()
         this.refreshUsageSummary()
 
+        // 🎙️ 自動朗讀 / 車載：說完再開麥
+        const shouldSpeak =
+          (this.autoSpeak || this.carMode) &&
+          cleanText.trim() &&
+          !cleanText.startsWith('[ERROR]') &&
+          this.messages[assistantMsgIndex].type !== 'system'
+
+        if (shouldSpeak) {
+          const speechSrc = meta?.speech_text || cleanText
+          await this.speakAssistantText(speechSrc, {
+            resumeListen: this.carMode,
+          })
+        } else if (this.carMode && !this.suppressAutoListen) {
+          this.scheduleAutoListen(600)
+        }
+
       } catch (error) {
         if (error.name === 'AbortError') {
           this.messages[assistantMsgIndex].content =
@@ -899,6 +1069,9 @@ export default {
         }
         this.messages[assistantMsgIndex].streaming = false
         this.scrollToBottom()
+        if (this.carMode && !this.suppressAutoListen) {
+          this.scheduleAutoListen(800)
+        }
       } finally {
         this.isLoading = false
         this.isStreaming = false
@@ -906,6 +1079,302 @@ export default {
         this.scrollToBottom()
         this.saveMessagesToStorage()
       }
+    },
+
+    // ========== 🎙️ 語音輸入 / 輸出 ==========
+    initVoice() {
+      this.speechRecognitionSupported = isSpeechRecognitionSupported()
+      this.speechSynthesisSupported = isSpeechSynthesisSupported()
+
+      const saved = loadVoiceSettings()
+      this.autoSpeak = Boolean(saved.autoSpeak)
+      this.carMode = Boolean(saved.carMode)
+      this.voiceAutoSend = saved.autoSend !== false
+      this.voiceLang = saved.lang || 'zh-TW'
+      this.voiceRate = Number(saved.rate) || 1.0
+
+      if (this.speechRecognitionSupported) {
+        this.setupSpeechRecognizer()
+      }
+      waitForVoices(2000).catch(() => {})
+
+      if (this.carMode) {
+        this.voiceStatusHint = '車載模式已恢復'
+        this.reportVoiceEvent('car_mode_on', { restored: true })
+        // 不強制立刻開麥，避免未授權時報錯；使用者點一下即可
+      }
+    },
+    setupSpeechRecognizer() {
+      if (this.speechRecognizer) {
+        this.speechRecognizer.abort()
+        this.speechRecognizer = null
+      }
+      this.speechRecognizer = createSpeechRecognizer({
+        lang: this.voiceLang,
+        continuous: false,
+        interimResults: true,
+        onStart: () => {
+          this.isListening = true
+          this.voiceStatusHint = '正在聽你說話…'
+          this.reportVoiceEvent('listen_start')
+        },
+        onEnd: () => {
+          this.isListening = false
+          if (this.ignoreNextListenEnd) {
+            this.ignoreNextListenEnd = false
+            this.finalTranscriptBuffer = ''
+            this.interimTranscript = ''
+            this.reportVoiceEvent('listen_end', { skipped: true })
+            return
+          }
+          const finalText = (this.finalTranscriptBuffer || '').trim()
+          const interim = (this.interimTranscript || '').trim()
+          const combined = (finalText || interim).trim()
+
+          if (combined) {
+            this.userInput = combined
+            this.finalTranscriptBuffer = ''
+            this.interimTranscript = ''
+            const shouldAutoSend =
+              this.voiceAutoSend &&
+              (this.carMode || this.lastInputMethod === 'voice')
+
+            if (shouldAutoSend && !this.isLoading && !this.isStreaming) {
+              this.lastInputMethod = 'voice'
+              this.reportVoiceEvent('auto_send', { transcript: combined.slice(0, 200) })
+              this.$nextTick(() => this.sendMessage({ inputMethod: 'voice' }))
+              return
+            }
+          }
+
+          this.voiceStatusHint = this.carMode ? '車載待命' : ''
+          this.reportVoiceEvent('listen_end', {
+            has_text: Boolean(combined),
+          })
+        },
+        onError: (err, { soft } = {}) => {
+          this.isListening = false
+          if (soft) {
+            this.voiceStatusHint = this.carMode ? '沒聽清楚，可再說一次' : ''
+            if (this.carMode && !this.suppressAutoListen && !this.isLoading) {
+              this.scheduleAutoListen(900)
+            }
+            return
+          }
+          const map = {
+            'not-allowed': '麥克風權限被拒，請在瀏覽器允許麥克風',
+            'service-not-allowed': '語音服務不可用',
+            network: '語音辨識網路錯誤',
+            'language-not-supported': '不支援目前語言',
+          }
+          this.voiceStatusHint = map[err] || `語音錯誤：${err}`
+          this.reportVoiceEvent('listen_error', { error: err })
+        },
+        onResult: ({ interim, final }) => {
+          if (interim) this.interimTranscript = interim
+          if (final) {
+            this.finalTranscriptBuffer = `${this.finalTranscriptBuffer || ''}${final}`.trim()
+            this.userInput = this.finalTranscriptBuffer
+            this.interimTranscript = ''
+          } else if (interim) {
+            const base = this.finalTranscriptBuffer || ''
+            this.userInput = `${base}${interim}`.trim()
+          }
+        },
+      })
+    },
+    toggleListening() {
+      if (!this.speechRecognitionSupported) {
+        this.voiceStatusHint = '請使用 Chrome / Edge 以啟用語音輸入'
+        return
+      }
+      if (this.isListening) {
+        this.stopListening()
+      } else {
+        this.startListening()
+      }
+    },
+    startListening() {
+      if (!this.speechRecognizer || this.isLoading || this.isStreaming) return
+      this.stopTTS()
+      this.suppressAutoListen = false
+      this.lastInputMethod = 'voice'
+      this.finalTranscriptBuffer = ''
+      this.interimTranscript = ''
+      // 車載：若輸入框已有未送文字，先清空避免混雜
+      if (this.carMode) this.userInput = ''
+      this.speechRecognizer.setLang(this.voiceLang)
+      const ok = this.speechRecognizer.start()
+      if (!ok) {
+        this.voiceStatusHint = '無法啟動麥克風，請再試一次'
+      }
+    },
+    stopListening({ silent = false } = {}) {
+      if (this.voiceRestartTimer) {
+        clearTimeout(this.voiceRestartTimer)
+        this.voiceRestartTimer = null
+      }
+      if (this.speechRecognizer) {
+        this.speechRecognizer.stop()
+      }
+      this.isListening = false
+      if (!silent) {
+        this.voiceStatusHint = this.carMode ? '已暫停收音' : ''
+      }
+    },
+    scheduleAutoListen(delayMs = 500) {
+      if (!this.carMode || !this.speechRecognitionSupported) return
+      if (this.suppressAutoListen) return
+      if (this.voiceRestartTimer) clearTimeout(this.voiceRestartTimer)
+      this.voiceRestartTimer = setTimeout(() => {
+        this.voiceRestartTimer = null
+        if (
+          this.carMode &&
+          !this.isLoading &&
+          !this.isStreaming &&
+          !this.isSpeaking &&
+          !this.isListening
+        ) {
+          this.startListening()
+        }
+      }, delayMs)
+    },
+    toggleAutoSpeak() {
+      this.autoSpeak = !this.autoSpeak
+      if (!this.autoSpeak) this.stopTTS()
+      this.persistVoiceSettings()
+      this.voiceStatusHint = this.autoSpeak ? '已開啟自動朗讀' : '已關閉自動朗讀'
+    },
+    toggleCarMode() {
+      this.carMode = !this.carMode
+      if (this.carMode) {
+        this.autoSpeak = true
+        this.voiceAutoSend = true
+        this.suppressAutoListen = false
+        this.voiceStatusHint = '車載模式：點麥克風開始，之後自動聽・說・送'
+        this.reportVoiceEvent('car_mode_on')
+        this.messages.push({
+          type: 'system',
+          content:
+            '🚗 車載自動語音模式已開啟：回覆會朗讀，朗讀結束後自動開麥，說完自動送出。請注意行車安全。',
+          timestamp: new Date().toLocaleTimeString('zh-TW'),
+        })
+        this.scrollToBottom()
+      } else {
+        this.suppressAutoListen = true
+        this.stopListening({ silent: true })
+        this.stopTTS()
+        this.voiceStatusHint = '車載模式已關閉'
+        this.reportVoiceEvent('car_mode_off')
+      }
+      this.persistVoiceSettings()
+    },
+    persistVoiceSettings() {
+      saveVoiceSettings({
+        lang: this.voiceLang,
+        rate: this.voiceRate,
+        autoSpeak: this.autoSpeak,
+        carMode: this.carMode,
+        autoSend: this.voiceAutoSend,
+      })
+      // 同步後端（失敗略過）
+      this.syncVoiceSettingsToBackend()
+    },
+    async syncVoiceSettingsToBackend() {
+      try {
+        const headers = await this.buildRequestHeaders()
+        await axios.put(
+          `${API_URL}/api/voice/settings`,
+          {
+            user_id: this.userId,
+            settings: {
+              lang: this.voiceLang,
+              rate: this.voiceRate,
+              auto_speak: this.autoSpeak,
+              car_mode: this.carMode,
+              auto_send: this.voiceAutoSend,
+              continuous: false,
+              strip_emojis_for_speech: true,
+            },
+          },
+          { headers }
+        )
+      } catch (e) {
+        console.warn('[voice] 同步設定到後端失敗:', e?.message || e)
+      }
+    },
+    async reportVoiceEvent(eventType, detail = {}) {
+      try {
+        const headers = await this.buildRequestHeaders()
+        await fetch(VOICE_EVENTS_API, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            user_id: this.userId,
+            conversation_id: this.conversationId,
+            event_type: eventType,
+            detail,
+            transcript: detail.transcript || null,
+          }),
+        })
+      } catch (_) {
+        /* 非關鍵 */
+      }
+    },
+    async prepareSpeechOnServer(text) {
+      try {
+        const headers = await this.buildRequestHeaders()
+        const { data } = await axios.post(
+          VOICE_PREPARE_SPEECH_API,
+          { text, strip_emojis: true, max_chars: 800 },
+          { headers }
+        )
+        return data?.speech_text || sanitizeForSpeech(text)
+      } catch {
+        return sanitizeForSpeech(text)
+      }
+    },
+    async speakAssistantText(text, { resumeListen = false } = {}) {
+      if (!this.speechSynthesisSupported || !text) return
+      try {
+        this.isSpeaking = true
+        this.voiceStatusHint = '正在朗讀回覆…'
+        this.reportVoiceEvent('speak_start')
+        const speech = await this.prepareSpeechOnServer(text)
+        await speakText(speech, {
+          lang: this.voiceLang,
+          rate: this.carMode ? Math.min(1.15, this.voiceRate + 0.05) : this.voiceRate,
+          stripEmojis: true,
+        })
+        this.reportVoiceEvent('speak_end')
+      } catch (e) {
+        console.warn('[voice] TTS 失敗:', e?.message || e)
+        this.voiceStatusHint = '朗讀失敗'
+      } finally {
+        this.isSpeaking = false
+        this.voiceStatusHint = this.carMode ? '車載待命' : ''
+        if (resumeListen && this.carMode && !this.suppressAutoListen) {
+          this.scheduleAutoListen(400)
+        }
+      }
+    },
+    async speakLastAssistant() {
+      const last = [...this.messages]
+        .reverse()
+        .find((m) => m.type === 'assistant' && m.content && !m.streaming)
+      if (!last) {
+        this.voiceStatusHint = '沒有可朗讀的回覆'
+        return
+      }
+      if (this.isSpeaking) {
+        this.stopTTS()
+        return
+      }
+      await this.speakAssistantText(last.content, { resumeListen: this.carMode })
+    },
+    stopTTS() {
+      stopSpeaking()
+      this.isSpeaking = false
     },
 
     async loadHistoryFromBackend() {
@@ -1368,6 +1837,8 @@ export default {
     if (this.authUser) {
       this.loadPersonality()
     }
+    // 🎙️ 語音初始化
+    this.initVoice()
     // 路由 /history 時自動打開歷史面板
     if (this.$route?.meta?.openHistory || this.$route?.path === '/history') {
       this.showHistoryPanel = true
@@ -1380,6 +1851,13 @@ export default {
     window.removeEventListener('beforeunload', this.handleBeforeUnload)
     if (typeof this.authUnsubscribe === 'function') {
       this.authUnsubscribe()
+    }
+    this.suppressAutoListen = true
+    this.stopListening({ silent: true })
+    this.stopTTS()
+    if (this.voiceRestartTimer) {
+      clearTimeout(this.voiceRestartTimer)
+      this.voiceRestartTimer = null
     }
   }
 }
@@ -2013,6 +2491,138 @@ export default {
   background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
 }
 
+.voice-speak-btn {
+  background: linear-gradient(135deg, #06b6d4 0%, #0891b2 100%);
+}
+
+.voice-speak-btn.active {
+  box-shadow: 0 0 0 3px rgba(6, 182, 212, 0.35);
+  outline: 2px solid #22d3ee;
+}
+
+.car-mode-btn {
+  background: linear-gradient(135deg, #0f766e 0%, #115e59 100%);
+}
+
+.car-mode-btn.active {
+  box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.4);
+  outline: 2px solid #34d399;
+  animation: car-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes car-glow {
+  0%, 100% { filter: brightness(1); }
+  50% { filter: brightness(1.12); }
+}
+
+/* 語音狀態列 */
+.voice-bar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0 1.5rem 0.5rem;
+  padding: 0.55rem 0.9rem;
+  border-radius: 12px;
+  background: #f0f9ff;
+  border: 1px solid #bae6fd;
+  color: #0c4a6e;
+  font-size: 0.88rem;
+  flex-wrap: wrap;
+}
+
+.voice-bar.listening {
+  background: #fef2f2;
+  border-color: #fecaca;
+  color: #991b1b;
+}
+
+.voice-bar.speaking {
+  background: #ecfeff;
+  border-color: #a5f3fc;
+  color: #155e75;
+}
+
+.voice-bar.car {
+  background: linear-gradient(90deg, #042f2e 0%, #134e4a 100%);
+  border-color: #14b8a6;
+  color: #ecfdf5;
+  font-size: 1rem;
+  padding: 0.75rem 1rem;
+}
+
+.voice-bar.unsupported {
+  background: #f9fafb;
+  border-color: #e5e7eb;
+  color: #6b7280;
+}
+
+.voice-bar-left {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex: 1;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.voice-bar-right {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-shrink: 0;
+}
+
+.voice-pulse {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.6);
+  animation: pulse-mic 1.2s infinite;
+}
+
+@keyframes pulse-mic {
+  0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.55); }
+  70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+}
+
+.voice-interim {
+  opacity: 0.85;
+  font-style: italic;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voice-mini-btn {
+  border: none;
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  background: rgba(255, 255, 255, 0.9);
+  color: #0f172a;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.voice-bar.car .voice-mini-btn {
+  background: #14b8a6;
+  color: white;
+}
+
+.voice-mini-btn.danger {
+  background: #ef4444;
+  color: white;
+}
+
+.voice-warn {
+  font-size: 0.78rem;
+  opacity: 0.9;
+}
+
 .action-btn:hover {
   transform: translateY(-2px) scale(1.05);
   box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
@@ -2036,6 +2646,92 @@ export default {
   align-items: center;
 }
 
+.input-wrapper.car-input {
+  padding: 1.1rem 1.25rem;
+  background: #f0fdfa;
+  border-top: 2px solid #14b8a6;
+}
+
+.mic-button {
+  flex-shrink: 0;
+  min-width: 4.2rem;
+  padding: 0.7rem 0.65rem;
+  border: none;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #f43f5e 0%, #e11d48 100%);
+  color: white;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  box-shadow: 0 4px 12px rgba(244, 63, 94, 0.35);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.mic-button:hover:not(:disabled) {
+  transform: translateY(-1px) scale(1.03);
+}
+
+.mic-button.listening {
+  background: linear-gradient(135deg, #dc2626 0%, #991b1b 100%);
+  animation: pulse-mic-btn 1s ease-in-out infinite;
+}
+
+.mic-button.car {
+  min-width: 5rem;
+  min-height: 3.6rem;
+  font-size: 1.05rem;
+  border-radius: 18px;
+}
+
+.mic-button:disabled,
+.mic-button.disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+@keyframes pulse-mic-btn {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+
+.mic-icon {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.mic-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.tts-button {
+  flex-shrink: 0;
+  width: 2.75rem;
+  height: 2.75rem;
+  border: 2px solid #e5e7eb;
+  border-radius: 14px;
+  background: #f8fafc;
+  cursor: pointer;
+  font-size: 1.15rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.tts-button.active {
+  border-color: #06b6d4;
+  background: #ecfeff;
+}
+
+.tts-button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .message-input {
   flex: 1;
   padding: 0.85rem 1.25rem;
@@ -2046,6 +2742,12 @@ export default {
   outline: none;
   transition: all 0.3s;
   box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.05);
+}
+
+.input-wrapper.car-input .message-input {
+  font-size: 1.1rem;
+  padding: 1rem 1.25rem;
+  min-height: 3.2rem;
 }
 
 .message-input:focus {
