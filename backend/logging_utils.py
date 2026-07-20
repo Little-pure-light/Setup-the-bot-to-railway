@@ -4,10 +4,26 @@
 - 不記錄完整私人對話
 - 不記錄 Secret / JWT / API Key
 - user_id / conversation_id 僅記錄前綴
+
+## RedactingFilter 限制（重要）
+
+`RedactingFilter` 只處理 `LogRecord.msg` 與 `record.args` 中的字串。
+
+它 **不保證** 清除：
+- `exc_info` / `logger.exception()` 產生的 traceback 文字
+- 已格式化進 handler 的完整 exception chain
+- 第三方 SDK 自行 print 的輸出
+
+因此：
+1. Production 記錄外部 API 失敗時，請使用 `format_external_error()` /
+   `log_external_failure()`，避免 `logger.exception(e)` 直接帶入可能含 Secret 的訊息。
+2. 仍保留錯誤 **類型**、可選 **error_code**、**request_id**，以利診斷。
+3. 本機除錯可設 `LOG_VERBOSE_EXCEPTIONS=true` 輸出脫敏後的短訊息（仍非完整 traceback）。
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 import uuid
 from contextvars import ContextVar
@@ -19,6 +35,7 @@ SECRET_PATTERNS = [
     re.compile(r"sk-[a-zA-Z0-9_\-]{10,}", re.I),
     re.compile(r"eyJ[a-zA-Z0-9_\-]{20,}\.[a-zA-Z0-9_\-]+\.[a-zA-Z0-9_\-]+"),  # JWT-ish
     re.compile(r"(?i)(api[_-]?key|authorization|bearer)\s*[:=]\s*\S+"),
+    re.compile(r"(?i)Bearer\s+[A-Za-z0-9\-._~+/]+=*"),
 ]
 
 
@@ -64,6 +81,47 @@ def redact_secrets(text: str) -> str:
     return out
 
 
+def format_external_error(
+    exc: BaseException,
+    *,
+    code: str = ErrorCode.UNKNOWN,
+    max_len: int = 200,
+) -> str:
+    """
+    將外部 API / SDK 例外轉成可記錄字串。
+    Production：只保留 exception 類型 + code + request_id（不附完整 str(exc)）。
+    詳細模式：附脫敏後的短訊息，仍不輸出完整 traceback。
+    """
+    etype = type(exc).__name__
+    rid = get_request_id() or "-"
+    verbose = os.getenv("LOG_VERBOSE_EXCEPTIONS", "").lower() in ("1", "true", "yes")
+    if verbose:
+        detail = redact_secrets(str(exc))[:max_len]
+        return f"{code} type={etype} request_id={rid} detail={detail}"
+    return f"{code} type={etype} request_id={rid}"
+
+
+def log_external_failure(
+    logger: logging.Logger,
+    exc: BaseException,
+    *,
+    code: str = ErrorCode.UNKNOWN,
+    event: str = "external_error",
+) -> str:
+    """
+    記錄外部失敗：不使用 logger.exception，避免 traceback 含 Secret。
+    回傳已寫入的摘要字串（供測試斷言）。
+    """
+    summary = format_external_error(exc, code=code)
+    logger.error(
+        "%s event=%s",
+        summary,
+        event,
+        extra=safe_log_extra(event=event, error_code=code),
+    )
+    return summary
+
+
 def safe_log_extra(
     *,
     conversation_id: Optional[str] = None,
@@ -91,6 +149,12 @@ def safe_log_extra(
 
 
 class RedactingFilter(logging.Filter):
+    """
+    脫敏 filter。
+
+    限制：不處理 exc_info traceback。見模組 docstring。
+    """
+
     def filter(self, record: logging.LogRecord) -> bool:
         try:
             if isinstance(record.msg, str):
