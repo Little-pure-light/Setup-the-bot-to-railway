@@ -285,6 +285,170 @@ async def run_post_chat_tasks(
     except Exception as e:
         logger.warning(f"⚠️ 背景任務處理失敗: {e}", exc_info=True)
 
+
+async def _try_kernel_chat(
+    request: ChatRequest,
+    background_tasks: BackgroundTasks,
+    *,
+    stream: bool,
+    use_tools: bool,
+):
+    """
+    Strangler 入口：AI_KERNEL_ENABLED 時使用 Kernel。
+    回傳 Response 或 None（表示改走 Legacy）。
+    Shadow 模式：並行跑 Kernel 但不取代回應、無副作用。
+    """
+    try:
+        from backend.ai_kernel.feature_flags import get_kernel_flags
+        from backend.ai_kernel.models import KernelRequest
+        from backend.ai_kernel.kernel import AIKernel
+        from backend.ai_kernel.adapters import build_default_deps
+        from backend.ai_kernel.errors import (
+            BudgetExceededError,
+            KernelFatalError,
+            ModerationBlockedError,
+        )
+        from backend.logging_utils import get_request_id
+    except Exception as e:
+        logger.warning("Kernel import failed, legacy only: %s", e)
+        return None
+
+    flags = get_kernel_flags()
+    if not flags.enabled and not flags.shadow_mode:
+        return None
+
+    openai_client = get_openai_client()
+    memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
+    tracker = get_token_tracker()
+    memory_system = MemorySystem(supabase, openai_client, memories_table)
+    prompt_engine = PromptEngine(
+        request.conversation_id, memories_table, user_id=request.user_id
+    )
+    deps = build_default_deps(
+        memory_system=memory_system,
+        prompt_engine=prompt_engine,
+        redis_interface=redis_interface,
+        openai_client=openai_client,
+        tracker=tracker,
+    )
+    kreq = KernelRequest(
+        user_message=request.user_message,
+        conversation_id=request.conversation_id,
+        user_id=request.user_id,
+        ai_id=request.ai_id,
+        voice_mode=request.voice_mode,
+        car_mode=request.car_mode,
+        input_method=request.input_method,
+        speak_response=request.speak_response,
+        use_tools=use_tools,
+        stream=stream,
+        request_id=get_request_id() or "",
+        shadow=flags.shadow_mode and not flags.enabled,
+    )
+
+    # Shadow：背景執行，主路徑仍 Legacy；強制 shadow=True（無記憶/token/真實工具）
+    if flags.shadow_mode and not flags.enabled:
+        async def _shadow():
+            try:
+                kreq.shadow = True
+                # shadow 使用同一 flags，kernel 內部會禁止副作用
+                await AIKernel(deps, flags=flags).run(kreq)
+                logger.info(
+                    "🌑 Kernel shadow ok conv=%s (no side effects)",
+                    request.conversation_id[:8],
+                )
+            except Exception as ex:
+                logger.info("🌑 Kernel shadow failed: %s", type(ex).__name__)
+
+        background_tasks.add_task(_shadow)
+        return None
+
+    # Enabled path
+    kernel = AIKernel(deps, flags=flags)
+    try:
+        if stream:
+            async def stream_gen():
+                try:
+                    async for ev in kernel.run_stream(kreq):
+                        if ev.type == "content" and ev.text:
+                            yield ev.text
+                        elif ev.type == "tool_status":
+                            payload = {
+                                "type": "tool_status",
+                                "status": ev.status or ev.data.get("status") or "",
+                                "tools": ev.data.get("tools") or [],
+                                "step": ev.data.get("step"),
+                                "total": ev.data.get("total"),
+                                "message": ev.text or ev.data.get("message") or "",
+                            }
+                            yield TOOL_EVENT_PREFIX + json.dumps(
+                                payload, ensure_ascii=False
+                            ) + "\n"
+                        elif ev.type == "usage":
+                            meta = dict(ev.data or {})
+                            yield USAGE_META_PREFIX + json.dumps(
+                                meta, ensure_ascii=False
+                            )
+                except BudgetExceededError as be:
+                    yield f"[ERROR] budget_exceeded: {be.message}"
+                except ModerationBlockedError as me:
+                    yield me.message or "內容未通過安全審核"
+                    yield USAGE_META_PREFIX + json.dumps(
+                        {"blocked": True, "usage": {}}, ensure_ascii=False
+                    )
+                except Exception as ex:
+                    if flags.fallback_to_legacy_on_fatal:
+                        logger.warning(
+                            "Kernel stream fatal → client error (legacy not mid-stream): %s",
+                            type(ex).__name__,
+                        )
+                    yield f"[ERROR] Kernel: {type(ex).__name__}"
+
+            return StreamingResponse(
+                stream_gen(),
+                media_type="text/plain; charset=utf-8",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                    "Connection": "keep-alive",
+                    "X-AI-Kernel": "1",
+                },
+            )
+
+        # non-stream
+        result = await kernel.run(kreq)
+        return ChatResponse(
+            assistant_message=result.assistant_message,
+            emotion_analysis=result.emotion_analysis or {},
+            conversation_id=request.conversation_id,
+            reflection=None,
+            speech_text=result.speech_text,
+            usage=result.usage,
+            usage_summary=(result.usage or {}).get("daily"),
+            tools_used=result.tools_used or None,
+        )
+    except BudgetExceededError as be:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "budget_exceeded",
+                "message": be.message,
+            },
+        )
+    except ModerationBlockedError as me:
+        return JSONResponse(
+            status_code=400,
+            content={"error": "content_blocked", "message": me.message},
+        )
+    except (KernelFatalError, Exception) as e:
+        if flags.fallback_to_legacy_on_fatal:
+            logger.warning(
+                "Kernel fatal → fallback legacy: %s", type(e).__name__
+            )
+            return None
+        raise HTTPException(status_code=500, detail="Kernel error")
+
+
 # =========================================================
 # ✅ 主流程：/chat 路由（支援 stream=true 真實 OpenAI 串流）
 # =========================================================
@@ -297,6 +461,14 @@ async def chat(
 ):
     try:
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
+
+        # --- AI Kernel (Strangler)：flag 開啟時走新核心，失敗可回退 Legacy ---
+        kernel_response = await _try_kernel_chat(
+            request, background_tasks, stream=stream, use_tools=use_tools
+        )
+        if kernel_response is not None:
+            return kernel_response
+
         openai_client = get_openai_client()
         memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
         tracker = get_token_tracker()

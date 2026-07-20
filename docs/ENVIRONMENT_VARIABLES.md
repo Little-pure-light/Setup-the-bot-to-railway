@@ -36,6 +36,17 @@
 | `RAILWAY_GIT_COMMIT_SHA` / `GIT_COMMIT` / `GITHUB_SHA` | 可選，健康檢查回傳 `git_commit`（截短） | 空 |
 | `READY_CHECK_SUPABASE_DNS` | `/ready` 是否做 Supabase DNS（非 DB 探測；預設 false） | `false` |
 | `LOG_VERBOSE_EXCEPTIONS` | 外部錯誤日誌是否附脫敏短訊息 | `false` |
+| `AI_KERNEL_ENABLED` | 啟用 AI Kernel 取代 Legacy 主路徑 | `false` |
+| `AI_KERNEL_SHADOW_MODE` | Shadow：背景跑 Kernel，無副作用、不改回應 | `false` |
+| `KERNEL_DEBUG_ENABLED` | Debug Trace API | `false` |
+| `KERNEL_MAX_AGENT_ITERATIONS` | Agent Loop 迭代上限 | `3` |
+| `KERNEL_MAX_TOOL_CALLS` | 每輪工具上限 | `5` |
+| `KERNEL_CONTEXT_TOKEN_BUDGET` | Context token 預算（粗估） | `12000` |
+| `KERNEL_FALLBACK_TO_LEGACY` | Kernel 致命錯誤回退 Legacy | `true` |
+| `KERNEL_DEBUG_SECRET` | Debug API Bearer（優先於 API_SECRET） | 空 |
+| `KERNEL_TOOL_ALLOWLIST` | 逗號分隔工具白名單（空=不限制） | 空 |
+| `KERNEL_TOOL_BLOCKLIST` | 額外封鎖工具名 | 空 |
+| `KERNEL_VOICE_TOOL_RESTRICT` | 語音/車載僅 voice-safe 工具 | `true` |
 
 ## 前端（Vite）
 
