@@ -40,6 +40,7 @@ try:
     from backend.tools_router import router as tools_router
     from backend.history_router import router as history_router
     from backend.voice_router import router as voice_router
+    from backend.ai_kernel.debug_router import router as kernel_debug_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -177,6 +178,10 @@ try:
     app.include_router(tools_router, prefix="/api")
     app.include_router(history_router, prefix="/api")
     app.include_router(voice_router, prefix="/api")
+    try:
+        app.include_router(kernel_debug_router, prefix="/api")
+    except NameError:
+        pass
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
