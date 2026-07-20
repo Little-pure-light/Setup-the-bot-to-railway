@@ -44,6 +44,15 @@ class MemorySystem:
     ):
         """儲存對話到 Supabase（長期）與 Redis（短期快取）"""
         try:
+            # 空回覆或錯誤回覆不得寫入長期記憶
+            bot_text = (bot_response or "").strip()
+            if not bot_text or bot_text.startswith("[ERROR]"):
+                print(
+                    f"⚠️ 略過記憶儲存：空回覆或錯誤回覆 "
+                    f"conv={(conversation_id or '')[:8]}..."
+                )
+                return
+
             length_score = (len(user_input) // 20) * 0.1
             keyword_score = sum(
                 1 for keyword in self.emotion_detector.emotion_dictionary.keys()

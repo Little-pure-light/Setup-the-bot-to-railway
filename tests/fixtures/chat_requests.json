@@ -1,0 +1,16 @@
+{
+  "normal_chat": {
+    "user_message": "你好",
+    "conversation_id": "test-conversation",
+    "user_id": "test-user",
+    "ai_id": "xiaochenguang_v1"
+  },
+  "voice_car": {
+    "user_message": "現在幾點",
+    "conversation_id": "test-conversation",
+    "user_id": "test-user",
+    "voice_mode": true,
+    "car_mode": true,
+    "input_method": "voice"
+  }
+}
