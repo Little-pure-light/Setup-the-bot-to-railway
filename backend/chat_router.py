@@ -1,8 +1,8 @@
 import asyncio # ✅ 新增匯入，用於後台任務
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query # ✅ 匯入 BackgroundTasks, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Dict, Any
 import os
 import logging
 import json
@@ -17,10 +17,15 @@ from modules.memory_system import MemorySystem
 from backend.redis_interface import RedisInterface
 from backend.core_controller import get_core_controller
 from backend.tools import web_search, TOOL_DEFINITIONS
+from backend.token_tracker import get_token_tracker, estimate_cost_usd
+from backend.moderation import moderate_text, format_block_message
 
 router = APIRouter()
 logger = logging.getLogger("chat_router")
 redis_interface = RedisInterface()
+
+# 串流結尾附加用量 meta 的標記（前端可解析）
+USAGE_META_PREFIX = "\n__XCG_META__"
 
 _reflection_storage = None
 
@@ -59,7 +64,63 @@ class ChatResponse(BaseModel):
     assistant_message: str
     emotion_analysis: dict
     conversation_id: str
-    reflection: Optional[dict] = None 
+    reflection: Optional[dict] = None
+    usage: Optional[dict] = None
+    usage_summary: Optional[dict] = None
+
+
+def _merge_usage(*usages: Optional[Dict[str, Any]]) -> Dict[str, int]:
+    total = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    for u in usages:
+        if not u:
+            continue
+        total["prompt_tokens"] += int(u.get("prompt_tokens") or 0)
+        total["completion_tokens"] += int(u.get("completion_tokens") or 0)
+        total["total_tokens"] += int(
+            u.get("total_tokens")
+            or (int(u.get("prompt_tokens") or 0) + int(u.get("completion_tokens") or 0))
+        )
+    return total
+
+
+def _record_usage(
+    *,
+    user_id: str,
+    conversation_id: str,
+    model: str,
+    usage: Optional[Dict[str, Any]],
+    endpoint: str = "chat",
+    meta: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    tracker = get_token_tracker()
+    u = usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    row = tracker.record(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        model=model,
+        prompt_tokens=int(u.get("prompt_tokens") or 0),
+        completion_tokens=int(u.get("completion_tokens") or 0),
+        total_tokens=int(u.get("total_tokens") or 0) or None,
+        endpoint=endpoint,
+        meta=meta,
+    )
+    summary = tracker.get_user_daily_summary(user_id)
+    return {
+        "prompt_tokens": row["prompt_tokens"],
+        "completion_tokens": row["completion_tokens"],
+        "total_tokens": row["total_tokens"],
+        "cost_usd": row["cost_usd"],
+        "model": model,
+        "daily": {
+            "prompt_tokens": summary["prompt_tokens"],
+            "completion_tokens": summary["completion_tokens"],
+            "total_tokens": summary["total_tokens"],
+            "cost_usd": summary["cost_usd"],
+            "budget_usd": summary["budget_usd"],
+            "remaining_usd": summary["remaining_usd"],
+            "calls": summary["calls"],
+        },
+    }
 
 
 # =========================================================
@@ -169,6 +230,66 @@ async def chat(
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
         openai_client = get_openai_client()
         memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
+        tracker = get_token_tracker()
+
+        # --- 成本控制：預算檢查 ---
+        allowed, budget_reason, budget_ctx = tracker.check_budget(request.user_id)
+        if not allowed:
+            logger.warning(f"⛔ 預算攔截 user={request.user_id[:8]}... {budget_reason}")
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "budget_exceeded",
+                    "message": budget_reason,
+                    "usage": budget_ctx.get("user"),
+                },
+            )
+
+        # --- 內容安全審核（輸入）---
+        moderation = await moderate_text(request.user_message, client=openai_client)
+        if moderation.get("blocked"):
+            msg = format_block_message(moderation)
+            logger.warning(
+                f"🚫 使用者訊息被審核攔截 conv={request.conversation_id[:8]}..."
+            )
+            if stream:
+                async def blocked_stream():
+                    yield msg
+                    meta = {
+                        "blocked": True,
+                        "moderation": {
+                            "flagged": moderation.get("flagged"),
+                            "flagged_categories": moderation.get("flagged_categories"),
+                        },
+                        "usage": {
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "total_tokens": 0,
+                            "cost_usd": 0,
+                            "model": "none",
+                        },
+                    }
+                    yield USAGE_META_PREFIX + json.dumps(meta, ensure_ascii=False)
+
+                return StreamingResponse(
+                    blocked_stream(),
+                    media_type="text/plain; charset=utf-8",
+                    headers={
+                        "Cache-Control": "no-cache, no-transform",
+                        "X-Content-Moderation": "blocked",
+                    },
+                )
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "error": "content_blocked",
+                    "message": msg,
+                    "moderation": {
+                        "flagged": moderation.get("flagged"),
+                        "flagged_categories": moderation.get("flagged_categories"),
+                    },
+                },
+            )
 
         memory_system = MemorySystem(supabase, openai_client, memories_table)
         prompt_engine = PromptEngine(
@@ -245,10 +366,10 @@ async def chat(
                 except Exception as e:
                     logger.warning(f"⚠️ Streaming 後背景任務失敗: {e}")
 
-            async def _prepare_messages_with_optional_tools(base_messages: list) -> list:
-                """可選 tool calling；完成後仍用 stream=True 輸出最終回答"""
+            async def _prepare_messages_with_optional_tools(base_messages: list):
+                """可選 tool calling；完成後仍用 stream=True 輸出最終回答。回傳 (messages, tool_usage)"""
                 if not use_tools:
-                    return base_messages
+                    return base_messages, None
                 try:
                     tool_response = await generate_response_with_tools(
                         base_messages,
@@ -257,12 +378,14 @@ async def chat(
                         temperature=selected_temperature,
                         max_tokens=1000,
                     )
+                    tool_usage = tool_response.get("usage")
                     if not (
                         tool_response.get("finish_reason") == "tool_calls"
                         and tool_response.get("tool_calls")
                     ):
                         # 不需工具：丟棄預檢全文，改走真正 OpenAI 串流
-                        return base_messages
+                        # 仍記錄 tool 預檢用量（若有）
+                        return base_messages, tool_usage
 
                     logger.info(
                         f"🔧 [Streaming] 工具呼叫 x{len(tool_response['tool_calls'])}"
@@ -298,30 +421,85 @@ async def chat(
                             "tool_call_id": tool_call_id,
                             "content": tool_result,
                         })
-                    return stream_messages
+                    return stream_messages, tool_usage
                 except Exception as e:
                     logger.warning(f"⚠️ [Streaming] Tool 階段失敗，改直接串流: {e}")
-                    return base_messages
+                    return base_messages, None
 
             async def stream_generator():
                 full_response = ""
+                stream_usage = None
+                tool_usage = None
                 try:
-                    final_messages = await _prepare_messages_with_optional_tools(messages)
+                    final_messages, tool_usage = await _prepare_messages_with_optional_tools(messages)
                     # 真實 OpenAI stream=True：逐 token 推給前端
-                    async for chunk in generate_response_stream(
+                    async for event in generate_response_stream(
                         final_messages,
                         model=selected_model,
                         temperature=selected_temperature,
                         max_tokens=2000,
                     ):
-                        full_response += chunk
-                        yield chunk
+                        if not isinstance(event, dict):
+                            # 相容舊字串
+                            full_response += str(event)
+                            yield str(event)
+                            continue
+                        if event.get("type") == "content":
+                            text = event.get("text") or ""
+                            full_response += text
+                            yield text
+                        elif event.get("type") == "usage":
+                            stream_usage = event.get("usage")
                 except Exception as e:
                     err = f"[ERROR] Streaming 失敗: {e}"
                     logger.error(err, exc_info=True)
                     full_response = err
                     yield err
                 finally:
+                    # 合併 tool + stream usage 並記錄
+                    merged = _merge_usage(tool_usage, stream_usage)
+                    usage_payload = None
+                    try:
+                        if merged["total_tokens"] > 0 or merged["prompt_tokens"] > 0:
+                            usage_payload = _record_usage(
+                                user_id=request.user_id,
+                                conversation_id=request.conversation_id,
+                                model=selected_model,
+                                usage=merged,
+                                endpoint="chat_stream",
+                                meta={"stream": True, "use_tools": use_tools},
+                            )
+                        else:
+                            # 無 API usage 時仍回傳空用量摘要
+                            summary = tracker.get_user_daily_summary(request.user_id)
+                            usage_payload = {
+                                "prompt_tokens": 0,
+                                "completion_tokens": 0,
+                                "total_tokens": 0,
+                                "cost_usd": 0,
+                                "model": selected_model,
+                                "daily": {
+                                    "prompt_tokens": summary["prompt_tokens"],
+                                    "completion_tokens": summary["completion_tokens"],
+                                    "total_tokens": summary["total_tokens"],
+                                    "cost_usd": summary["cost_usd"],
+                                    "budget_usd": summary["budget_usd"],
+                                    "remaining_usd": summary["remaining_usd"],
+                                    "calls": summary["calls"],
+                                },
+                            }
+                    except Exception as e:
+                        logger.warning(f"⚠️ 記錄 streaming token 失敗: {e}")
+
+                    meta = {
+                        "blocked": False,
+                        "usage": usage_payload,
+                    }
+                    try:
+                        yield USAGE_META_PREFIX + json.dumps(meta, ensure_ascii=False)
+                    except Exception:
+                        pass
+
                     asyncio.create_task(_post_stream_tasks(full_response))
                     logger.info(
                         f"✅ Streaming 完成，已排程背景任務（長度: {len(full_response)} 字）"
@@ -341,6 +519,7 @@ async def chat(
         # ✅ 原本的非 streaming 模式（含 Tool Calling + 完整錯誤處理）
         # =========================================================
         assistant_message = None
+        collected_usages = []
 
         try:
             # 第一輪：讓 AI 決定要不要用工具
@@ -351,6 +530,8 @@ async def chat(
                 temperature=selected_temperature,
                 max_tokens=1000
             )
+            if tool_response.get("usage"):
+                collected_usages.append(tool_response["usage"])
 
             if tool_response["finish_reason"] == "error":
                 # Tool calling 呼叫本身失敗，降級為普通模式
@@ -399,13 +580,16 @@ async def chat(
                     logger.info(f"✅ 工具 {fn_name} 完成，tool_call_id={tool_call.id}，結果長度：{len(tool_result)}")
 
                 # 第二輪：讓 AI 根據工具結果生成最終回答
-                assistant_message = await generate_response(
+                final_result = await generate_response(
                     openai_client,
                     messages,
                     model=selected_model,
                     max_tokens=1000,
-                    temperature=selected_temperature
+                    temperature=selected_temperature,
+                    return_usage=True,
                 )
+                assistant_message = final_result["content"]
+                collected_usages.append(final_result.get("usage"))
             else:
                 # AI 不需要工具，直接用第一輪的回答
                 assistant_message = tool_response["content"]
@@ -415,13 +599,34 @@ async def chat(
         except Exception as tool_err:
             # 任何工具流程失敗，降級為不帶工具的普通呼叫
             logger.warning(f"⚠️ Tool calling 流程失敗（{tool_err}），降級為普通 generate_response")
-            assistant_message = await generate_response(
+            final_result = await generate_response(
                 openai_client,
                 messages,
                 model=selected_model,
                 max_tokens=1000,
-                temperature=selected_temperature
+                temperature=selected_temperature,
+                return_usage=True,
             )
+            assistant_message = final_result["content"]
+            collected_usages.append(final_result.get("usage"))
+
+        # 輸出端審核（可選，預設開啟）
+        if os.getenv("MODERATION_CHECK_OUTPUT", "true").lower() not in ("0", "false", "no"):
+            out_mod = await moderate_text(assistant_message or "", client=openai_client)
+            if out_mod.get("blocked"):
+                assistant_message = (
+                    "抱歉，這次回覆未通過內容安全審核，我換個溫柔的方式陪你聊好嗎？✨"
+                )
+
+        merged_usage = _merge_usage(*collected_usages)
+        usage_payload = _record_usage(
+            user_id=request.user_id,
+            conversation_id=request.conversation_id,
+            model=selected_model,
+            usage=merged_usage,
+            endpoint="chat",
+            meta={"stream": False, "use_tools": use_tools},
+        )
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
         await memory_system.save_memory(
@@ -444,7 +649,9 @@ async def chat(
             assistant_message=assistant_message,
             emotion_analysis=emotion_analysis,
             conversation_id=request.conversation_id,
-            reflection=None
+            reflection=None,
+            usage=usage_payload,
+            usage_summary=usage_payload.get("daily"),
         )
 
     except Exception as e:

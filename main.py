@@ -26,6 +26,7 @@ try:
     from backend.file_upload import router as file_upload_router
     from backend.archive_conversation import router as archive_router
     from backend.auth_router import router as auth_router
+    from backend.usage_router import router as usage_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -33,6 +34,26 @@ except Exception as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 小晨光 AI 系統啟動中...")
+    # 啟動時檢查 Supabase 設定（不印出 secret）
+    try:
+        from backend.supabase_handler import _resolve_supabase_credentials
+        import socket
+        from urllib.parse import urlparse
+
+        sb_url, sb_key = _resolve_supabase_credentials()
+        if not sb_url or not sb_key:
+            logger.warning("⚠️ Supabase 未完整設定（SUPABASE_URL / ANON_KEY|KEY）— Auth 與記憶同步會失敗")
+        else:
+            host = urlparse(sb_url).hostname or ""
+            try:
+                socket.getaddrinfo(host, 443)
+                logger.info(f"✅ Supabase DNS 正常 host={host}")
+            except Exception as e:
+                logger.error(
+                    f"❌ Supabase 主機無法解析 host={host} err={e} — 請更新 .env 的 SUPABASE_URL"
+                )
+    except Exception as e:
+        logger.warning(f"⚠️ Supabase 啟動檢查略過: {e}")
     yield
     logger.info("👋 小晨光 AI 系統關閉中...")
 
@@ -98,6 +119,7 @@ try:
     app.include_router(file_upload_router, prefix="/api")
     app.include_router(archive_router, prefix="/api")
     app.include_router(auth_router, prefix="/api")
+    app.include_router(usage_router, prefix="/api")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
@@ -133,6 +155,8 @@ async def api_health():
             "auth_me": "/api/auth/me",
             "auth_sync": "/api/auth/sync",
             "personality": "/api/personality/{user_id}",
+            "usage_summary": "/api/usage/summary",
+            "usage_user": "/api/usage/user/{user_id}",
             "health": "/api/health"
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()

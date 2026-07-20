@@ -12,6 +12,14 @@
           </div>
         </div>
         <div class="header-right">
+          <div
+            class="token-chip"
+            :title="tokenTooltip"
+            @click="refreshUsageSummary"
+          >
+            <span class="token-label">🪙 Token</span>
+            <span class="token-value">{{ tokenChipText }}</span>
+          </div>
           <div v-if="authUser" class="user-chip" :title="authUser.email || authUser.id">
             <span class="user-dot"></span>
             <span class="user-label">{{ authEmailLabel }}</span>
@@ -58,6 +66,10 @@
                     {{ getEmotionEmoji(msg.emotion.dominant_emotion) }}
                     {{ msg.emotion.dominant_emotion }}
                   </span>
+                  <span v-if="msg.usage" class="usage-tag" :title="formatUsageDetail(msg.usage)">
+                    🪙 in {{ msg.usage.prompt_tokens || 0 }} / out {{ msg.usage.completion_tokens || 0 }}
+                    · ${{ formatCost(msg.usage.cost_usd) }}
+                  </span>
                   <small class="timestamp">{{ msg.timestamp }}</small>
                 </div>
               </div>
@@ -100,6 +112,24 @@
                 <span class="btn-icon">🗂️</span>
                 <span class="btn-text">結束對話</span>
               </button>
+            </div>
+          </div>
+
+          <!-- Token 用量列 -->
+          <div v-if="lastUsage || usageSummary" class="token-bar">
+            <div class="token-bar-left">
+              <span v-if="lastUsage">
+                本次：輸入 <b>{{ lastUsage.prompt_tokens || 0 }}</b>
+                · 輸出 <b>{{ lastUsage.completion_tokens || 0 }}</b>
+                · 成本 <b>${{ formatCost(lastUsage.cost_usd) }}</b>
+              </span>
+              <span v-else>尚未產生 Token 用量</span>
+            </div>
+            <div class="token-bar-right" v-if="usageSummary">
+              今日：{{ usageSummary.total_tokens || 0 }} tokens
+              · ${{ formatCost(usageSummary.cost_usd) }}
+              / ${{ formatCost(usageSummary.budget_usd) }}
+              <span class="remaining">(剩 ${{ formatCost(usageSummary.remaining_usd) }})</span>
             </div>
           </div>
 
@@ -232,6 +262,8 @@ export default {
       authUser: null,
       authUnsubscribe: null,
       personalitySummary: null,
+      lastUsage: null,
+      usageSummary: null,
     }
   },
   computed: {
@@ -241,8 +273,114 @@ export default {
       if (email.length > 22) return email.slice(0, 18) + '…'
       return email || '已登入'
     },
+    tokenChipText() {
+      if (this.lastUsage && (this.lastUsage.total_tokens || this.lastUsage.prompt_tokens)) {
+        const t =
+          this.lastUsage.total_tokens ||
+          (this.lastUsage.prompt_tokens || 0) + (this.lastUsage.completion_tokens || 0)
+        return `${t} · $${this.formatCost(this.lastUsage.cost_usd)}`
+      }
+      if (this.usageSummary) {
+        return `今日 ${this.usageSummary.total_tokens || 0}`
+      }
+      return '—'
+    },
+    tokenTooltip() {
+      const parts = []
+      if (this.lastUsage) {
+        parts.push(
+          `本次 in ${this.lastUsage.prompt_tokens || 0} / out ${this.lastUsage.completion_tokens || 0} / $${this.formatCost(this.lastUsage.cost_usd)}`
+        )
+      }
+      if (this.usageSummary) {
+        parts.push(
+          `今日 $${this.formatCost(this.usageSummary.cost_usd)} / 預算 $${this.formatCost(this.usageSummary.budget_usd)}`
+        )
+      }
+      return parts.join('\n') || 'Token 使用量（點擊重新整理）'
+    },
   },
   methods: {
+    formatCost(v) {
+      const n = Number(v || 0)
+      if (n === 0) return '0'
+      if (n < 0.0001) return n.toFixed(6)
+      if (n < 0.01) return n.toFixed(4)
+      return n.toFixed(3)
+    },
+    formatUsageDetail(usage) {
+      if (!usage) return ''
+      return `input ${usage.prompt_tokens || 0} · output ${usage.completion_tokens || 0} · total ${usage.total_tokens || 0} · $${this.formatCost(usage.cost_usd)} · ${usage.model || ''}`
+    },
+    applyUsagePayload(usage) {
+      if (!usage) return
+      this.lastUsage = {
+        prompt_tokens: usage.prompt_tokens || 0,
+        completion_tokens: usage.completion_tokens || 0,
+        total_tokens:
+          usage.total_tokens ||
+          (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
+        cost_usd: usage.cost_usd || 0,
+        model: usage.model || '',
+      }
+      if (usage.daily) {
+        this.usageSummary = usage.daily
+      }
+    },
+    extractStreamMeta(fullText) {
+      const marker = '\n__XCG_META__'
+      const idx = fullText.lastIndexOf(marker)
+      if (idx === -1) {
+        // 也可能沒有換行前綴
+        const alt = fullText.lastIndexOf('__XCG_META__')
+        if (alt === -1) return { text: fullText, meta: null }
+        const jsonPart = fullText.slice(alt + '__XCG_META__'.length)
+        try {
+          return { text: fullText.slice(0, alt).replace(/\n$/, ''), meta: JSON.parse(jsonPart) }
+        } catch {
+          return { text: fullText, meta: null }
+        }
+      }
+      const jsonPart = fullText.slice(idx + marker.length)
+      try {
+        return { text: fullText.slice(0, idx), meta: JSON.parse(jsonPart) }
+      } catch {
+        return { text: fullText, meta: null }
+      }
+    },
+    async refreshUsageSummary() {
+      try {
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/usage/summary?user_id=${encodeURIComponent(this.userId)}`,
+          { headers }
+        )
+        if (response.data?.user) {
+          this.usageSummary = {
+            prompt_tokens: response.data.user.prompt_tokens,
+            completion_tokens: response.data.user.completion_tokens,
+            total_tokens: response.data.user.total_tokens,
+            cost_usd: response.data.user.cost_usd,
+            budget_usd: response.data.user.budget_usd,
+            remaining_usd: response.data.user.remaining_usd,
+            calls: response.data.user.calls,
+          }
+        } else if (response.data?.global) {
+          this.usageSummary = {
+            prompt_tokens: response.data.global.prompt_tokens,
+            completion_tokens: response.data.global.completion_tokens,
+            total_tokens: response.data.global.total_tokens,
+            cost_usd: response.data.global.cost_usd,
+            budget_usd: response.data.global.budget_usd,
+            remaining_usd: response.data.global.remaining_usd,
+            calls: response.data.global.calls,
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ 讀取 usage 失敗:', e.message)
+      }
+    },
+
     generateConversationId() {
       return 'conv_' + Date.now() + '_' + Math.random().toString(36).substring(7)
     },
@@ -371,7 +509,20 @@ export default {
 
         if (!response.ok) {
           const errText = await response.text().catch(() => '')
-          throw new Error(`HTTP ${response.status}${errText ? ': ' + errText.slice(0, 120) : ''}`)
+          let detail = errText
+          try {
+            const j = JSON.parse(errText)
+            if (j?.detail?.message) detail = j.detail.message
+            else if (typeof j?.detail === 'string') detail = j.detail
+            else if (j?.message) detail = j.message
+          } catch (_) { /* plain text */ }
+          if (response.status === 429) {
+            throw new Error(`預算已用盡：${detail}`)
+          }
+          if (response.status === 400 && /blocked|審核|moderation/i.test(detail + errText)) {
+            throw new Error(detail || '內容未通過安全審核')
+          }
+          throw new Error(`HTTP ${response.status}${detail ? ': ' + String(detail).slice(0, 160) : ''}`)
         }
 
         if (!response.body) {
@@ -397,8 +548,9 @@ export default {
           }
 
           fullText += chunk
-          // 即時更新畫面（打字機效果）
-          this.messages[assistantMsgIndex].content = fullText
+          // 即時更新：隱藏尚未完整的 meta 尾端
+          const live = this.extractStreamMeta(fullText)
+          this.messages[assistantMsgIndex].content = live.text
           this.scrollToBottom()
         }
 
@@ -406,20 +558,36 @@ export default {
         const tail = decoder.decode()
         if (tail) {
           fullText += tail
-          this.messages[assistantMsgIndex].content = fullText
         }
 
+        const { text: cleanText, meta } = this.extractStreamMeta(fullText)
+        this.messages[assistantMsgIndex].content = cleanText
         this.messages[assistantMsgIndex].streaming = false
 
-        if (!fullText.trim()) {
+        if (meta?.usage) {
+          this.applyUsagePayload(meta.usage)
+          this.messages[assistantMsgIndex].usage = {
+            prompt_tokens: meta.usage.prompt_tokens,
+            completion_tokens: meta.usage.completion_tokens,
+            total_tokens: meta.usage.total_tokens,
+            cost_usd: meta.usage.cost_usd,
+            model: meta.usage.model,
+          }
+        }
+        if (meta?.blocked) {
+          this.messages[assistantMsgIndex].type = 'system'
+        }
+
+        if (!cleanText.trim()) {
           this.messages[assistantMsgIndex].content = '（沒有收到回覆內容，請再試一次）'
-        } else if (fullText.startsWith('[ERROR]')) {
+        } else if (cleanText.startsWith('[ERROR]')) {
           this.messages[assistantMsgIndex].type = 'system'
         }
 
         // 後端背景任務會存記憶；稍後刷新側欄
         this.loadMemories()
         this.loadEmotionalStates()
+        this.refreshUsageSummary()
 
       } catch (error) {
         if (error.name === 'AbortError') {
@@ -439,6 +607,7 @@ export default {
         this.saveMessagesToStorage()
       }
     },
+
     async loadHistoryFromBackend() {
       // 從後端 Supabase 載入歷史對話（用於 localStorage 空的情況，如換裝置/清快取）
       try {
@@ -751,12 +920,14 @@ export default {
 
     this.loadMemories()
     this.loadEmotionalStates()
+    this.refreshUsageSummary()
     if (this.authUser) {
       this.loadPersonality()
     }
     this.$nextTick(() => this.scrollToBottom())
     window.addEventListener('beforeunload', this.handleBeforeUnload)
   },
+
   beforeUnmount() {
     window.removeEventListener('beforeunload', this.handleBeforeUnload)
     if (typeof this.authUnsubscribe === 'function') {
@@ -883,6 +1054,73 @@ export default {
   background: rgba(255, 255, 255, 0.3);
   transform: translateY(-2px);
 }
+
+.token-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+  max-width: 140px;
+  line-height: 1.2;
+}
+
+.token-chip:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.token-label {
+  opacity: 0.9;
+  font-weight: 600;
+}
+
+.token-value {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.usage-tag {
+  font-size: 0.7rem;
+  opacity: 0.75;
+  background: rgba(102, 126, 234, 0.1);
+  color: #4c51bf;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+}
+
+.message-assistant .usage-tag {
+  color: #5b21b6;
+}
+
+.token-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 1.25rem;
+  font-size: 0.78rem;
+  color: #4b5563;
+  background: linear-gradient(90deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.08));
+  border-top: 1px solid #e5e7eb;
+}
+
+.token-bar b {
+  color: #4338ca;
+  font-weight: 700;
+}
+
+.token-bar .remaining {
+  color: #059669;
+  margin-left: 0.25rem;
+}
+
 
 /* 主內容區 */
 .main-content {
