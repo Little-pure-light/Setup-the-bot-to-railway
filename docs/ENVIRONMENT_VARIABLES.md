@@ -33,6 +33,9 @@
 | `REMINDERS_FILE` | 提醒 JSON | `data/reminders.json` |
 | `SUPABASE_VOICE_EVENTS_TABLE` | 語音事件表 | `voice_events` |
 | `APP_VERSION` | 健康檢查版本 | `1.0.1` |
+| `RAILWAY_GIT_COMMIT_SHA` / `GIT_COMMIT` / `GITHUB_SHA` | 可選，健康檢查回傳 `git_commit`（截短） | 空 |
+| `READY_CHECK_SUPABASE_DNS` | `/ready` 是否做 Supabase DNS（非 DB 探測；預設 false） | `false` |
+| `LOG_VERBOSE_EXCEPTIONS` | 外部錯誤日誌是否附脫敏短訊息 | `false` |
 
 ## 前端（Vite）
 
