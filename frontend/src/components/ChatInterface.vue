@@ -109,26 +109,38 @@
             </div>
 
             <!-- 工具使用狀態 -->
-            <div v-if="toolStatusActive" class="message-wrapper message-system">
-              <div class="message-bubble tool-status-bubble">
+            <div v-if="toolStatusVisible" class="message-wrapper message-system">
+              <div class="message-bubble tool-status-bubble" :class="'phase-' + (toolStatusPhase || 'idle')">
                 <div class="tool-status-header">
-                  <span class="tool-spin">🔧</span>
-                  <strong>{{ toolStatusLabel }}</strong>
+                  <span class="tool-spin">{{ toolStatusPhase === 'done' || toolStatusPhase === 'skipped' ? '✨' : '🔧' }}</span>
+                  <div class="tool-status-titles">
+                    <strong>{{ toolStatusLabel }}</strong>
+                    <span v-if="toolStatusMessage" class="tool-status-msg">{{ toolStatusMessage }}</span>
+                  </div>
+                  <span v-if="toolProgressText" class="tool-progress-chip">{{ toolProgressText }}</span>
                 </div>
-                <div class="tool-status-list">
+                <div v-if="toolStatusPhase === 'running' || toolStatusPhase === 'progress'" class="tool-progress-bar">
+                  <div class="tool-progress-fill" :style="{ width: toolProgressPercent + '%' }"></div>
+                </div>
+                <div class="tool-status-list" v-if="activeTools.length">
                   <div
                     v-for="(t, i) in activeTools"
                     :key="i"
                     class="tool-status-item"
+                    :class="toolItemClass(t)"
                   >
-                    <span class="tool-name">{{ toolDisplayName(t.name) }}</span>
+                    <span class="tool-icon">{{ t.icon || toolIcon(t.name) }}</span>
+                    <span class="tool-name">{{ t.display_name || toolDisplayName(t.name) }}</span>
                     <span class="tool-args" v-if="toolArgsPreview(t)">{{ toolArgsPreview(t) }}</span>
-                    <span
-                      class="tool-state"
-                      :class="t.ok === false ? 'fail' : (t.ok === true ? 'ok' : 'run')"
-                    >
-                      {{ t.ok === true ? '完成' : (t.ok === false ? '失敗' : '執行中…') }}
+                    <span class="tool-state" :class="toolStateClass(t)">
+                      {{ toolStateLabel(t) }}
+                      <template v-if="t.duration_ms != null && t.ok != null"> · {{ t.duration_ms }}ms</template>
                     </span>
+                  </div>
+                </div>
+                <div v-if="toolErrors.length" class="tool-errors">
+                  <div v-for="(err, i) in toolErrors" :key="'e'+i" class="tool-error-line">
+                    ⚠️ {{ err }}
                   </div>
                 </div>
               </div>
@@ -347,7 +359,10 @@ export default {
       lastUsage: null,
       usageSummary: null,
       activeTools: [],
-      toolStatusPhase: '', // running | done | ''
+      toolStatusPhase: '', // planning | running | progress | done | skipped | error | ''
+      toolStatusMessage: '',
+      toolStep: 0,
+      toolTotal: 0,
       imagePreviewUrl: null,
       isUploadingImage: false,
       API_URL,
@@ -361,12 +376,45 @@ export default {
       return email || '已登入'
     },
     toolStatusActive() {
-      return this.toolStatusPhase === 'running' && this.activeTools.length > 0
+      return ['planning', 'running', 'progress'].includes(this.toolStatusPhase)
+    },
+    toolStatusVisible() {
+      return Boolean(this.toolStatusPhase) && this.toolStatusPhase !== 'skipped'
     },
     toolStatusLabel() {
-      if (this.toolStatusPhase === 'running') return '正在使用工具…'
-      if (this.toolStatusPhase === 'done') return '工具已完成'
+      const map = {
+        planning: '正在規劃工具…',
+        running: '正在使用工具…',
+        progress: '工具執行中…',
+        done: '工具已完成',
+        error: '工具階段異常',
+        skipped: '未使用工具',
+      }
+      return map[this.toolStatusPhase] || '工具狀態'
+    },
+    toolProgressText() {
+      if (this.toolTotal > 0 && this.toolStep > 0) {
+        return `${this.toolStep}/${this.toolTotal}`
+      }
+      if (this.activeTools.length) {
+        const done = this.activeTools.filter((t) => t.ok != null).length
+        return `${done}/${this.activeTools.length}`
+      }
       return ''
+    },
+    toolProgressPercent() {
+      const total = this.toolTotal || this.activeTools.length || 0
+      if (!total) return this.toolStatusPhase === 'planning' ? 15 : 0
+      const step = this.toolStep || this.activeTools.filter((t) => t.ok != null).length
+      return Math.min(100, Math.round((step / total) * 100))
+    },
+    toolErrors() {
+      return (this.activeTools || [])
+        .filter((t) => t.ok === false)
+        .map((t) => {
+          const name = t.display_name || this.toolDisplayName(t.name)
+          return t.error ? `${name}：${t.error}` : `${name} 執行失敗`
+        })
     },
     tokenChipText() {
       if (this.lastUsage && (this.lastUsage.total_tokens || this.lastUsage.prompt_tokens)) {
@@ -412,15 +460,58 @@ export default {
         web_search: 'Web 搜尋',
         get_current_time: '目前時間',
         calculate: '計算機',
+        get_weather: '查天氣',
+        manage_reminder: '提醒',
+        convert_units: '單位換算',
       }
       return map[name] || name || '工具'
+    },
+    toolIcon(name) {
+      const map = {
+        web_search: '🔍',
+        get_current_time: '🕒',
+        calculate: '🧮',
+        get_weather: '🌤️',
+        manage_reminder: '⏰',
+        convert_units: '↔️',
+      }
+      return map[name] || '🔧'
     },
     toolArgsPreview(t) {
       const args = t?.arguments || {}
       if (args.query) return String(args.query).slice(0, 40)
       if (args.expression) return String(args.expression).slice(0, 40)
+      if (args.location) return String(args.location).slice(0, 40)
+      if (args.text) return String(args.text).slice(0, 40)
+      if (args.action) {
+        const bits = [args.action]
+        if (args.when) bits.push(args.when)
+        return bits.join(' · ').slice(0, 40)
+      }
+      if (args.value != null && args.from_unit && args.to_unit) {
+        return `${args.value} ${args.from_unit}→${args.to_unit}`
+      }
       if (args.timezone) return String(args.timezone)
       return ''
+    },
+    toolStateClass(t) {
+      if (t.ok === true || t.phase === 'done') return 'ok'
+      if (t.ok === false || t.phase === 'error') return 'fail'
+      if (t.phase === 'running') return 'run'
+      return 'pending'
+    },
+    toolStateLabel(t) {
+      if (t.ok === true || t.phase === 'done') return '完成'
+      if (t.ok === false || t.phase === 'error') return '失敗'
+      if (t.phase === 'running') return '執行中…'
+      return '等待中'
+    },
+    toolItemClass(t) {
+      return {
+        'is-running': t.phase === 'running' || (t.ok == null && t.phase !== 'pending'),
+        'is-done': t.ok === true,
+        'is-fail': t.ok === false,
+      }
     },
     formatToolsUsed(tools) {
       if (!tools?.length) return ''
@@ -428,7 +519,8 @@ export default {
         .map((t) => {
           const state = t.ok === false ? '失敗' : '完成'
           const ms = t.duration_ms != null ? ` ${t.duration_ms}ms` : ''
-          return `${this.toolDisplayName(t.name)} (${state}${ms})`
+          const label = t.display_name || this.toolDisplayName(t.name)
+          return `${t.icon || this.toolIcon(t.name)} ${label} (${state}${ms})`
         })
         .join('\n')
     },
@@ -445,14 +537,24 @@ export default {
             const ev = JSON.parse(line.slice('__XCG_EVENT__'.length))
             if (ev?.type === 'tool_status') {
               this.toolStatusPhase = ev.status || 'running'
-              this.activeTools = Array.isArray(ev.tools) ? ev.tools : []
-              if (ev.status === 'done') {
-                // 稍後清掉 running 橫幅，保留到內容開始
+              this.toolStatusMessage = ev.message || ''
+              if (ev.step != null) this.toolStep = Number(ev.step) || 0
+              if (ev.total != null) this.toolTotal = Number(ev.total) || 0
+              if (Array.isArray(ev.tools)) {
+                // 合併更新，避免閃爍
+                this.activeTools = ev.tools.map((t) => ({
+                  ...t,
+                  icon: t.icon || this.toolIcon(t.name),
+                  display_name: t.display_name || this.toolDisplayName(t.name),
+                }))
+              }
+              if (ev.status === 'done' || ev.status === 'skipped') {
                 setTimeout(() => {
-                  if (this.toolStatusPhase === 'done') {
+                  if (this.toolStatusPhase === 'done' || this.toolStatusPhase === 'skipped') {
                     this.toolStatusPhase = ''
+                    this.toolStatusMessage = ''
                   }
-                }, 1200)
+                }, ev.status === 'skipped' ? 600 : 1800)
               }
             }
           } catch (_) { /* ignore bad event */ }
@@ -654,6 +756,9 @@ export default {
       this.isStreaming = false
       this.activeTools = []
       this.toolStatusPhase = ''
+      this.toolStatusMessage = ''
+      this.toolStep = 0
+      this.toolTotal = 0
 
       this.messages.push({
         type: 'user',
@@ -734,8 +839,8 @@ export default {
           fullText += chunk
           // 即時更新：解析工具事件 + 隱藏 meta
           const live = this.consumeStreamBuffer(fullText)
-          // 有工具事件時也算開始回應
-          if (!receivedFirstChunk && (live.text || this.toolStatusActive)) {
+          // 有工具事件或文字時也算開始回應
+          if (!receivedFirstChunk && (live.text || this.toolStatusVisible || this.toolStatusActive)) {
             receivedFirstChunk = true
             this.isStreaming = true
             this.isLoading = false
@@ -1461,8 +1566,49 @@ export default {
 .tool-status-header {
   display: flex;
   align-items: center;
-  gap: 0.4rem;
+  gap: 0.5rem;
   margin-bottom: 0.45rem;
+}
+
+.tool-status-titles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+  flex: 1;
+  min-width: 0;
+  text-align: left;
+}
+
+.tool-status-msg {
+  font-size: 0.78rem;
+  font-weight: 500;
+  opacity: 0.85;
+  color: #374151;
+}
+
+.tool-progress-chip {
+  font-size: 0.75rem;
+  font-weight: 700;
+  background: rgba(67, 56, 202, 0.12);
+  color: #4338ca;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+
+.tool-progress-bar {
+  height: 4px;
+  background: rgba(99, 102, 241, 0.15);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 0.55rem;
+}
+
+.tool-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #667eea, #764ba2);
+  border-radius: 999px;
+  transition: width 0.25s ease;
 }
 
 .tool-spin {
@@ -1478,7 +1624,7 @@ export default {
 .tool-status-list {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
+  gap: 0.35rem;
 }
 
 .tool-status-item {
@@ -1487,6 +1633,25 @@ export default {
   align-items: center;
   gap: 0.4rem;
   font-size: 0.85rem;
+  padding: 0.35rem 0.45rem;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.55);
+}
+
+.tool-status-item.is-running {
+  background: rgba(254, 243, 199, 0.7);
+}
+
+.tool-status-item.is-done {
+  background: rgba(209, 250, 229, 0.55);
+}
+
+.tool-status-item.is-fail {
+  background: rgba(254, 226, 226, 0.7);
+}
+
+.tool-icon {
+  font-size: 1rem;
 }
 
 .tool-name {
@@ -1523,6 +1688,29 @@ export default {
 .tool-state.run {
   background: #fef3c7;
   color: #b45309;
+}
+
+.tool-state.pending {
+  background: #e5e7eb;
+  color: #4b5563;
+}
+
+.tool-errors {
+  margin-top: 0.45rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.tool-error-line {
+  font-size: 0.78rem;
+  color: #b91c1c;
+  text-align: left;
+}
+
+.phase-error {
+  border-color: #fecaca !important;
+  background: linear-gradient(135deg, #fef2f2 0%, #fee2e2 100%) !important;
 }
 
 .token-bar {
