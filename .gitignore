@@ -29,3 +29,6 @@ Thumbs.db
 # Log 檔
 *.log
 logs/
+
+# Token 用量與本地資料
+data/

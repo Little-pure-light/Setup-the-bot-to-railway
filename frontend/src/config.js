@@ -18,7 +18,11 @@ export const CHAT_STREAM_API = `${API_BASE}/api/chat?stream=true&use_tools=true`
 // 選擇性 API Secret（若後端有設定 API_SECRET，前端需帶此 token）
 export const API_SECRET = import.meta.env.VITE_API_SECRET || ''
 
-// 取得帶有 Auth 的通用請求 headers
+// Supabase Auth（前端 Email 登入）
+export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
+export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
+
+// 取得帶有 Auth 的通用請求 headers（同步版；優先使用 localStorage 中的 session 由呼叫端覆寫）
 export const getAuthHeaders = () => {
   const headers = { 'Content-Type': 'application/json' }
   if (API_SECRET) {
@@ -30,3 +34,4 @@ export const getAuthHeaders = () => {
 console.log('📡 [Config] API_BASE:', API_BASE)
 console.log('🤖 [Config] COPILOT_API_BASE:', COPILOT_API_BASE)
 console.log('💬 [Config] CHAT_API:', CHAT_API)
+console.log('🔐 [Config] Supabase Auth:', SUPABASE_URL ? 'configured' : 'not set')

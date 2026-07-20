@@ -20,10 +20,15 @@ class PromptRequest(BaseModel):
     user_message: str
 
 class PromptEngine:
-    def __init__(self, conversation_id: str, memories_table: str):
+    def __init__(self, conversation_id: str, memories_table: str, user_id: str = None):
         self.soul = XiaoChenGuangSoul()
         self.emotion_detector = EnhancedEmotionDetector()
-        self.personality_engine = PersonalityEngine(conversation_id, supabase_client, memories_table)
+        self.personality_engine = PersonalityEngine(
+            conversation_id,
+            supabase_client,
+            memories_table,
+            user_id=user_id,
+        )
 
     # =========================================================
     # ✅ 【已更新】build_prompt 函數 - 納入「入學教育」與「共創法則」

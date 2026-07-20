@@ -25,6 +25,8 @@ try:
     from backend.openai_handler import router as openai_router
     from backend.file_upload import router as file_upload_router
     from backend.archive_conversation import router as archive_router
+    from backend.auth_router import router as auth_router
+    from backend.usage_router import router as usage_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -32,6 +34,26 @@ except Exception as e:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("🚀 小晨光 AI 系統啟動中...")
+    # 啟動時檢查 Supabase 設定（不印出 secret）
+    try:
+        from backend.supabase_handler import _resolve_supabase_credentials
+        import socket
+        from urllib.parse import urlparse
+
+        sb_url, sb_key = _resolve_supabase_credentials()
+        if not sb_url or not sb_key:
+            logger.warning("⚠️ Supabase 未完整設定（SUPABASE_URL / ANON_KEY|KEY）— Auth 與記憶同步會失敗")
+        else:
+            host = urlparse(sb_url).hostname or ""
+            try:
+                socket.getaddrinfo(host, 443)
+                logger.info(f"✅ Supabase DNS 正常 host={host}")
+            except Exception as e:
+                logger.error(
+                    f"❌ Supabase 主機無法解析 host={host} err={e} — 請更新 .env 的 SUPABASE_URL"
+                )
+    except Exception as e:
+        logger.warning(f"⚠️ Supabase 啟動檢查略過: {e}")
     yield
     logger.info("👋 小晨光 AI 系統關閉中...")
 
@@ -39,17 +61,33 @@ app = FastAPI(lifespan=lifespan)
 
 # ✅ 選擇性 API Secret 保護中介軟體
 # 若 Railway 設定了 API_SECRET 環境變數，所有 /api/* 請求需帶 Authorization: Bearer <token>
+# 同時接受有效的 Supabase Auth JWT（使用者登入後跨裝置同步）
 API_SECRET = os.getenv("API_SECRET", "")
+AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/me", "/api/auth/sync"}
+
 
 @app.middleware("http")
 async def api_auth_middleware(request: Request, call_next):
     if API_SECRET and request.url.path.startswith("/api/"):
-        # 排除健康檢查
-        if request.url.path not in ["/api/health"]:
+        if request.url.path not in AUTH_EXEMPT_PATHS:
             auth_header = request.headers.get("Authorization", "")
-            token = auth_header.replace("Bearer ", "").strip()
-            if token != API_SECRET:
-                logger.warning(f"⛔ 未授權存取：{request.url.path}，來源：{request.client.host if request.client else 'unknown'}")
+            token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+            allowed = False
+            if token and token == API_SECRET:
+                allowed = True
+            elif token:
+                # 允許已登入的 Supabase 使用者 JWT
+                try:
+                    from backend.supabase_handler import get_user_from_token
+                    if get_user_from_token(token):
+                        allowed = True
+                except Exception:
+                    allowed = False
+            if not allowed:
+                logger.warning(
+                    f"⛔ 未授權存取：{request.url.path}，來源："
+                    f"{request.client.host if request.client else 'unknown'}"
+                )
                 return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 
@@ -80,6 +118,8 @@ try:
     app.include_router(openai_router, prefix="/api")
     app.include_router(file_upload_router, prefix="/api")
     app.include_router(archive_router, prefix="/api")
+    app.include_router(auth_router, prefix="/api")
+    app.include_router(usage_router, prefix="/api")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
@@ -112,6 +152,11 @@ async def api_health():
         "endpoints": {
             "chat": "/api/chat",
             "memories": "/api/memories/{conversation_id}",
+            "auth_me": "/api/auth/me",
+            "auth_sync": "/api/auth/sync",
+            "personality": "/api/personality/{user_id}",
+            "usage_summary": "/api/usage/summary",
+            "usage_user": "/api/usage/user/{user_id}",
             "health": "/api/health"
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()

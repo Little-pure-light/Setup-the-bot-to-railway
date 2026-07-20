@@ -11,9 +11,39 @@
             <p>靈魂孵化器系統</p>
           </div>
         </div>
-        <button @click="goToHealthCheck" class="status-btn">
-          📋 系統狀態
-        </button>
+        <div class="header-right">
+          <div
+            class="token-chip"
+            :title="tokenTooltip"
+            @click="refreshUsageSummary"
+          >
+            <span class="token-label">🪙 Token</span>
+            <span class="token-value">{{ tokenChipText }}</span>
+          </div>
+          <div v-if="authUser" class="user-chip" :title="authUser.email || authUser.id">
+            <span class="user-dot"></span>
+            <span class="user-label">{{ authEmailLabel }}</span>
+          </div>
+          <button
+            v-if="authUser"
+            @click="handleLogout"
+            class="status-btn auth-btn"
+            type="button"
+          >
+            登出
+          </button>
+          <button
+            v-else
+            @click="showLoginModal = true"
+            class="status-btn auth-btn"
+            type="button"
+          >
+            🔐 登入
+          </button>
+          <button @click="goToHealthCheck" class="status-btn" type="button">
+            📋 系統狀態
+          </button>
+        </div>
       </div>
 
       <!-- 主內容區 -->
@@ -35,6 +65,10 @@
                   <span v-if="msg.emotion" class="emotion-tag">
                     {{ getEmotionEmoji(msg.emotion.dominant_emotion) }}
                     {{ msg.emotion.dominant_emotion }}
+                  </span>
+                  <span v-if="msg.usage" class="usage-tag" :title="formatUsageDetail(msg.usage)">
+                    🪙 in {{ msg.usage.prompt_tokens || 0 }} / out {{ msg.usage.completion_tokens || 0 }}
+                    · ${{ formatCost(msg.usage.cost_usd) }}
                   </span>
                   <small class="timestamp">{{ msg.timestamp }}</small>
                 </div>
@@ -78,6 +112,24 @@
                 <span class="btn-icon">🗂️</span>
                 <span class="btn-text">結束對話</span>
               </button>
+            </div>
+          </div>
+
+          <!-- Token 用量列 -->
+          <div v-if="lastUsage || usageSummary" class="token-bar">
+            <div class="token-bar-left">
+              <span v-if="lastUsage">
+                本次：輸入 <b>{{ lastUsage.prompt_tokens || 0 }}</b>
+                · 輸出 <b>{{ lastUsage.completion_tokens || 0 }}</b>
+                · 成本 <b>${{ formatCost(lastUsage.cost_usd) }}</b>
+              </span>
+              <span v-else>尚未產生 Token 用量</span>
+            </div>
+            <div class="token-bar-right" v-if="usageSummary">
+              今日：{{ usageSummary.total_tokens || 0 }} tokens
+              · ${{ formatCost(usageSummary.cost_usd) }}
+              / ${{ formatCost(usageSummary.budget_usd) }}
+              <span class="remaining">(剩 ${{ formatCost(usageSummary.remaining_usd) }})</span>
             </div>
           </div>
 
@@ -147,6 +199,13 @@
       :user-id="userId"
       @close="closeCopilotWindow"
     />
+
+    <!-- Email 登入 -->
+    <LoginModal
+      :visible="showLoginModal"
+      @close="showLoginModal = false"
+      @success="onLoginSuccess"
+    />
   </div>
 </template>
 
@@ -154,6 +213,16 @@
 import axios from 'axios'
 import { CHAT_API, API_BASE, API_SECRET, getAuthHeaders } from '../config.js'
 import CopilotWindow from './CopilotWindow.vue'
+import LoginModal from './LoginModal.vue'
+import {
+  getSession,
+  getUserAuthHeaders,
+  onAuthStateChange,
+  resolveUserId,
+  signOut,
+  syncUserProfile,
+  isAuthConfigured,
+} from '../lib/auth.js'
 
 const getApiUrl = () => {
   const url = import.meta.env.VITE_API_URL
@@ -173,7 +242,8 @@ console.log('🚀 [ChatInterface] 最終 API_URL:', API_URL)
 export default {
   name: 'ChatInterface',
   components: {
-    CopilotWindow
+    CopilotWindow,
+    LoginModal,
   },
   data() {
     return {
@@ -187,23 +257,151 @@ export default {
       latestReflection: null,
       conversationId: this.getOrCreateConversationId(),
       userId: this.getOrCreateUserId(),
-      copilotWindowVisible: false
+      copilotWindowVisible: false,
+      showLoginModal: false,
+      authUser: null,
+      authUnsubscribe: null,
+      personalitySummary: null,
+      lastUsage: null,
+      usageSummary: null,
     }
   },
+  computed: {
+    authEmailLabel() {
+      if (!this.authUser) return ''
+      const email = this.authUser.email || ''
+      if (email.length > 22) return email.slice(0, 18) + '…'
+      return email || '已登入'
+    },
+    tokenChipText() {
+      if (this.lastUsage && (this.lastUsage.total_tokens || this.lastUsage.prompt_tokens)) {
+        const t =
+          this.lastUsage.total_tokens ||
+          (this.lastUsage.prompt_tokens || 0) + (this.lastUsage.completion_tokens || 0)
+        return `${t} · $${this.formatCost(this.lastUsage.cost_usd)}`
+      }
+      if (this.usageSummary) {
+        return `今日 ${this.usageSummary.total_tokens || 0}`
+      }
+      return '—'
+    },
+    tokenTooltip() {
+      const parts = []
+      if (this.lastUsage) {
+        parts.push(
+          `本次 in ${this.lastUsage.prompt_tokens || 0} / out ${this.lastUsage.completion_tokens || 0} / $${this.formatCost(this.lastUsage.cost_usd)}`
+        )
+      }
+      if (this.usageSummary) {
+        parts.push(
+          `今日 $${this.formatCost(this.usageSummary.cost_usd)} / 預算 $${this.formatCost(this.usageSummary.budget_usd)}`
+        )
+      }
+      return parts.join('\n') || 'Token 使用量（點擊重新整理）'
+    },
+  },
   methods: {
+    formatCost(v) {
+      const n = Number(v || 0)
+      if (n === 0) return '0'
+      if (n < 0.0001) return n.toFixed(6)
+      if (n < 0.01) return n.toFixed(4)
+      return n.toFixed(3)
+    },
+    formatUsageDetail(usage) {
+      if (!usage) return ''
+      return `input ${usage.prompt_tokens || 0} · output ${usage.completion_tokens || 0} · total ${usage.total_tokens || 0} · $${this.formatCost(usage.cost_usd)} · ${usage.model || ''}`
+    },
+    applyUsagePayload(usage) {
+      if (!usage) return
+      this.lastUsage = {
+        prompt_tokens: usage.prompt_tokens || 0,
+        completion_tokens: usage.completion_tokens || 0,
+        total_tokens:
+          usage.total_tokens ||
+          (usage.prompt_tokens || 0) + (usage.completion_tokens || 0),
+        cost_usd: usage.cost_usd || 0,
+        model: usage.model || '',
+      }
+      if (usage.daily) {
+        this.usageSummary = usage.daily
+      }
+    },
+    extractStreamMeta(fullText) {
+      const marker = '\n__XCG_META__'
+      const idx = fullText.lastIndexOf(marker)
+      if (idx === -1) {
+        // 也可能沒有換行前綴
+        const alt = fullText.lastIndexOf('__XCG_META__')
+        if (alt === -1) return { text: fullText, meta: null }
+        const jsonPart = fullText.slice(alt + '__XCG_META__'.length)
+        try {
+          return { text: fullText.slice(0, alt).replace(/\n$/, ''), meta: JSON.parse(jsonPart) }
+        } catch {
+          return { text: fullText, meta: null }
+        }
+      }
+      const jsonPart = fullText.slice(idx + marker.length)
+      try {
+        return { text: fullText.slice(0, idx), meta: JSON.parse(jsonPart) }
+      } catch {
+        return { text: fullText, meta: null }
+      }
+    },
+    async refreshUsageSummary() {
+      try {
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/usage/summary?user_id=${encodeURIComponent(this.userId)}`,
+          { headers }
+        )
+        if (response.data?.user) {
+          this.usageSummary = {
+            prompt_tokens: response.data.user.prompt_tokens,
+            completion_tokens: response.data.user.completion_tokens,
+            total_tokens: response.data.user.total_tokens,
+            cost_usd: response.data.user.cost_usd,
+            budget_usd: response.data.user.budget_usd,
+            remaining_usd: response.data.user.remaining_usd,
+            calls: response.data.user.calls,
+          }
+        } else if (response.data?.global) {
+          this.usageSummary = {
+            prompt_tokens: response.data.global.prompt_tokens,
+            completion_tokens: response.data.global.completion_tokens,
+            total_tokens: response.data.global.total_tokens,
+            cost_usd: response.data.global.cost_usd,
+            budget_usd: response.data.global.budget_usd,
+            remaining_usd: response.data.global.remaining_usd,
+            calls: response.data.global.calls,
+          }
+        }
+      } catch (e) {
+        console.warn('⚠️ 讀取 usage 失敗:', e.message)
+      }
+    },
+
     generateConversationId() {
       return 'conv_' + Date.now() + '_' + Math.random().toString(36).substring(7)
     },
     getOrCreateUserId() {
+      // 優先使用已登入綁定的 id；否則建立/沿用訪客 id
       let uid = localStorage.getItem('xiaochenguang_user_id')
       if (!uid) {
-        uid = 'user_' + Date.now() + '_' + Math.random().toString(36).substring(5)
-        localStorage.setItem('xiaochenguang_user_id', uid)
-        console.log('🆕 [UserId] 建立新使用者 ID:', uid)
+        uid = resolveUserId(null)
+        console.log('🆕 [UserId] 建立訪客 ID:', uid)
       } else {
         console.log('✅ [UserId] 載入已存在的使用者 ID:', uid)
       }
       return uid
+    },
+    async buildRequestHeaders() {
+      // 已登入：帶 Supabase JWT；否則回退 API_SECRET
+      try {
+        return await getUserAuthHeaders()
+      } catch {
+        return getAuthHeaders()
+      }
     },
     getOrCreateConversationId() {
       // 同一個用戶回來繼續同一個對話，除非主動「結束對話」
@@ -299,7 +497,7 @@ export default {
           `${API_URL}/api/chat?stream=true&use_tools=true`,
           {
             method: 'POST',
-            headers: getAuthHeaders(),
+            headers: await this.buildRequestHeaders(),
             signal: this.streamAbortController.signal,
             body: JSON.stringify({
               user_message: userMessage,
@@ -311,7 +509,20 @@ export default {
 
         if (!response.ok) {
           const errText = await response.text().catch(() => '')
-          throw new Error(`HTTP ${response.status}${errText ? ': ' + errText.slice(0, 120) : ''}`)
+          let detail = errText
+          try {
+            const j = JSON.parse(errText)
+            if (j?.detail?.message) detail = j.detail.message
+            else if (typeof j?.detail === 'string') detail = j.detail
+            else if (j?.message) detail = j.message
+          } catch (_) { /* plain text */ }
+          if (response.status === 429) {
+            throw new Error(`預算已用盡：${detail}`)
+          }
+          if (response.status === 400 && /blocked|審核|moderation/i.test(detail + errText)) {
+            throw new Error(detail || '內容未通過安全審核')
+          }
+          throw new Error(`HTTP ${response.status}${detail ? ': ' + String(detail).slice(0, 160) : ''}`)
         }
 
         if (!response.body) {
@@ -337,8 +548,9 @@ export default {
           }
 
           fullText += chunk
-          // 即時更新畫面（打字機效果）
-          this.messages[assistantMsgIndex].content = fullText
+          // 即時更新：隱藏尚未完整的 meta 尾端
+          const live = this.extractStreamMeta(fullText)
+          this.messages[assistantMsgIndex].content = live.text
           this.scrollToBottom()
         }
 
@@ -346,20 +558,36 @@ export default {
         const tail = decoder.decode()
         if (tail) {
           fullText += tail
-          this.messages[assistantMsgIndex].content = fullText
         }
 
+        const { text: cleanText, meta } = this.extractStreamMeta(fullText)
+        this.messages[assistantMsgIndex].content = cleanText
         this.messages[assistantMsgIndex].streaming = false
 
-        if (!fullText.trim()) {
+        if (meta?.usage) {
+          this.applyUsagePayload(meta.usage)
+          this.messages[assistantMsgIndex].usage = {
+            prompt_tokens: meta.usage.prompt_tokens,
+            completion_tokens: meta.usage.completion_tokens,
+            total_tokens: meta.usage.total_tokens,
+            cost_usd: meta.usage.cost_usd,
+            model: meta.usage.model,
+          }
+        }
+        if (meta?.blocked) {
+          this.messages[assistantMsgIndex].type = 'system'
+        }
+
+        if (!cleanText.trim()) {
           this.messages[assistantMsgIndex].content = '（沒有收到回覆內容，請再試一次）'
-        } else if (fullText.startsWith('[ERROR]')) {
+        } else if (cleanText.startsWith('[ERROR]')) {
           this.messages[assistantMsgIndex].type = 'system'
         }
 
         // 後端背景任務會存記憶；稍後刷新側欄
         this.loadMemories()
         this.loadEmotionalStates()
+        this.refreshUsageSummary()
 
       } catch (error) {
         if (error.name === 'AbortError') {
@@ -379,10 +607,15 @@ export default {
         this.saveMessagesToStorage()
       }
     },
+
     async loadHistoryFromBackend() {
       // 從後端 Supabase 載入歷史對話（用於 localStorage 空的情況，如換裝置/清快取）
       try {
-        const response = await axios.get(`${API_URL}/api/recent-history/${this.userId}?limit=30`)
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/recent-history/${this.userId}?limit=30`,
+          { headers }
+        )
         const { messages, conversation_id } = response.data
 
         if (messages && messages.length > 0) {
@@ -400,9 +633,104 @@ export default {
         console.warn('⚠️ [History] 從後端載入歷史失敗，以空白對話開始:', error.message)
       }
     },
+    async loadPersonality() {
+      try {
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/personality/${this.userId}`,
+          { headers }
+        )
+        this.personalitySummary = response.data?.personality || null
+        if (this.personalitySummary) {
+          console.log('✅ [Personality] 已載入個人人格')
+        }
+      } catch (error) {
+        this.personalitySummary = null
+        console.warn('⚠️ [Personality] 載入失敗:', error.message)
+      }
+    },
+    /**
+     * 登入後：用 JWT 一次同步記憶 + 人格（跨裝置）
+     * @param {{ notify?: boolean }} options notify=false 時不插入系統提示（頁面重載）
+     */
+    async applyAuthSync(options = {}) {
+      const notify = options.notify !== false
+      try {
+        const data = await syncUserProfile()
+        this.userId = data.user_id
+        localStorage.setItem('xiaochenguang_user_id', data.user_id)
+
+        if (data.conversation_id) {
+          this.conversationId = data.conversation_id
+          localStorage.setItem('xiaochenguang_conversation_id', data.conversation_id)
+        }
+
+        if (data.messages && data.messages.length > 0) {
+          this.messages = data.messages
+          this.saveMessagesToStorage()
+        }
+
+        this.personalitySummary = data.personality || null
+
+        if (notify) {
+          const traitHint = data.personality?.traits
+            ? Object.keys(data.personality.traits).slice(0, 3).join('、')
+            : ''
+          this.messages.push({
+            type: 'system',
+            content:
+              `🔐 已登入並同步個人資料` +
+              (data.message_count ? `（${data.message_count} 筆記憶）` : '') +
+              (traitHint ? `\n🎭 人格特質已載入：${traitHint}` : '\n🎭 人格資料已就緒'),
+            timestamp: new Date().toLocaleTimeString('zh-TW'),
+          })
+          this.scrollToBottom()
+        }
+
+        await this.loadMemories()
+        await this.loadEmotionalStates()
+        console.log('✅ [Auth] 跨裝置同步完成')
+      } catch (error) {
+        console.warn('⚠️ [Auth] 同步失敗，改走一般歷史載入:', error.message)
+        await this.loadHistoryFromBackend()
+        await this.loadPersonality()
+      }
+    },
+    async onLoginSuccess({ user }) {
+      this.showLoginModal = false
+      this.authUser = user || null
+      if (user?.id) {
+        this.userId = user.id
+        localStorage.setItem('xiaochenguang_user_id', user.id)
+      }
+      // 登入後強制從雲端載入，避免舊裝置 local 訊息覆蓋
+      localStorage.removeItem('xiaochenguang_messages')
+      this.messages = []
+      await this.applyAuthSync({ notify: true })
+    },
+    async handleLogout() {
+      try {
+        await signOut()
+      } catch (e) {
+        console.warn('登出時發生錯誤:', e.message)
+      }
+      this.authUser = null
+      this.personalitySummary = null
+      this.userId = resolveUserId(null)
+      this.messages.push({
+        type: 'system',
+        content: '👋 已登出。訪客模式下對話不會跨裝置同步。',
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+      })
+      this.scrollToBottom()
+    },
     async loadMemories() {
       try {
-        const response = await axios.get(`${API_URL}/api/memories/${this.conversationId}?limit=10`)
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/memories/${this.conversationId}?limit=10`,
+          { headers }
+        )
         this.memories = response.data
       } catch (error) {
         this.memories = []
@@ -410,7 +738,11 @@ export default {
     },
     async loadEmotionalStates() {
       try {
-        const response = await axios.get(`${API_URL}/api/emotional-states/${this.userId}?limit=10`)
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.get(
+          `${API_URL}/api/emotional-states/${this.userId}?limit=10`,
+          { headers }
+        )
         this.emotionalStates = response.data
       } catch (error) {
         this.emotionalStates = []
@@ -543,17 +875,64 @@ export default {
     }
   },
   async mounted() {
-    // 如果 localStorage 沒有記錄，嘗試從後端（Supabase）載入歷史
-    if (this.messages.length === 0) {
-      await this.loadHistoryFromBackend()
+    // 初始化 Auth 狀態
+    try {
+      const session = await getSession()
+      if (session?.user) {
+        this.authUser = session.user
+        this.userId = session.user.id
+        localStorage.setItem('xiaochenguang_user_id', session.user.id)
+        // 已登入：自動同步記憶與人格（跨裝置），重載不重複提示
+        await this.applyAuthSync({ notify: false })
+      } else if (this.messages.length === 0) {
+        await this.loadHistoryFromBackend()
+      }
+    } catch (e) {
+      console.warn('⚠️ [Auth] 初始化失敗:', e.message)
+      if (this.messages.length === 0) {
+        await this.loadHistoryFromBackend()
+      }
     }
+
+    this.authUnsubscribe = onAuthStateChange(async (session) => {
+      if (session?.user) {
+        // 避免與 onLoginSuccess 重複同步：僅在 user 變更時處理
+        if (!this.authUser || this.authUser.id !== session.user.id) {
+          this.authUser = session.user
+          this.userId = session.user.id
+          localStorage.setItem('xiaochenguang_user_id', session.user.id)
+        } else {
+          this.authUser = session.user
+        }
+      } else {
+        this.authUser = null
+      }
+    })
+
+    // 未登入且 Auth 已設定時，輕量提示可登入同步
+    if (!this.authUser && isAuthConfigured() && this.messages.length === 0) {
+      this.messages.push({
+        type: 'system',
+        content: '💡 登入後可跨裝置同步個人記憶與人格～點右上角「登入」開始。',
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+      })
+    }
+
     this.loadMemories()
     this.loadEmotionalStates()
+    this.refreshUsageSummary()
+    if (this.authUser) {
+      this.loadPersonality()
+    }
     this.$nextTick(() => this.scrollToBottom())
     window.addEventListener('beforeunload', this.handleBeforeUnload)
   },
+
   beforeUnmount() {
     window.removeEventListener('beforeunload', this.handleBeforeUnload)
+    if (typeof this.authUnsubscribe === 'function') {
+      this.authUnsubscribe()
+    }
   }
 }
 </script>
@@ -622,6 +1001,39 @@ export default {
   opacity: 0.9;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.user-chip {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 999px;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.8rem;
+  max-width: 180px;
+}
+
+.user-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6ee7b7;
+  flex-shrink: 0;
+}
+
+.user-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .status-btn {
   padding: 0.5rem 1rem;
   background: rgba(255, 255, 255, 0.2);
@@ -634,10 +1046,81 @@ export default {
   font-size: 0.9rem;
 }
 
+.status-btn.auth-btn {
+  background: rgba(255, 255, 255, 0.28);
+}
+
 .status-btn:hover {
   background: rgba(255, 255, 255, 0.3);
   transform: translateY(-2px);
 }
+
+.token-chip {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.1rem;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  padding: 0.35rem 0.7rem;
+  font-size: 0.72rem;
+  cursor: pointer;
+  max-width: 140px;
+  line-height: 1.2;
+}
+
+.token-chip:hover {
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.token-label {
+  opacity: 0.9;
+  font-weight: 600;
+}
+
+.token-value {
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.usage-tag {
+  font-size: 0.7rem;
+  opacity: 0.75;
+  background: rgba(102, 126, 234, 0.1);
+  color: #4c51bf;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+}
+
+.message-assistant .usage-tag {
+  color: #5b21b6;
+}
+
+.token-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.45rem 1.25rem;
+  font-size: 0.78rem;
+  color: #4b5563;
+  background: linear-gradient(90deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.08));
+  border-top: 1px solid #e5e7eb;
+}
+
+.token-bar b {
+  color: #4338ca;
+  font-weight: 700;
+}
+
+.token-bar .remaining {
+  color: #059669;
+  margin-left: 0.25rem;
+}
+
 
 /* 主內容區 */
 .main-content {
