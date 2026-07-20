@@ -10,13 +10,23 @@ import datetime
 import logging
 import os
 
-# ✅ 設定日誌
+# ✅ 設定日誌（含 secret 脫敏）
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 logger = logging.getLogger("main")
+try:
+    from backend.logging_utils import install_redacting_filter, new_request_id, get_request_id
+
+    install_redacting_filter()
+except Exception as _log_exc:  # pragma: no cover
+    logger.warning("logging_utils 未載入: %s", _log_exc)
+    def new_request_id():
+        return ""
+    def get_request_id():
+        return ""
 
 # ✅ 匯入各模組
 try:
@@ -66,7 +76,31 @@ app = FastAPI(lifespan=lifespan)
 # 若 Railway 設定了 API_SECRET 環境變數，所有 /api/* 請求需帶 Authorization: Bearer <token>
 # 同時接受有效的 Supabase Auth JWT（使用者登入後跨裝置同步）
 API_SECRET = os.getenv("API_SECRET", "")
-AUTH_EXEMPT_PATHS = {"/api/health", "/api/auth/me", "/api/auth/sync"}
+AUTH_EXEMPT_PATHS = {
+    "/api/health",
+    "/api/live",
+    "/api/ready",
+    "/api/auth/me",
+    "/api/auth/sync",
+    "/live",
+    "/ready",
+    "/health",
+}
+
+
+@app.middleware("http")
+async def request_id_middleware(request: Request, call_next):
+    """為每個請求附加 X-Request-ID，便於追蹤。"""
+    rid = request.headers.get("X-Request-ID") or new_request_id()
+    try:
+        from backend.logging_utils import request_id_var
+
+        request_id_var.set(rid)
+    except Exception:
+        pass
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = rid
+    return response
 
 
 @app.middleware("http")
@@ -91,7 +125,13 @@ async def api_auth_middleware(request: Request, call_next):
                     f"⛔ 未授權存取：{request.url.path}，來源："
                     f"{request.client.host if request.client else 'unknown'}"
                 )
-                return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+                return JSONResponse(
+                    status_code=401,
+                    content={
+                        "detail": "Unauthorized",
+                        "request_id": get_request_id() or None,
+                    },
+                )
     return await call_next(request)
 
 # ✅ CORS 設定（支援 Cloudflare Pages 與 Replit）
@@ -141,20 +181,35 @@ async def root():
     }
 
 @app.get("/health")
-async def health():
-    return {
-        "status": "healthy",
-        "service": "小晨光 AI",
-        "version": "1.0.1",
-        "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()
-    }
+@app.get("/live")
+@app.get("/api/live")
+async def liveness():
+    """Liveness：程序存活（不依賴外部服務）。"""
+    from backend.health import liveness_payload
+
+    return liveness_payload()
+
+
+@app.get("/ready")
+@app.get("/api/ready")
+async def readiness():
+    """Readiness：必要設定與依賴狀態（不消耗 OpenAI Token）。"""
+    from backend.health import readiness_payload
+
+    body = readiness_payload()
+    code = 200 if body.get("status") in ("ok", "degraded") else 503
+    return JSONResponse(status_code=code, content=body)
+
 
 @app.get("/api/health")
 async def api_health():
+    from backend.health import APP_VERSION, liveness_payload
+
+    live = liveness_payload()
     return {
-        "status": "healthy",
+        "status": "healthy" if live.get("status") == "ok" else live.get("status"),
         "service": "小晨光 AI API",
-        "version": "1.0.1",
+        "version": APP_VERSION,
         "endpoints": {
             "chat": "/api/chat",
             "memories": "/api/memories/{conversation_id}",
@@ -173,6 +228,8 @@ async def api_health():
             "voice_settings": "/api/voice/settings/{user_id}",
             "voice_prepare_speech": "/api/voice/prepare-speech",
             "voice_events": "/api/voice/events",
+            "live": "/api/live",
+            "ready": "/api/ready",
             "health": "/api/health"
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()

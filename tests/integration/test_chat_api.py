@@ -213,12 +213,16 @@ def test_main_health_liveness_endpoints():
         r = client.get("/health")
         assert r.status_code == 200
         body = r.json()
-        assert body.get("status") == "healthy"
+        assert body.get("status") in ("ok", "healthy")
         assert "sk-" not in r.text
 
         r2 = client.get("/api/health")
         assert r2.status_code == 200
-        assert r2.json().get("status") == "healthy"
+        assert r2.json().get("status") in ("ok", "healthy")
+
+        r3 = client.get("/live")
+        assert r3.status_code == 200
+        assert r3.json().get("status") == "ok"
 
 
 @pytest.mark.integration
