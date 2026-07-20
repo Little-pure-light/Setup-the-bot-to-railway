@@ -2,6 +2,11 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from backend.supabase_handler import get_supabase
 from backend.openai_handler import get_openai_client
 from backend.redis_interface import RedisInterface
+from backend.vision import (
+    analyze_image,
+    VisionSafetyError,
+    MAX_IMAGE_BYTES,
+)
 import logging
 import json
 import base64
@@ -19,8 +24,10 @@ redis_interface = RedisInterface()
 SUPPORTED_EXTENSIONS = {
     'text': ['.txt', '.md', '.json'],
     'document': ['.pdf', '.docx'],
-    'image': ['.png', '.jpg', '.jpeg']
+    'image': ['.png', '.jpg', '.jpeg', '.webp', '.gif']
 }
+
+MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_BYTES", str(15 * 1024 * 1024)))
 
 async def parse_text_file(file_bytes: bytes, filename: str) -> dict:
     """解析文字檔案（.txt, .md, .json）"""
@@ -130,77 +137,149 @@ async def parse_docx_file(file_bytes: bytes) -> dict:
             "error": str(e)
         }
 
-async def analyze_image_with_vision(file_bytes: bytes, filename: str) -> dict:
-    """使用 OpenAI Vision API 分析圖片"""
+async def analyze_image_with_vision(
+    file_bytes: bytes,
+    filename: str,
+    prompt: Optional[str] = None,
+    content_type: Optional[str] = None,
+    user_id: str = "default_user",
+    conversation_id: str = "",
+) -> dict:
+    """使用 OpenAI Vision（gpt-4o / gpt-4o-mini）分析圖片，含安全檢查。"""
     try:
-        openai_client = get_openai_client()
-        
-        file_ext = os.path.splitext(filename.lower())[1]
-        mime_type = "image/jpeg"
-        if file_ext == '.png':
-            mime_type = "image/png"
-        elif file_ext in ['.jpg', '.jpeg']:
-            mime_type = "image/jpeg"
-        
-        base64_image = base64.b64encode(file_bytes).decode('utf-8')
-        
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "請用繁體中文簡短描述這張圖片的內容（不超過100字）。"
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{base64_image}"
-                            }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=300
+        result = await analyze_image(
+            file_bytes,
+            filename=filename,
+            prompt=prompt,
+            content_type=content_type,
+            model=os.getenv("VISION_MODEL", "gpt-4o-mini"),
         )
-        
-        description = response.choices[0].message.content
-        
-        return {
-            "content": description,
-            "summary": f"圖片檔案 ({filename})，AI 分析: {description[:100]}...",
-            "type": "image",
-            "parsed": True,
-            "vision_analysis": description
-        }
+        # 覆寫 tracker 的 user 脈絡（analyze_image 內已記一筆 vision）
+        if result.get("usage"):
+            try:
+                from backend.token_tracker import get_token_tracker
+
+                u = result["usage"]
+                get_token_tracker().record(
+                    user_id=user_id or "default_user",
+                    conversation_id=conversation_id or "vision",
+                    model=result.get("model") or "gpt-4o-mini",
+                    prompt_tokens=u.get("prompt_tokens") or 0,
+                    completion_tokens=u.get("completion_tokens") or 0,
+                    total_tokens=u.get("total_tokens") or 0,
+                    endpoint="vision_upload",
+                    meta={"filename": filename},
+                )
+            except Exception:
+                pass
+        return result
+    except VisionSafetyError as e:
+        logger.warning(f"🚫 圖片安全檢查失敗: {e.message}")
+        raise HTTPException(
+            status_code=400,
+            detail={"error": e.code, "message": e.message},
+        )
+
+
+@router.post("/vision/analyze")
+async def vision_analyze(
+    file: UploadFile = File(...),
+    conversation_id: str = Form(default="vision"),
+    user_id: str = Form(default="default_user"),
+    prompt: str = Form(default=""),
+    model: str = Form(default=""),
+):
+    """
+    專用圖片理解端點：上傳圖片 + 可選提問。
+    使用 GPT-4o / GPT-4o-mini Vision，含安全審核。
+    """
+    file_bytes = await file.read()
+    if len(file_bytes) > MAX_IMAGE_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"圖片過大，上限 {MAX_IMAGE_BYTES} bytes",
+        )
+    filename = file.filename or "image.jpg"
+    try:
+        result = await analyze_image(
+            file_bytes,
+            filename=filename,
+            prompt=prompt or None,
+            content_type=file.content_type,
+            model=(model.strip() or None),
+        )
+    except VisionSafetyError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": e.code, "message": e.message},
+        )
+
+    # 可選：寫入 Redis 供後續對話引用
+    redis_key = None
+    try:
+        if conversation_id and redis_interface.redis:
+            redis_key = f"upload:{conversation_id}:{filename}"
+            redis_interface.redis.setex(
+                redis_key,
+                172800,
+                json.dumps(
+                    {
+                        "file_name": filename,
+                        "file_type": result.get("ext") or "",
+                        "summary": result.get("summary", ""),
+                        "content": (result.get("content") or "")[:5000],
+                        "vision_analysis": result.get("vision_analysis") or "",
+                        "is_image": True,
+                        "mime": result.get("mime"),
+                        "uploaded_at": datetime.utcnow().isoformat(),
+                        "parsed": result.get("parsed", False),
+                    },
+                    ensure_ascii=False,
+                ),
+            )
     except Exception as e:
-        logger.error(f"Vision API 分析失敗: {e}")
-        return {
-            "content": "",
-            "summary": f"圖片檔案 ({filename})",
-            "type": "image",
-            "parsed": False,
-            "error": str(e)
-        }
+        logger.warning(f"⚠️ Vision Redis 暫存失敗: {e}")
+
+    return {
+        "status": "success" if result.get("ok") else "partial",
+        "file_name": filename,
+        "file_type": result.get("ext"),
+        "mime": result.get("mime"),
+        "parsed": result.get("parsed", False),
+        "vision_analysis": result.get("vision_analysis") or result.get("content") or "",
+        "summary": result.get("summary", ""),
+        "model": result.get("model"),
+        "usage": result.get("usage"),
+        "preview_data_url": result.get("preview_data_url"),
+        "moderation": result.get("moderation"),
+        "temporary_key": redis_key,
+        "error": result.get("error"),
+    }
+
 
 @router.post("/upload_file")
 async def upload_file(
     file: UploadFile = File(...),
     conversation_id: str = Form(...),
-    user_id: str = Form(default="default_user")
+    user_id: str = Form(default="default_user"),
+    prompt: str = Form(default=""),
 ):
     """
     檔案上傳端點
-    支援格式: .txt, .md, .json, .pdf, .docx, .png, .jpg, .jpeg
+    支援格式: .txt, .md, .json, .pdf, .docx, .png, .jpg, .jpeg, .webp, .gif
     雙重儲存: Redis (2天) + Supabase Storage (永久)
-    ✨ 新增：自動調用 AI 分析檔案內容並返回回應
+    圖片：GPT Vision 分析 + 安全檢查
     """
     try:
         file_bytes = await file.read()
-        filename = file.filename
+        filename = file.filename or "file"
         file_ext = '.' + filename.rsplit('.', 1)[-1].lower() if '.' in filename else ''
+
+        if len(file_bytes) > MAX_UPLOAD_BYTES:
+            raise HTTPException(
+                status_code=400,
+                detail=f"檔案過大，上限 {MAX_UPLOAD_BYTES} bytes",
+            )
         
         all_supported = SUPPORTED_EXTENSIONS['text'] + SUPPORTED_EXTENSIONS['document'] + SUPPORTED_EXTENSIONS['image']
         if file_ext not in all_supported:
@@ -210,7 +289,8 @@ async def upload_file(
             )
         
         logger.info(f"📤 收到檔案上傳: {filename} ({len(file_bytes)} bytes)")
-        
+
+        vision_meta = {}
         if file_ext in SUPPORTED_EXTENSIONS['text']:
             parsed_data = await parse_text_file(file_bytes, filename)
         elif file_ext == '.pdf':
@@ -218,7 +298,25 @@ async def upload_file(
         elif file_ext == '.docx':
             parsed_data = await parse_docx_file(file_bytes)
         elif file_ext in SUPPORTED_EXTENSIONS['image']:
-            parsed_data = await analyze_image_with_vision(file_bytes, filename)
+            if len(file_bytes) > MAX_IMAGE_BYTES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"圖片過大，上限 {MAX_IMAGE_BYTES} bytes",
+                )
+            parsed_data = await analyze_image_with_vision(
+                file_bytes,
+                filename,
+                prompt=prompt or None,
+                content_type=file.content_type,
+                user_id=user_id,
+                conversation_id=conversation_id,
+            )
+            vision_meta = {
+                "preview_data_url": parsed_data.get("preview_data_url"),
+                "vision_model": parsed_data.get("model"),
+                "vision_usage": parsed_data.get("usage"),
+                "mime": parsed_data.get("mime"),
+            }
         else:
             parsed_data = {
                 "content": "",
@@ -229,11 +327,16 @@ async def upload_file(
         
         try:
             storage_path = f"{conversation_id}/{filename}"
+            content_type = (
+                parsed_data.get("mime")
+                or file.content_type
+                or "application/octet-stream"
+            )
             supabase.storage.from_("uploads").upload(
                 storage_path,
                 file_bytes,
                 {
-                    "content-type": file.content_type or "application/octet-stream",
+                    "content-type": content_type,
                     "upsert": "true"
                 }
             )
@@ -246,42 +349,47 @@ async def upload_file(
             file_url = None
         
         redis_key = f"upload:{conversation_id}:{filename}"
+        is_image = parsed_data.get("type") == "image" or file_ext in SUPPORTED_EXTENSIONS["image"]
         redis_data = {
             "file_name": filename,
             "file_type": file_ext,
             "summary": parsed_data.get("summary", ""),
             "content": parsed_data.get("content", "")[:5000],
+            "vision_analysis": parsed_data.get("vision_analysis") or parsed_data.get("content", "")[:5000],
+            "is_image": is_image,
+            "mime": parsed_data.get("mime") or file.content_type,
             "uploaded_at": datetime.utcnow().isoformat(),
             "file_url": file_url,
-            "parsed": parsed_data.get("parsed", False)
+            "parsed": parsed_data.get("parsed", False),
         }
         
         try:
-            redis_interface.redis.setex(
-                redis_key,
-                172800,
-                json.dumps(redis_data, ensure_ascii=False)
-            )
-            logger.info(f"✅ 檔案資訊已暫存到 Redis (2天): {redis_key}")
+            if redis_interface.redis:
+                redis_interface.redis.setex(
+                    redis_key,
+                    172800,
+                    json.dumps(redis_data, ensure_ascii=False)
+                )
+                logger.info(f"✅ 檔案資訊已暫存到 Redis (2天): {redis_key}")
         except Exception as e:
             logger.warning(f"⚠️ Redis 暫存失敗: {e}")
         
         ai_analysis = None
         if parsed_data.get("parsed", False) and parsed_data.get("content"):
             try:
-                openai_client = get_openai_client()
-                
                 file_content = parsed_data.get("content", "")
                 file_type = parsed_data.get("type", "unknown")
-                
-                if file_type == "image":
-                    analysis_prompt = f"""我上傳了一張圖片「{filename}」。
 
-圖片分析結果：
-{file_content}
-
-請用繁體中文簡短回應，告訴我你看到了什麼，以及你的想法或建議（不超過150字）。"""
+                if file_type == "image" or is_image:
+                    # Vision 已給描述；再用小宸光人設潤飾成對話回覆
+                    ai_analysis = (
+                        f"我看到了你上傳的圖片「{filename}」✨\n\n"
+                        f"{file_content}\n\n"
+                        f"若想繼續問細節，直接在聊天裡打字即可～"
+                    )
+                    logger.info(f"🤖 Vision 分析完成: {file_content[:100]}...")
                 else:
+                    openai_client = get_openai_client()
                     analysis_prompt = f"""我上傳了一個檔案「{filename}」。
 
 檔案內容：
@@ -289,24 +397,24 @@ async def upload_file(
 
 請用繁體中文簡短分析這個檔案的內容，告訴我主要重點和你的想法（不超過150字）。"""
                 
-                response = openai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": "你是小宸光，一個友善、溫暖、有靈魂的 AI 助手。用親切的語氣回應用戶上傳的檔案。"
-                        },
-                        {
-                            "role": "user",
-                            "content": analysis_prompt
-                        }
-                    ],
-                    max_tokens=300,
-                    temperature=0.7
-                )
+                    response = openai_client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {
+                                "role": "system",
+                                "content": "你是小宸光，一個友善、溫暖、有靈魂的 AI 助手。用親切的語氣回應用戶上傳的檔案。"
+                            },
+                            {
+                                "role": "user",
+                                "content": analysis_prompt
+                            }
+                        ],
+                        max_tokens=300,
+                        temperature=0.7
+                    )
                 
-                ai_analysis = response.choices[0].message.content
-                logger.info(f"🤖 AI 分析完成: {ai_analysis[:100]}...")
+                    ai_analysis = response.choices[0].message.content
+                    logger.info(f"🤖 AI 分析完成: {ai_analysis[:100]}...")
                 
             except Exception as e:
                 logger.error(f"❌ AI 分析失敗: {e}")
@@ -318,8 +426,15 @@ async def upload_file(
             "file_type": file_ext,
             "summary": parsed_data.get("summary", ""),
             "content_preview": parsed_data.get("content", "")[:500],
+            "vision_analysis": parsed_data.get("vision_analysis") or (
+                parsed_data.get("content") if is_image else None
+            ),
+            "is_image": is_image,
             "temporary_key": redis_key,
             "file_url": file_url,
+            "preview_data_url": vision_meta.get("preview_data_url"),
+            "vision_model": vision_meta.get("vision_model"),
+            "usage": vision_meta.get("vision_usage"),
             "parsed": parsed_data.get("parsed", False),
             "ai_analysis": ai_analysis,
             "storage": {

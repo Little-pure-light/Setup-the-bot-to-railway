@@ -339,7 +339,7 @@ async def chat(
             limit=5
         )
 
-        # Retrieve file content from Redis
+        # Retrieve file / vision content from Redis
         file_content = ""
         try:
             if redis_interface.redis:
@@ -349,7 +349,17 @@ async def chat(
                     file_data_json = redis_interface.redis.get(latest_key)
                     if file_data_json:
                         file_data = json.loads(file_data_json)
-                        file_content = file_data.get("content", "")
+                        file_content = (
+                            file_data.get("vision_analysis")
+                            or file_data.get("content")
+                            or ""
+                        )
+                        if file_data.get("is_image"):
+                            fname = file_data.get("file_name") or "image"
+                            file_content = (
+                                f"【使用者上傳圖片：{fname}】\n"
+                                f"視覺分析：\n{file_content}"
+                            )
                         logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
         except Exception as e:
             logger.warning(f"⚠️ 從 Redis 檢索檔案內容失敗: {e}")

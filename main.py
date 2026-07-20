@@ -160,6 +160,8 @@ async def api_health():
             "usage_summary": "/api/usage/summary",
             "usage_user": "/api/usage/user/{user_id}",
             "tools": "/api/tools",
+            "upload_file": "/api/upload_file",
+            "vision_analyze": "/api/vision/analyze",
             "health": "/api/health"
         },
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat()

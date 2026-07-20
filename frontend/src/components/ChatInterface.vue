@@ -59,8 +59,23 @@
               :key="index" 
               :class="['message-wrapper', `message-${msg.type}`]"
             >
-              <div class="message-bubble">
-                <p :class="['message-text', { streaming: msg.streaming }]">{{ msg.content }}</p>
+              <div class="message-bubble" :class="{ 'has-image': msg.imageUrl }">
+                <div v-if="msg.imageUrl" class="message-image-wrap">
+                  <img
+                    :src="msg.imageUrl"
+                    :alt="msg.imageName || '上傳圖片'"
+                    class="message-image"
+                    @click="openImagePreview(msg.imageUrl)"
+                  />
+                  <div class="image-caption" v-if="msg.imageName">
+                    🖼️ {{ msg.imageName }}
+                    <span v-if="msg.visionModel" class="vision-badge">Vision · {{ msg.visionModel }}</span>
+                  </div>
+                </div>
+                <p
+                  v-if="msg.content"
+                  :class="['message-text', { streaming: msg.streaming }]"
+                >{{ msg.content }}</p>
                 <div class="message-footer">
                   <span v-if="msg.emotion" class="emotion-tag">
                     {{ getEmotionEmoji(msg.emotion.dominant_emotion) }}
@@ -127,7 +142,19 @@
                   type="file" 
                   @change="handleFileUpload" 
                   style="display: none;" 
-                  accept=".txt,.md,.json,.pdf,.docx,.png,.jpg,.jpeg"
+                  accept=".txt,.md,.json,.pdf,.docx,.png,.jpg,.jpeg,.webp,.gif"
+                  multiple
+                />
+              </label>
+
+              <label class="action-btn vision-btn">
+                <span class="btn-icon">🖼️</span>
+                <span class="btn-text">圖片理解</span>
+                <input
+                  type="file"
+                  @change="handleImageUpload"
+                  style="display: none;"
+                  accept="image/png,image/jpeg,image/jpg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif"
                   multiple
                 />
               </label>
@@ -235,6 +262,16 @@
       @close="showLoginModal = false"
       @success="onLoginSuccess"
     />
+
+    <!-- 圖片全螢幕預覽 -->
+    <div
+      v-if="imagePreviewUrl"
+      class="image-preview-overlay"
+      @click.self="imagePreviewUrl = null"
+    >
+      <img :src="imagePreviewUrl" alt="preview" class="image-preview-full" />
+      <button type="button" class="image-preview-close" @click="imagePreviewUrl = null">關閉</button>
+    </div>
   </div>
 </template>
 
@@ -295,6 +332,8 @@ export default {
       usageSummary: null,
       activeTools: [],
       toolStatusPhase: '', // running | done | ''
+      imagePreviewUrl: null,
+      isUploadingImage: false,
     }
   },
   computed: {
@@ -541,8 +580,24 @@ export default {
     },
     saveMessagesToStorage() {
       // 把對話記錄存進 localStorage（最多保留最近 100 則）
+      // 大型 data:image base64 不寫入，避免配額爆掉
       try {
-        const toSave = this.messages.slice(-100)
+        const toSave = this.messages.slice(-100).map((m) => {
+          const copy = { ...m }
+          if (
+            copy.imageUrl &&
+            typeof copy.imageUrl === 'string' &&
+            copy.imageUrl.startsWith('data:') &&
+            copy.imageUrl.length > 80_000
+          ) {
+            copy.imageUrl = null
+            copy.content =
+              (copy.content || '') +
+              (copy.content ? '\n' : '') +
+              '（圖片預覽過大，未快取到本機）'
+          }
+          return copy
+        })
         localStorage.setItem('xiaochenguang_messages', JSON.stringify(toSave))
       } catch (e) {
         console.warn('⚠️ [Messages] 儲存對話記錄失敗:', e.message)
@@ -871,58 +926,157 @@ export default {
         this.emotionalStates = []
       }
     },
-    async handleFileUpload(event) {
-      const files = Array.from(event.target.files)
-      if (!files.length) return
+    isImageFile(file) {
+      if (!file) return false
+      if (file.type && file.type.startsWith('image/')) return true
+      return /\.(png|jpe?g|webp|gif)$/i.test(file.name || '')
+    },
+    openImagePreview(url) {
+      if (url) this.imagePreviewUrl = url
+    },
+    extractUploadError(error) {
+      const d = error.response?.data?.detail
+      if (!d) return error.message
+      if (typeof d === 'string') return d
+      if (d.message) return d.message
+      try {
+        return JSON.stringify(d)
+      } catch {
+        return error.message
+      }
+    },
+    async uploadOneFile(file, { visionPrompt } = {}) {
+      const localPreview = this.isImageFile(file) ? URL.createObjectURL(file) : null
+      const statusIdx = this.messages.length
+      this.messages.push({
+        type: 'system',
+        content: this.isImageFile(file)
+          ? `⏳ 正在上傳並理解圖片「${file.name}」…`
+          : `⏳ 正在上傳檔案「${file.name}」…`,
+        timestamp: new Date().toLocaleTimeString('zh-TW'),
+        imageUrl: localPreview || undefined,
+        imageName: this.isImageFile(file) ? file.name : undefined,
+      })
+      this.scrollToBottom()
 
-      for (const file of files) {
-        try {
+      try {
+        const formData = new FormData()
+        formData.append('file', file)
+        formData.append('conversation_id', this.conversationId)
+        formData.append('user_id', this.userId)
+        if (visionPrompt) {
+          formData.append('prompt', visionPrompt)
+        }
+
+        const headers = await this.buildRequestHeaders()
+        // FormData 勿強制 Content-Type，讓瀏覽器帶 boundary
+        delete headers['Content-Type']
+
+        const response = await axios.post(`${API_URL}/api/upload_file`, formData, {
+          headers,
+        })
+        const data = response.data || {}
+        const isImage = data.is_image || this.isImageFile(file)
+        const imageUrl =
+          data.preview_data_url || data.file_url || localPreview || null
+        const summary = data.summary || '檔案已上傳'
+        const fileType = data.file_type || ''
+        const parsed = data.parsed ? '✅ 已解析' : '⚠️ 未解析'
+        const visionLine = data.vision_analysis
+          ? `\n🔍 Vision：${String(data.vision_analysis).slice(0, 120)}${data.vision_analysis.length > 120 ? '…' : ''}`
+          : ''
+
+        // 更新上傳狀態訊息為成功 + 圖片預覽
+        this.messages[statusIdx] = {
+          type: isImage ? 'user' : 'system',
+          content: isImage
+            ? `已上傳圖片，等待小宸光解讀…`
+            : `📎 檔案上傳成功\n📄 ${file.name} (${fileType})\n${parsed}\n📝 ${summary}${visionLine}`,
+          timestamp: new Date().toLocaleTimeString('zh-TW'),
+          imageUrl: isImage ? imageUrl : undefined,
+          imageName: isImage ? file.name : undefined,
+          visionModel: data.vision_model,
+        }
+
+        if (data.ai_analysis) {
           this.messages.push({
-            type: 'system',
-            content: `⏳ 正在上傳檔案 "${file.name}"...`,
-            timestamp: new Date().toLocaleTimeString('zh-TW')
+            type: 'assistant',
+            content: data.ai_analysis,
+            timestamp: new Date().toLocaleTimeString('zh-TW'),
+            usage: data.usage
+              ? {
+                  prompt_tokens: data.usage.prompt_tokens,
+                  completion_tokens: data.usage.completion_tokens,
+                  total_tokens: data.usage.total_tokens,
+                  cost_usd: null,
+                  model: data.vision_model,
+                }
+              : undefined,
           })
-          this.scrollToBottom()
+        }
 
-          const formData = new FormData()
-          formData.append('file', file)
-          formData.append('conversation_id', this.conversationId)
-          formData.append('user_id', this.userId)
-
-          const response = await axios.post(`${API_URL}/api/upload_file`, formData, {
-            headers: { 'Content-Type': 'multipart/form-data' }
+        if (data.usage) {
+          this.applyUsagePayload({
+            ...data.usage,
+            model: data.vision_model,
+            cost_usd: data.usage.cost_usd,
           })
+        }
 
-          const summary = response.data.summary || '檔案已上傳'
-          const fileType = response.data.file_type || ''
-          const parsed = response.data.parsed ? '✅ 已解析' : '⚠️ 未解析'
-
-          this.messages.push({
-            type: 'system',
-            content: `📎 檔案上傳成功\n📄 ${file.name} (${fileType})\n${parsed}\n📝 ${summary}`,
-            timestamp: new Date().toLocaleTimeString('zh-TW')
-          })
-          this.scrollToBottom()
-
-          if (response.data.ai_analysis) {
-            this.messages.push({
-              type: 'assistant',
-              content: response.data.ai_analysis,
-              timestamp: new Date().toLocaleTimeString('zh-TW')
-            })
-            this.scrollToBottom()
-          }
-        } catch (error) {
-          this.messages.push({
-            type: 'system',
-            content: `❌ 「${file.name}」上傳失敗: ${error.response?.data?.detail || error.message}`,
-            timestamp: new Date().toLocaleTimeString('zh-TW')
-          })
-          this.scrollToBottom()
+        this.scrollToBottom()
+        this.saveMessagesToStorage()
+      } catch (error) {
+        const msg = this.extractUploadError(error)
+        this.messages[statusIdx] = {
+          type: 'system',
+          content: `❌ 「${file.name}」上傳/分析失敗：${msg}`,
+          timestamp: new Date().toLocaleTimeString('zh-TW'),
+          imageUrl: localPreview || undefined,
+          imageName: this.isImageFile(file) ? file.name : undefined,
+        }
+        this.scrollToBottom()
+      } finally {
+        // object URL 若已被 data_url 取代可不 revoke；為避免破圖延後 revoke
+        if (localPreview) {
+          setTimeout(() => {
+            try {
+              URL.revokeObjectURL(localPreview)
+            } catch (_) { /* ignore */ }
+          }, 60_000)
         }
       }
-
+    },
+    async handleFileUpload(event) {
+      const files = Array.from(event.target.files || [])
+      if (!files.length) return
+      for (const file of files) {
+        await this.uploadOneFile(file)
+      }
       event.target.value = ''
+    },
+    async handleImageUpload(event) {
+      const files = Array.from(event.target.files || [])
+      if (!files.length) return
+      this.isUploadingImage = true
+      try {
+        for (const file of files) {
+          if (!this.isImageFile(file)) {
+            this.messages.push({
+              type: 'system',
+              content: `⚠️ 「${file.name}」不是支援的圖片格式`,
+              timestamp: new Date().toLocaleTimeString('zh-TW'),
+            })
+            continue
+          }
+          await this.uploadOneFile(file, {
+            visionPrompt:
+              '請用繁體中文詳細描述這張圖片，包含場景、物體、文字（OCR）與氛圍，不超過 300 字。',
+          })
+        }
+      } finally {
+        this.isUploadingImage = false
+        event.target.value = ''
+      }
     },
     openCopilotWindow() {
       console.log('🤖 開啟 Copilot 視窗')
@@ -1512,6 +1666,85 @@ export default {
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
   transition: all 0.3s ease;
   color: white;
+}
+
+.message-image-wrap {
+  margin-bottom: 0.6rem;
+}
+
+.message-image {
+  display: block;
+  max-width: min(320px, 70vw);
+  max-height: 240px;
+  border-radius: 12px;
+  object-fit: cover;
+  cursor: zoom-in;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  border: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.message-user .message-image {
+  margin-left: auto;
+}
+
+.image-caption {
+  margin-top: 0.35rem;
+  font-size: 0.75rem;
+  opacity: 0.85;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  align-items: center;
+}
+
+.vision-badge {
+  background: rgba(99, 102, 241, 0.15);
+  color: #4338ca;
+  padding: 0.1rem 0.4rem;
+  border-radius: 999px;
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.message-user .vision-badge {
+  background: rgba(255, 255, 255, 0.25);
+  color: #fff;
+}
+
+.vision-btn {
+  background: linear-gradient(135deg, #a78bfa 0%, #6366f1 100%) !important;
+  color: white !important;
+}
+
+.image-preview-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 23, 42, 0.75);
+  z-index: 2000;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  gap: 0.75rem;
+}
+
+.image-preview-full {
+  max-width: min(960px, 95vw);
+  max-height: 80vh;
+  border-radius: 12px;
+  object-fit: contain;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.image-preview-close {
+  border: none;
+  border-radius: 999px;
+  padding: 0.5rem 1.2rem;
+  background: white;
+  color: #111827;
+  font-weight: 700;
+  cursor: pointer;
 }
 
 .upload-btn {
