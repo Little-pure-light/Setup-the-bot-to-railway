@@ -1,20 +1,23 @@
 import { createApp } from 'vue';
 import App from './App.vue';
 import router from './router'; // <-- 加進行
+import { logClientError } from './lib/errorSanitize.js';
 
-// 前端未捕捉錯誤（不輸出敏感內容）
+// 前端未捕捉錯誤：僅輸出脫敏摘要，不直接 dump event.message / reason.message
 window.addEventListener('error', (event) => {
-  console.error('[app-error]', event?.message || 'unknown');
+  logClientError('[app-error]', event?.error || { name: 'Error', message: 'window.error' }, {
+    info: event?.filename ? String(event.filename).split('/').pop() : 'window',
+  });
 });
 window.addEventListener('unhandledrejection', (event) => {
-  const reason = event?.reason;
-  const msg = reason?.message || String(reason || 'unhandledrejection');
-  console.error('[app-unhandled]', msg.slice(0, 200));
+  logClientError('[app-unhandled]', event?.reason || { name: 'UnhandledRejection' }, {
+    info: 'promise',
+  });
 });
 
 const app = createApp(App);
 app.config.errorHandler = (err, _instance, info) => {
-  console.error('[vue-error]', info, err?.message || err);
+  logClientError('[vue-error]', err, { info: info || 'vue' });
 };
 app.use(router);
 app.mount('#app');
