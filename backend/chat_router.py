@@ -71,34 +71,65 @@ class ChatResponse(BaseModel):
     tools_used: Optional[list] = None
 
 
-def _tool_event_payload(status: str, results_or_calls) -> str:
+def _tool_event_payload(
+    status: str,
+    results_or_calls=None,
+    *,
+    step: Optional[int] = None,
+    total: Optional[int] = None,
+    message: str = "",
+    tools: Optional[list] = None,
+) -> str:
     """產生前端可解析的工具狀態事件行。"""
-    tools = []
-    for item in results_or_calls or []:
-        if hasattr(item, "name"):
-            # ToolCallResult
-            tools.append(
-                {
-                    "name": item.name,
-                    "ok": getattr(item, "ok", None),
-                    "duration_ms": getattr(item, "duration_ms", None),
-                    "arguments": getattr(item, "arguments", {}) or {},
-                }
-            )
-        else:
-            # raw openai tool_call
-            try:
-                name = item.function.name
-                args_raw = item.function.arguments or "{}"
-                args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
-            except Exception:
-                name = "unknown"
-                args = {}
-            tools.append({"name": name, "arguments": args, "ok": None})
-    return TOOL_EVENT_PREFIX + json.dumps(
-        {"type": "tool_status", "status": status, "tools": tools},
-        ensure_ascii=False,
-    )
+    tool_list = list(tools or [])
+    if not tool_list:
+        for item in results_or_calls or []:
+            if hasattr(item, "name"):
+                # ToolCallResult
+                tool_list.append(
+                    {
+                        "name": item.name,
+                        "display_name": getattr(item, "display_name", None) or item.name,
+                        "icon": getattr(item, "icon", "🔧"),
+                        "ok": getattr(item, "ok", None),
+                        "duration_ms": getattr(item, "duration_ms", None),
+                        "arguments": getattr(item, "arguments", {}) or {},
+                        "error": getattr(item, "error", None),
+                        "error_code": getattr(item, "error_code", None),
+                        "index": getattr(item, "index", None),
+                        "total": getattr(item, "total", None),
+                        "phase": "done" if getattr(item, "ok", None) is not None else "pending",
+                    }
+                )
+            elif isinstance(item, dict):
+                tool_list.append(item)
+            else:
+                # raw openai tool_call
+                try:
+                    name = item.function.name
+                    args_raw = item.function.arguments or "{}"
+                    args = json.loads(args_raw) if isinstance(args_raw, str) else dict(args_raw)
+                except Exception:
+                    name = "unknown"
+                    args = {}
+                tool_list.append(
+                    {
+                        "name": name,
+                        "display_name": name,
+                        "arguments": args,
+                        "ok": None,
+                        "phase": "pending",
+                    }
+                )
+    payload = {
+        "type": "tool_status",
+        "status": status,
+        "tools": tool_list,
+        "step": step,
+        "total": total if total is not None else len(tool_list),
+        "message": message,
+    }
+    return TOOL_EVENT_PREFIX + json.dumps(payload, ensure_ascii=False)
 
 
 def _merge_usage(*usages: Optional[Dict[str, Any]]) -> Dict[str, int]:
@@ -408,87 +439,137 @@ async def chat(
                 except Exception as e:
                     logger.warning(f"⚠️ Streaming 後背景任務失敗: {e}")
 
-            async def _prepare_messages_with_optional_tools(base_messages: list):
-                """
-                可選 tool calling；完成後仍用 stream=True 輸出最終回答。
-                回傳 (messages, tool_usage, tool_results, events)
-                events: 要先推給前端的狀態行列表
-                """
-                if not use_tools:
-                    return base_messages, None, [], []
-                events = []
-                try:
-                    registry = get_tool_registry()
-                    tool_defs = get_openai_tool_definitions()
-                    if not tool_defs:
-                        return base_messages, None, [], []
-
-                    tool_response = await generate_response_with_tools(
-                        base_messages,
-                        tools=tool_defs,
-                        model=selected_model,
-                        temperature=selected_temperature,
-                        max_tokens=1000,
-                    )
-                    tool_usage = tool_response.get("usage")
-                    if not (
-                        tool_response.get("finish_reason") == "tool_calls"
-                        and tool_response.get("tool_calls")
-                    ):
-                        return base_messages, tool_usage, [], events
-
-                    logger.info(
-                        f"🔧 [Streaming] 工具呼叫 x{len(tool_response['tool_calls'])}"
-                    )
-                    events.append(
-                        _tool_event_payload("running", tool_response["tool_calls"])
-                    )
-
-                    stream_messages = list(base_messages)
-                    stream_messages.append(tool_response["raw_message"])
-
-                    tool_results = await registry.execute_openai_tool_calls(
-                        tool_response["tool_calls"]
-                    )
-                    for tr in tool_results:
-                        stream_messages.append(
-                            {
-                                "role": "tool",
-                                "tool_call_id": tr.tool_call_id,
-                                "content": tr.content,
-                            }
-                        )
-                    events.append(_tool_event_payload("done", tool_results))
-                    return stream_messages, tool_usage, tool_results, events
-                except Exception as e:
-                    logger.warning(f"⚠️ [Streaming] Tool 階段失敗，改直接串流: {e}")
-                    return base_messages, None, [], events
-
             async def stream_generator():
                 full_response = ""
                 stream_usage = None
                 tool_usage = None
                 tools_used_meta = []
+                final_messages = messages
                 try:
-                    (
-                        final_messages,
-                        tool_usage,
-                        tool_results,
-                        tool_events,
-                    ) = await _prepare_messages_with_optional_tools(messages)
+                    # --- Tool calling 階段（逐步推送狀態）---
+                    if use_tools:
+                        try:
+                            registry = get_tool_registry()
+                            tool_defs = get_openai_tool_definitions()
+                            if tool_defs:
+                                yield _tool_event_payload(
+                                    "planning",
+                                    message="正在判斷是否需要使用工具…",
+                                    tools=[],
+                                ) + "\n"
 
-                    for ev in tool_events:
-                        yield ev + "\n"
+                                tool_response = await generate_response_with_tools(
+                                    messages,
+                                    tools=tool_defs,
+                                    model=selected_model,
+                                    temperature=selected_temperature,
+                                    max_tokens=1000,
+                                )
+                                tool_usage = tool_response.get("usage")
 
-                    tools_used_meta = [
-                        {
-                            "name": r.name,
-                            "ok": r.ok,
-                            "duration_ms": r.duration_ms,
-                            "arguments": r.arguments,
-                        }
-                        for r in (tool_results or [])
-                    ]
+                                if (
+                                    tool_response.get("finish_reason") == "tool_calls"
+                                    and tool_response.get("tool_calls")
+                                ):
+                                    logger.info(
+                                        f"🔧 [Streaming] 工具呼叫 x{len(tool_response['tool_calls'])}"
+                                    )
+                                    final_messages = list(messages)
+                                    final_messages.append(tool_response["raw_message"])
+
+                                    live_tools = []
+                                    tool_results = []
+                                    ctx = {"user_id": request.user_id}
+
+                                    async for step in registry.iter_openai_tool_calls(
+                                        tool_response["tool_calls"],
+                                        context=ctx,
+                                    ):
+                                        if step.get("type") == "start":
+                                            live_tools.append(
+                                                {
+                                                    "name": step.get("name"),
+                                                    "display_name": step.get("display_name")
+                                                    or step.get("name"),
+                                                    "icon": step.get("icon") or "🔧",
+                                                    "arguments": step.get("arguments") or {},
+                                                    "ok": None,
+                                                    "phase": "running",
+                                                    "index": step.get("index"),
+                                                    "total": step.get("total"),
+                                                }
+                                            )
+                                            yield _tool_event_payload(
+                                                "running",
+                                                tools=live_tools,
+                                                step=(step.get("index") or 0) + 1,
+                                                total=step.get("total"),
+                                                message=f"正在執行：{step.get('display_name') or step.get('name')}",
+                                            ) + "\n"
+                                        elif step.get("type") == "result":
+                                            tr = step["result"]
+                                            tool_results.append(tr)
+                                            # 更新 live 列表對應項目
+                                            for t in live_tools:
+                                                if t.get("name") == tr.name and t.get("phase") == "running":
+                                                    t["ok"] = tr.ok
+                                                    t["phase"] = "done" if tr.ok else "error"
+                                                    t["duration_ms"] = tr.duration_ms
+                                                    t["error"] = tr.error
+                                                    t["display_name"] = tr.display_name or t.get("display_name")
+                                                    t["icon"] = tr.icon or t.get("icon")
+                                                    break
+                                            final_messages.append(
+                                                {
+                                                    "role": "tool",
+                                                    "tool_call_id": tr.tool_call_id,
+                                                    "content": tr.content,
+                                                }
+                                            )
+                                            yield _tool_event_payload(
+                                                "progress",
+                                                tools=live_tools,
+                                                step=len(tool_results),
+                                                total=len(live_tools) or None,
+                                                message=(
+                                                    f"{'完成' if tr.ok else '失敗'}：{tr.display_name or tr.name}"
+                                                ),
+                                            ) + "\n"
+
+                                    tools_used_meta = [
+                                        {
+                                            "name": r.name,
+                                            "display_name": r.display_name,
+                                            "icon": r.icon,
+                                            "ok": r.ok,
+                                            "duration_ms": r.duration_ms,
+                                            "arguments": r.arguments,
+                                            "error": r.error,
+                                            "error_code": r.error_code,
+                                        }
+                                        for r in tool_results
+                                    ]
+                                    yield _tool_event_payload(
+                                        "done",
+                                        tools=live_tools,
+                                        step=len(tool_results),
+                                        total=len(tool_results),
+                                        message="工具階段完成，正在產生回覆…",
+                                    ) + "\n"
+                                else:
+                                    yield _tool_event_payload(
+                                        "skipped",
+                                        message="本次無需使用工具",
+                                        tools=[],
+                                    ) + "\n"
+                        except Exception as e:
+                            logger.warning(f"⚠️ [Streaming] Tool 階段失敗，改直接串流: {e}")
+                            yield _tool_event_payload(
+                                "error",
+                                message=f"工具階段發生問題，改為直接回答（{type(e).__name__}）",
+                                tools=[],
+                            ) + "\n"
+                            final_messages = messages
 
                     # 真實 OpenAI stream=True：逐 token 推給前端
                     async for event in generate_response_stream(
@@ -611,7 +692,8 @@ async def chat(
                 messages.append(tool_response["raw_message"])
 
                 tool_results = await registry.execute_openai_tool_calls(
-                    tool_response["tool_calls"]
+                    tool_response["tool_calls"],
+                    context={"user_id": request.user_id},
                 )
                 for tr in tool_results:
                     messages.append(
@@ -624,13 +706,18 @@ async def chat(
                     tools_used.append(
                         {
                             "name": tr.name,
+                            "display_name": tr.display_name,
+                            "icon": tr.icon,
                             "ok": tr.ok,
                             "duration_ms": tr.duration_ms,
                             "arguments": tr.arguments,
+                            "error": tr.error,
+                            "error_code": tr.error_code,
                         }
                     )
                     logger.info(
-                        f"✅ 工具 {tr.name} 完成 id={tr.tool_call_id} ok={tr.ok} {tr.duration_ms}ms"
+                        f"{'✅' if tr.ok else '⚠️'} 工具 {tr.name} 完成 "
+                        f"id={tr.tool_call_id} ok={tr.ok} {tr.duration_ms}ms"
                     )
 
                 # 第二輪：讓 AI 根據工具結果生成最終回答

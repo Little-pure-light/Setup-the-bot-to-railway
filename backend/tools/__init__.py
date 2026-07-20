@@ -4,6 +4,9 @@
 from .web_search import web_search
 from .time_tool import get_current_time
 from .calculator import calculate
+from .weather import get_weather
+from .reminder import manage_reminder
+from .unit_convert import convert_units
 from .registry import (
     get_tool_registry,
     get_openai_tool_definitions,
@@ -16,6 +19,9 @@ __all__ = [
     "web_search",
     "get_current_time",
     "calculate",
+    "get_weather",
+    "manage_reminder",
+    "convert_units",
     "get_tool_registry",
     "get_openai_tool_definitions",
     "ToolRegistry",
