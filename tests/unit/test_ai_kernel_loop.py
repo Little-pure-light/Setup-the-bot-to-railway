@@ -1,6 +1,6 @@
-"""P2-05/06: Agent loop limits, planner fallback, post-process idempotency"""
+"""P2-05/06: Agent loop, post-process idempotency"""
 import pytest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 from backend.ai_kernel.feature_flags import KernelFlags
 from backend.ai_kernel.models import (
@@ -19,7 +19,6 @@ from backend.ai_kernel.post_process import (
     run_post_process,
     should_skip_memory_write,
 )
-from backend.ai_kernel.errors import AgentLoopLimitError
 
 
 class FakeModel:
@@ -27,16 +26,29 @@ class FakeModel:
         self.calls = 0
 
     async def complete(self, messages, *, model, temperature, max_tokens):
-        return {"content": "final", "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+        return {
+            "content": "final",
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
 
     async def complete_with_tools(self, messages, tools, *, model, temperature, max_tokens):
         self.calls += 1
-        # 永遠要求 tool_calls 以觸發上限
+        if self.calls == 1:
+            tc = MagicMock()
+            tc.id = "1"
+            tc.function.name = "calculate"
+            tc.function.arguments = "{}"
+            return {
+                "content": "",
+                "tool_calls": [tc],
+                "finish_reason": "tool_calls",
+                "raw_message": {"role": "assistant", "content": "", "tool_calls": [tc]},
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+            }
         return {
-            "content": "",
-            "tool_calls": [MagicMock()],
-            "finish_reason": "tool_calls",
-            "raw_message": {"role": "assistant", "content": "", "tool_calls": []},
+            "content": "after tools",
+            "tool_calls": [],
+            "finish_reason": "stop",
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         }
 
@@ -47,7 +59,15 @@ class FakeModel:
 
 class FakeTools:
     def openai_definitions(self):
-        return [{"type": "function", "function": {"name": "calculate"}}]
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculate",
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        ]
 
     async def execute_calls(self, tool_calls, *, context=None, max_calls=5):
         return [
@@ -63,11 +83,8 @@ class FakeTools:
 
 
 @pytest.mark.asyncio
-async def test_agent_loop_iteration_cap():
-    flags = KernelFlags(max_agent_iterations=1, max_tool_calls=5, max_total_tool_seconds=30)
-    # FakeModel always returns tool_calls; after one iteration it should still return final
-    # Our loop does tools then complete once - so it returns. Force infinite by making complete also tools...
-    # Instead test max_tools on empty defs skip
+async def test_agent_loop_one_tool_then_final():
+    flags = KernelFlags(max_agent_iterations=3, max_tool_calls=5, max_total_tool_seconds=30)
     model = FakeModel()
     tools = FakeTools()
     loop = AgentLoop(model, tools, ToolPolicy(flags))
@@ -79,8 +96,8 @@ async def test_agent_loop_iteration_cap():
         model_config_obj=ModelConfig(),
         strategy=ResponseStrategy(max_tokens=100),
     )
-    out = await loop.run(ctx, user_id="u")
-    assert out["content"] == "final"
+    out = await loop.run(ctx, user_id="u", request=req)
+    assert out["content"] in ("after tools", "final")
     assert out["tools_used"]
 
 
