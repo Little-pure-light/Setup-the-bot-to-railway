@@ -41,6 +41,7 @@ try:
     from backend.history_router import router as history_router
     from backend.voice_router import router as voice_router
     from backend.ai_kernel.debug_router import router as kernel_debug_router
+    from backend.openai_compat_router import router as openai_compat_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -74,7 +75,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # ✅ 選擇性 API Secret 保護中介軟體
-# 若 Railway 設定了 API_SECRET 環境變數，所有 /api/* 請求需帶 Authorization: Bearer <token>
+# 若 Railway 設定了 API_SECRET 環境變數，/api/* 與 /v1/* 需帶 Authorization: Bearer <token>
 # 同時接受有效的 Supabase Auth JWT（使用者登入後跨裝置同步）
 API_SECRET = os.getenv("API_SECRET", "")
 AUTH_EXEMPT_PATHS = {
@@ -89,42 +90,48 @@ AUTH_EXEMPT_PATHS = {
 }
 
 
+def _path_requires_api_auth(path: str) -> bool:
+    """Protect legacy /api/* and OpenAI-compat /v1/* (Open WebUI)."""
+    if path in AUTH_EXEMPT_PATHS:
+        return False
+    return path.startswith("/api/") or path.startswith("/v1/")
+
+
 # 注意：Starlette 後註冊的 middleware 在請求路徑上較外層先執行。
 # 因此 request_id 必須「後」於 auth 註冊，才能包住 401 並寫入 X-Request-ID。
 @app.middleware("http")
 async def api_auth_middleware(request: Request, call_next):
-    if API_SECRET and request.url.path.startswith("/api/"):
-        if request.url.path not in AUTH_EXEMPT_PATHS:
-            auth_header = request.headers.get("Authorization", "")
-            token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
-            allowed = False
-            if token and token == API_SECRET:
-                allowed = True
-            elif token:
-                # 允許已登入的 Supabase 使用者 JWT
-                try:
-                    from backend.supabase_handler import get_user_from_token
-                    if get_user_from_token(token):
-                        allowed = True
-                except Exception:
-                    allowed = False
-            if not allowed:
-                # 外層 request_id middleware 已設定 context；此處雙保險
-                rid = get_request_id() or new_request_id()
-                logger.warning(
-                    "⛔ 未授權存取 path=%s request_id=%s client=%s",
-                    request.url.path,
-                    rid,
-                    request.client.host if request.client else "unknown",
-                )
-                return JSONResponse(
-                    status_code=401,
-                    content={
-                        "detail": "Unauthorized",
-                        "request_id": rid,
-                    },
-                    headers={"X-Request-ID": rid},
-                )
+    if API_SECRET and _path_requires_api_auth(request.url.path):
+        auth_header = request.headers.get("Authorization", "")
+        token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
+        allowed = False
+        if token and token == API_SECRET:
+            allowed = True
+        elif token:
+            # 允許已登入的 Supabase 使用者 JWT
+            try:
+                from backend.supabase_handler import get_user_from_token
+                if get_user_from_token(token):
+                    allowed = True
+            except Exception:
+                allowed = False
+        if not allowed:
+            # 外層 request_id middleware 已設定 context；此處雙保險
+            rid = get_request_id() or new_request_id()
+            logger.warning(
+                "⛔ 未授權存取 path=%s request_id=%s client=%s",
+                request.url.path,
+                rid,
+                request.client.host if request.client else "unknown",
+            )
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "detail": "Unauthorized",
+                    "request_id": rid,
+                },
+                headers={"X-Request-ID": rid},
+            )
     return await call_next(request)
 
 
@@ -182,6 +189,11 @@ try:
         app.include_router(kernel_debug_router, prefix="/api")
     except NameError:
         pass
+    # OpenAI-compatible adapter for Open WebUI (no /api prefix)
+    try:
+        app.include_router(openai_compat_router)
+    except NameError:
+        logger.warning("openai_compat_router 未載入")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")

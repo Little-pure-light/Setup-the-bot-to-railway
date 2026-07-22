@@ -15,7 +15,7 @@
 | 變數 | 用途 | 預設 |
 |------|------|------|
 | `PORT` | 監聽埠 | `5000`（main）/ Railway 注入 |
-| `API_SECRET` | 保護 `/api/*` | 空=不啟用 |
+| `API_SECRET` | 保護 `/api/*` 與 `/v1/*`（Open WebUI OpenAI 相容 API） | 空=不啟用 |
 | `AI_ID` | 預設 AI 實例 | `xiaochenguang_v1` |
 | `SUPABASE_MEMORIES_TABLE` | 記憶表名 | `xiaochenguang_memories` |
 | `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` | OpenAI 組織 | 空 |
