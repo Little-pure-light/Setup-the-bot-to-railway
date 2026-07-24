@@ -75,11 +75,23 @@ class RedisInterface:
             self.redis = None
 
     def store_short_term(self, conversation_id: str, data: Dict[str, Any]) -> bool:
+        """
+        Store latest conversation snapshot under conv:{id}:latest only.
+
+        Canonical payload (Infrastructure Phase):
+          messages: list[{role, content}]
+          summary: str
+          reflection: unified reflection contract dict | null
+          updated_at: ISO8601
+        Legacy keys (user_msg/assistant_msg) are still accepted on write and
+        normalized into the canonical shape for backward compatibility.
+        """
         if not self.redis:
             return False
         try:
+            payload = self.normalize_latest_payload(data)
             key = self._get_conversation_key(conversation_id)
-            self.redis.set(key, json.dumps(data, ensure_ascii=False))
+            self.redis.set(key, json.dumps(payload, ensure_ascii=False))
             self.redis.expire(key, self.ttl_seconds)
             return True
         except Exception as e:
@@ -96,10 +108,81 @@ class RedisInterface:
                 return None
             if isinstance(value, bytes):
                 value = value.decode("utf-8")
-            return json.loads(value)
+            raw = json.loads(value)
+            return self.normalize_latest_payload(raw)
         except Exception as e:
             print(f"❌ Redis 讀取失敗: {e}")
             return None
+
+    @staticmethod
+    def normalize_latest_payload(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """Normalize legacy and canonical Redis conversation payloads."""
+        from datetime import datetime, timezone
+
+        data = dict(data or {})
+        messages = data.get("messages")
+        if not isinstance(messages, list):
+            messages = []
+            # legacy flat fields
+            user_msg = data.get("user_msg") or data.get("user_message") or data.get("user_input")
+            asst_msg = (
+                data.get("assistant_msg")
+                or data.get("assistant_message")
+                or data.get("bot_response")
+            )
+            if user_msg:
+                messages.append({"role": "user", "content": str(user_msg)})
+            if asst_msg:
+                messages.append({"role": "assistant", "content": str(asst_msg)})
+
+        # keep legacy mirrors for older readers
+        user_mirror = ""
+        asst_mirror = ""
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            if m.get("role") == "user" and not user_mirror:
+                user_mirror = str(m.get("content") or "")
+            if m.get("role") == "assistant" and not asst_mirror:
+                asst_mirror = str(m.get("content") or "")
+
+        reflection = data.get("reflection")
+        if reflection is not None:
+            try:
+                from backend.modules.reflection_contract import normalize_reflection
+
+                reflection = normalize_reflection(reflection)
+            except Exception:
+                pass
+
+        summary = data.get("summary")
+        if not summary:
+            # derive short summary from last assistant or user line
+            summary = (asst_mirror or user_mirror or "")[:200]
+
+        updated_at = data.get("updated_at") or data.get("timestamp")
+        if not updated_at:
+            updated_at = datetime.now(timezone.utc).isoformat()
+        elif isinstance(updated_at, (int, float)):
+            updated_at = datetime.fromtimestamp(
+                float(updated_at), tz=timezone.utc
+            ).isoformat()
+
+        payload = {
+            "messages": messages,
+            "summary": str(summary or ""),
+            "reflection": reflection,
+            "updated_at": str(updated_at),
+            # legacy compatibility mirrors
+            "user_msg": user_mirror or data.get("user_msg") or "",
+            "assistant_msg": asst_mirror or data.get("assistant_msg") or "",
+            "user_id": data.get("user_id"),
+            "timestamp": data.get("timestamp") or updated_at,
+        }
+        # optional token accounting (never inside message text)
+        if data.get("token_usage"):
+            payload["token_usage"] = data["token_usage"]
+        return payload
 
     def clear_conversation(self, conversation_id: str) -> bool:
         if not self.redis:

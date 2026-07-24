@@ -42,6 +42,7 @@ try:
     from backend.voice_router import router as voice_router
     from backend.ai_kernel.debug_router import router as kernel_debug_router
     from backend.openai_compat_router import router as openai_compat_router
+    from backend.internal_night_growth_router import router as internal_night_growth_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -93,6 +94,9 @@ AUTH_EXEMPT_PATHS = {
 def _path_requires_api_auth(path: str) -> bool:
     """Protect legacy /api/* and OpenAI-compat /v1/* (Open WebUI)."""
     if path in AUTH_EXEMPT_PATHS:
+        return False
+    # /internal/* uses its own token check (NIGHT_GROWTH_INTERNAL_TOKEN)
+    if path.startswith("/internal/"):
         return False
     return path.startswith("/api/") or path.startswith("/v1/")
 
@@ -194,6 +198,11 @@ try:
         app.include_router(openai_compat_router)
     except NameError:
         logger.warning("openai_compat_router 未載入")
+    # Internal Night Growth (token-protected; no /api prefix)
+    try:
+        app.include_router(internal_night_growth_router)
+    except NameError:
+        logger.warning("internal_night_growth_router 未載入")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")

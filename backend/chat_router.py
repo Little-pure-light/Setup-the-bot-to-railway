@@ -24,6 +24,28 @@ router = APIRouter()
 logger = logging.getLogger("chat_router")
 redis_interface = RedisInterface()
 
+
+def _build_memory_system(openai_client, memories_table: str):
+    """
+    Strangler: MEMORY_V2_ENABLED → MemoryManager legacy adapter; else V1 MemorySystem.
+    Default path uses local MemorySystem symbol so tests can patch chat_router.MemorySystem.
+    Heavy construction delegated to chat_services when V2 path is active.
+    """
+    try:
+        from backend.modules.memory_manager import memory_v2_enabled, MemoryManager
+
+        if memory_v2_enabled():
+            v1 = MemorySystem(
+                supabase,
+                openai_client,
+                memories_table,
+                redis_interface=redis_interface,
+            )
+            return MemoryManager(v1).as_legacy()
+    except Exception as e:
+        logger.warning("Memory V2 factory failed, fallback V1: %s", e)
+    return MemorySystem(supabase, openai_client, memories_table)
+
 # 串流事件 / 用量 meta 標記（前端可解析）
 USAGE_META_PREFIX = "\n__XCG_META__"
 TOOL_EVENT_PREFIX = "__XCG_EVENT__"
@@ -71,6 +93,8 @@ class ChatResponse(BaseModel):
     emotion_analysis: dict
     conversation_id: str
     reflection: Optional[dict] = None
+    # pending | completed | failed | unavailable — only meaningful when include_reflection=true
+    reflection_status: Optional[str] = None
     usage: Optional[dict] = None
     usage_summary: Optional[dict] = None
     tools_used: Optional[list] = None
@@ -207,7 +231,7 @@ async def run_post_chat_tasks(
     # 重新實例化或獲取必要的服務
     openai_client = get_openai_client()
     memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
-    memory_system = MemorySystem(supabase, openai_client, memories_table)
+    memory_system = _build_memory_system(openai_client, memories_table)
     prompt_engine = PromptEngine(
         request.conversation_id, memories_table, user_id=request.user_id
     )
@@ -241,8 +265,17 @@ async def run_post_chat_tasks(
             
             if reflection_response.get("success"):
                 reflection_result = reflection_response.get("reflection")
-                logger.info(f"🧠 背景：反思完成（置信度: {reflection_result.get('confidence', 0):.2f}）")
-                
+                try:
+                    from backend.modules.reflection_contract import normalize_reflection
+
+                    if reflection_result:
+                        reflection_result = normalize_reflection(reflection_result)
+                except Exception:
+                    pass
+                logger.info(
+                    f"🧠 背景：反思完成（置信度: {(reflection_result or {}).get('confidence', 0):.2f}）"
+                )
+
                 # === 階段1.5：反思儲存（三層架構）===
                 reflection_storage = get_reflection_storage()
                 if reflection_storage and reflection_result:
@@ -320,7 +353,7 @@ async def _try_kernel_chat(
     openai_client = get_openai_client()
     memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
     tracker = get_token_tracker()
-    memory_system = MemorySystem(supabase, openai_client, memories_table)
+    memory_system = _build_memory_system(openai_client, memories_table)
     prompt_engine = PromptEngine(
         request.conversation_id, memories_table, user_id=request.user_id
     )
@@ -458,6 +491,10 @@ async def chat(
     background_tasks: BackgroundTasks,
     stream: bool = Query(default=True, description="是否使用 OpenAI streaming 即時回傳"),
     use_tools: bool = Query(default=True, description="串流前是否允許 tool calling（如 web_search）"),
+    include_reflection: bool = Query(
+        default=False,
+        description="若為 true 且回應體可帶 reflection 欄位（統一 schema；背景反思仍非同步）",
+    ),
 ):
     try:
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
@@ -532,7 +569,7 @@ async def chat(
                 },
             )
 
-        memory_system = MemorySystem(supabase, openai_client, memories_table)
+        memory_system = _build_memory_system(openai_client, memories_table)
         prompt_engine = PromptEngine(
             request.conversation_id, memories_table, user_id=request.user_id
         )
@@ -992,6 +1029,21 @@ async def chat(
             },
         )
 
+        # Token ledger (separated from message text) — Infrastructure
+        try:
+            from backend.modules.chat_services import account_and_ledger_tokens
+
+            account_and_ledger_tokens(
+                user_message=request.user_message,
+                assistant_message=assistant_message or "",
+                model=selected_model,
+                conversation_id=request.conversation_id,
+                user_id=request.user_id,
+                usage_from_api=merged_usage,
+            )
+        except Exception as e:
+            logger.warning("token ledger skipped: %s", e)
+
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
         await memory_system.save_memory(
             request.conversation_id,
@@ -1020,11 +1072,57 @@ async def chat(
             except Exception:
                 speech_text = assistant_message
 
+        # Optional reflection field (unified schema). Background reflection is async.
+        # Never imply completion with an empty object alone — expose reflection_status.
+        reflection_out = None
+        reflection_status = None
+        if include_reflection:
+            reflection_status = "pending"
+            # Bounded optional wait (default 0 = immediate pending)
+            try:
+                wait_ms = int(os.getenv("REFLECTION_INCLUDE_WAIT_MS", "0"))
+            except ValueError:
+                wait_ms = 0
+            if wait_ms > 0:
+                import asyncio as _asyncio
+
+                deadline = min(wait_ms, int(os.getenv("REFLECTION_INCLUDE_WAIT_MAX_MS", "1500"))) / 1000.0
+                try:
+                    storage = get_reflection_storage()
+                    if storage and hasattr(storage, "get_latest_reflection"):
+                        end = _asyncio.get_event_loop().time() + deadline
+                        while _asyncio.get_event_loop().time() < end:
+                            latest = await storage.get_latest_reflection(
+                                conversation_id=request.conversation_id,
+                                user_id=getattr(request, "user_id", None),
+                            )
+                            if latest:
+                                from backend.modules.reflection_contract import normalize_reflection
+
+                                reflection_out = normalize_reflection(latest)
+                                reflection_status = "completed"
+                                break
+                            await _asyncio.sleep(0.05)
+                except Exception:
+                    reflection_status = "failed"
+            if reflection_status == "pending":
+                # Do not return empty contract as if completed
+                reflection_out = None
+            if os.getenv("REFLECTION_INCLUDE_STATUS", "true").lower() in (
+                "0",
+                "false",
+                "no",
+                "off",
+            ):
+                # legacy: may still omit status field when flag off
+                reflection_status = reflection_status
+
         return ChatResponse(
             assistant_message=assistant_message,
             emotion_analysis=emotion_analysis,
             conversation_id=request.conversation_id,
-            reflection=None,
+            reflection=reflection_out,
+            reflection_status=reflection_status,
             speech_text=speech_text,
             usage=usage_payload,
             usage_summary=usage_payload.get("daily"),

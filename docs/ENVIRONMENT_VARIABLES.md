@@ -47,6 +47,22 @@
 | `KERNEL_TOOL_ALLOWLIST` | 逗號分隔工具白名單（空=不限制） | 空 |
 | `KERNEL_TOOL_BLOCKLIST` | 額外封鎖工具名 | 空 |
 | `KERNEL_VOICE_TOOL_RESTRICT` | 語音/車載僅 voice-safe 工具 | `true` |
+| `MEMORY_V2_ENABLED` | 啟用 Memory System V2（Strangler；仍寫入 V1 conversation） | `false` |
+| `MEMORY_GRAPH_FILE` | V2 記憶圖譜 JSON 路徑 | `data/memory_graph.json` |
+| `IDENTITY_STORE_DIR` | Identity Engine 版本庫目錄 | `data/identity` |
+| `IDENTITY_UPDATE_MODE` | `candidate`（未達門檻或 staging 預設）/ `formal` | `candidate` |
+| `IDENTITY_CONFIDENCE_THRESHOLD` | 正式 Identity 更新最低 confidence | `0.6` |
+| `TOKEN_LEDGER_PATH` | Token 會計 JSONL（與訊息正文分離） | `data/token_ledger.jsonl` |
+| `TOKEN_LEDGER_ENABLED` | 是否寫入 token ledger | `true` |
+| `EMBEDDING_MODEL` | Typed memory / retrieval 共用 embedding 模型 | `text-embedding-3-small` |
+| `NIGHT_GROWTH_ENABLED` | 允許 scheduler job 真正執行（預設關；勿多 replica 自動 start） | `false` |
+| `NIGHT_GROWTH_INTERNAL_TOKEN` | `POST /internal/night-growth/run` 內部 token | 空則回退 `API_SECRET` |
+| `NIGHT_GROWTH_ENDPOINT_ENABLED` | 是否開放內部 Night Growth endpoint | `true` |
+| `NIGHT_GROWTH_STORE_DIR` | Night Growth 執行紀錄／lock 目錄 | `data/night_growth` |
+| `REFLECTION_INCLUDE_STATUS` | `include_reflection=true` 時回傳 `reflection_status` | `true` |
+| `REFLECTION_INCLUDE_WAIT_MS` | 可選 bounded wait（毫秒）；0=立即 pending | `0` |
+| `REFLECTION_INCLUDE_WAIT_MAX_MS` | wait 上限 | `1500` |
+| `APP_ENV` | 環境標記（staging/production） | 空 |
 
 ## 前端（Vite）
 

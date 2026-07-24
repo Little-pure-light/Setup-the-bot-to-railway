@@ -128,16 +128,33 @@ class MemorySystem:
         bot_response: str,
         reflection: Optional[Dict[str, Any]] = None,
     ):
-        """寫入 Redis 短期記憶（失敗不影響主流程）"""
+        """寫入 Redis 短期記憶（失敗不影響主流程）— 標準 key: conv:{id}:latest"""
         if not self.redis:
             return
         try:
+            from datetime import timezone as _tz
+
+            try:
+                from backend.modules.reflection_contract import normalize_reflection
+
+                refl = normalize_reflection(reflection) if reflection is not None else None
+            except Exception:
+                refl = reflection
+
+            now = datetime.now(_tz.utc).isoformat()
             payload = {
+                "messages": [
+                    {"role": "user", "content": user_input or ""},
+                    {"role": "assistant", "content": bot_response or ""},
+                ],
+                "summary": (bot_response or user_input or "")[:200],
+                "reflection": refl,
+                "updated_at": now,
+                "user_id": user_id,
+                # legacy mirrors retained for older readers
                 "user_msg": user_input,
                 "assistant_msg": bot_response,
-                "reflection": reflection,
-                "user_id": user_id,
-                "timestamp": int(datetime.utcnow().timestamp()),
+                "timestamp": now,
             }
             self.redis.store_short_term(conversation_id, payload)
         except Exception as e:

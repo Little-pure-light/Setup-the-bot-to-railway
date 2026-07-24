@@ -58,25 +58,50 @@ class ReflectionStorage:
         """
         reflection_id = str(uuid.uuid4())
         timestamp = datetime.utcnow().isoformat()
-        
+
+        # Unified contract (Infrastructure Phase)
+        try:
+            from backend.modules.reflection_contract import normalize_reflection
+
+            contract = normalize_reflection(reflection_data, timestamp=timestamp)
+        except Exception:
+            contract = {
+                "summary": (reflection_data or {}).get("summary", "") if isinstance(reflection_data, dict) else "",
+                "causes": (reflection_data or {}).get("causes", []) if isinstance(reflection_data, dict) else [],
+                "lessons": (reflection_data or {}).get("lessons")
+                or (reflection_data or {}).get("improvements", [])
+                if isinstance(reflection_data, dict)
+                else [],
+                "confidence": float((reflection_data or {}).get("confidence", 0.0) or 0.0)
+                if isinstance(reflection_data, dict)
+                else 0.0,
+                "timestamp": timestamp,
+            }
+
         storage_record = {
             "id": reflection_id,
             "conversation_id": conversation_id,
             "user_id": user_id,
             "related_message_id": related_message_id,
-            "reflection_content": reflection_data.get("summary", ""),
+            # contract fields (canonical)
+            "reflection": contract,
+            "reflection_content": contract.get("summary", ""),
             "analysis_tags": {
-                "dominant_causes": reflection_data.get("causes", [])[:3],
-                "top_improvements": reflection_data.get("improvements", [])[:3],
+                "dominant_causes": (contract.get("causes") or [])[:3],
+                "top_improvements": (contract.get("lessons") or [])[:3],
                 "meta_analysis": reflection_data.get("meta_analysis", {})
+                if isinstance(reflection_data, dict)
+                else {},
             },
             "reflection_level": {
-                "observation": reflection_data.get("observation", {}),
-                "causes": reflection_data.get("causes", []),
-                "improvements": reflection_data.get("improvements", [])
+                "observation": reflection_data.get("observation", {})
+                if isinstance(reflection_data, dict)
+                else {},
+                "causes": contract.get("causes") or [],
+                "improvements": contract.get("lessons") or [],
             },
-            "confidence_score": reflection_data.get("confidence", 0.0),
-            "created_at": timestamp
+            "confidence_score": contract.get("confidence", 0.0),
+            "created_at": timestamp,
         }
         
         results = {
@@ -113,11 +138,23 @@ class ReflectionStorage:
             
             existing = self.redis.redis.lrange(redis_key, 0, -1) if hasattr(self.redis.redis, 'lrange') else []
             
+            # Prefer unified contract if present
+            contract = record.get("reflection") if isinstance(record.get("reflection"), dict) else {}
             simplified_record = {
                 "id": record["id"],
-                "summary": record["reflection_content"],
-                "confidence": record["confidence_score"],
-                "timestamp": record["created_at"]
+                "summary": contract.get("summary") or record.get("reflection_content") or "",
+                "causes": contract.get("causes") or [],
+                "lessons": contract.get("lessons") or [],
+                "confidence": contract.get("confidence")
+                if contract.get("confidence") is not None
+                else record.get("confidence_score", 0.0),
+                "timestamp": contract.get("timestamp") or record.get("created_at") or "",
+                # legacy aliases
+                "reflection_content": contract.get("summary") or record.get("reflection_content") or "",
+                "confidence_score": contract.get("confidence")
+                if contract.get("confidence") is not None
+                else record.get("confidence_score", 0.0),
+
             }
             
             self.redis.redis.lpush(redis_key, json.dumps(simplified_record, ensure_ascii=False))
