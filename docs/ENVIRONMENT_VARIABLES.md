@@ -26,6 +26,7 @@
 | `REDIS_SOCKET_TIMEOUT_SECONDS` | 讀寫逾時 | `2.0` |
 | `MEMORY_REDIS_TTL_SECONDS` | `conv:*:latest` TTL | `86400` |
 | `REQUEST_TIMING_ENABLED` | 聊天階段耗時 log | `true` |
+| `REDIS_RECONNECT_COOLDOWN_SECONDS` | mock 後限頻重連（/ready），避免每請求重連 | `45` |
 | `DAILY_TOKEN_BUDGET_USD` | 全域日預算 | `10.0` |
 | `USER_DAILY_TOKEN_BUDGET_USD` | 使用者日預算 | `2.0` |
 | `TOKEN_USAGE_LOG` | 用量 JSONL 路徑 | `data/token_usage.jsonl` |
