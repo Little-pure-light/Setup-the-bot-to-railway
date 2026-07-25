@@ -28,6 +28,14 @@ _shared_interface: Optional["RedisInterface"] = None
 _redis_mode: str = "none"  # real | mock | none
 _last_error_type: Optional[str] = None
 _last_error_msg: str = ""
+_last_reconnect_attempt: float = 0.0
+
+
+def _reconnect_cooldown_seconds() -> float:
+    try:
+        return max(5.0, float(os.getenv("REDIS_RECONNECT_COOLDOWN_SECONDS", "45")))
+    except (TypeError, ValueError):
+        return 45.0
 
 
 def get_redis_mode() -> str:
@@ -245,12 +253,8 @@ def get_shared_redis_interface(*, force_refresh: bool = False) -> "RedisInterfac
         return iface
 
 
-def redis_ping_status() -> Dict[str, Any]:
-    """
-    For /ready — short ping with classification.
-    Returns status: not_configured | ping_ok | ping_fail | mock
-    """
-    has_config = bool(
+def _has_redis_config() -> bool:
+    return bool(
         (os.getenv("REDIS_URL") or "").strip()
         or (os.getenv("REDIS_HOST") or "").strip()
         or (
@@ -258,7 +262,60 @@ def redis_ping_status() -> Dict[str, Any]:
             and (os.getenv("REDIS_TOKEN") or "").strip()
         )
     )
+
+
+def maybe_reconnect_redis(*, force: bool = False) -> "RedisInterface":
+    """
+    If started in mock because real connect failed (or config now present),
+    attempt force_refresh at most once per REDIS_RECONNECT_COOLDOWN_SECONDS.
+    Not called on every chat — intended for /ready (and explicit health).
+    """
+    global _last_reconnect_attempt, _shared_interface, _redis_mode
     iface = get_shared_redis_interface()
+    if iface.mode == "real":
+        return iface
+    if not _has_redis_config():
+        return iface
+    # only reconnect when we have config but are mock/none
+    if iface.mode not in ("mock", "none"):
+        return iface
+    now = time.time()
+    with _lock:
+        cooldown = _reconnect_cooldown_seconds()
+        if not force and (now - _last_reconnect_attempt) < cooldown:
+            return iface
+        _last_reconnect_attempt = now
+    logger.info(
+        "redis_reconnect_attempt previous_mode=%s cooldown_s=%s force=%s",
+        iface.mode,
+        _reconnect_cooldown_seconds(),
+        force,
+    )
+    new_iface = get_shared_redis_interface(force_refresh=True)
+    if new_iface.mode == "real":
+        logger.info("redis_reconnect_success mode=real")
+        print("✅ Redis reconnected mode=real")
+    else:
+        logger.info(
+            "redis_reconnect_still_mock mode=%s err=%s",
+            new_iface.mode,
+            get_redis_last_error().get("error_type"),
+        )
+    return new_iface
+
+
+def redis_ping_status() -> Dict[str, Any]:
+    """
+    For /ready — short ping with classification.
+    Returns status: not_configured | ping_ok | ping_fail | mock
+    May attempt rate-limited reconnect when mock+configured.
+    """
+    has_config = _has_redis_config()
+    # Rate-limited reconnect when degraded to mock but config exists
+    if has_config:
+        iface = maybe_reconnect_redis(force=False)
+    else:
+        iface = get_shared_redis_interface()
     mode = iface.mode
     if mode == "mock":
         if not has_config:
@@ -273,6 +330,7 @@ def redis_ping_status() -> Dict[str, Any]:
             "mode": "mock",
             "configured": True,
             "error_type": get_redis_last_error().get("error_type") or "connect_failed",
+            "reconnect_cooldown_s": _reconnect_cooldown_seconds(),
         }
     if mode == "none":
         return {

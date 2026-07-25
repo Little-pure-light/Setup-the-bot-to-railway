@@ -54,11 +54,43 @@ class RequestTimer:
             )
 
     def mark_first_token(self):
+        """Record TTFB once — only for first displayable assistant text."""
         if self.first_token_ms is None:
             self.first_token_ms = int((time.perf_counter() - self._t0) * 1000)
+            return True
+        return False
+
+    def note_displayable_text(self, text: Optional[str], *, tool_prefix: str = "", meta_prefix: str = "") -> bool:
+        """
+        If text is first displayable answer content, mark first token.
+        Tool status / empty / usage metadata do not count.
+        Returns True if this call set first_token_ms.
+        """
+        if self.first_token_ms is not None:
+            return False
+        if text is None:
+            return False
+        s = str(text)
+        if not s.strip():
+            return False
+        if tool_prefix and s.startswith(tool_prefix):
+            return False
+        if meta_prefix and s.startswith(meta_prefix):
+            return False
+        # pure JSON tool event lines sometimes without going through prefix helper
+        if s.lstrip().startswith("{") and '"type"' in s and "tool" in s.lower():
+            return False
+        return bool(self.mark_first_token())
 
     def mark_complete(self):
         self.complete_ms = int((time.perf_counter() - self._t0) * 1000)
+
+    def record_stage(self, name: str, ms: int, *, error_type: str = ""):
+        if not timing_enabled():
+            return
+        self.stages.append(
+            {"stage": name, "ms": int(ms), "error_type": error_type or ""}
+        )
 
     def total_ms(self) -> int:
         return int((time.perf_counter() - self._t0) * 1000)
