@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from backend.supabase_handler import get_supabase
-from backend.redis_interface import RedisInterface
+from backend.redis_interface import get_shared_redis_interface
 from backend.modules.ipfs_handler import get_ipfs_handler
 import logging
 import json
@@ -13,7 +13,7 @@ router = APIRouter()
 logger = logging.getLogger("archive_conversation")
 
 supabase = get_supabase()
-redis_interface = RedisInterface()
+redis_interface = get_shared_redis_interface()
 ipfs_handler = get_ipfs_handler()
 
 class ArchiveRequest(BaseModel):

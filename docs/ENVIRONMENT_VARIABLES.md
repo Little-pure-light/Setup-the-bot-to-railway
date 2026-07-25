@@ -19,7 +19,14 @@
 | `AI_ID` | 預設 AI 實例 | `xiaochenguang_v1` |
 | `SUPABASE_MEMORIES_TABLE` | 記憶表名 | `xiaochenguang_memories` |
 | `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` | OpenAI 組織 | 空 |
-| `REDIS_URL` / `REDIS_HOST` | Redis | 無則 mock/略過 |
+| `REDIS_URL` | Redis 連線（Railway 私有網路優先；`redis://` **不會**再被強制改成 `rediss://`） | 無 → mock |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_TOKEN` / `REDIS_ENDPOINT` | 替代連線方式 | 見 `redis_interface.py` |
+| `REDIS_SSL` | 強制 TLS true/false | 空＝依 URL scheme；host+token 預設 true |
+| `REDIS_CONNECT_TIMEOUT_SECONDS` | 連線逾時 | `2.0` |
+| `REDIS_SOCKET_TIMEOUT_SECONDS` | 讀寫逾時 | `2.0` |
+| `MEMORY_REDIS_TTL_SECONDS` | `conv:*:latest` TTL | `86400` |
+| `REQUEST_TIMING_ENABLED` | 聊天階段耗時 log | `true` |
+| `REDIS_RECONNECT_COOLDOWN_SECONDS` | mock 後限頻重連（/ready），避免每請求重連 | `45` |
 | `DAILY_TOKEN_BUDGET_USD` | 全域日預算 | `10.0` |
 | `USER_DAILY_TOKEN_BUDGET_USD` | 使用者日預算 | `2.0` |
 | `TOKEN_USAGE_LOG` | 用量 JSONL 路徑 | `data/token_usage.jsonl` |

@@ -14,7 +14,7 @@ supabase = get_supabase()
 from backend.openai_handler import get_openai_client, generate_response, generate_response_stream, generate_response_with_tools
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
-from backend.redis_interface import RedisInterface
+from backend.redis_interface import get_shared_redis_interface
 from backend.core_controller import get_core_controller
 from backend.tools import get_tool_registry, get_openai_tool_definitions
 from backend.token_tracker import get_token_tracker, estimate_cost_usd
@@ -22,7 +22,7 @@ from backend.moderation import moderate_text, format_block_message
 
 router = APIRouter()
 logger = logging.getLogger("chat_router")
-redis_interface = RedisInterface()
+redis_interface = get_shared_redis_interface()
 
 
 def _build_memory_system(openai_client, memories_table: str):
@@ -62,7 +62,7 @@ def get_reflection_storage():
             from backend.modules.pinecone_handler import PineconeHandler
 
             _reflection_storage = ReflectionStorage(
-                redis_interface=RedisInterface(),
+                redis_interface=get_shared_redis_interface(),
                 supabase_client=supabase,
                 pinecone_handler=PineconeHandler()
             )
@@ -499,6 +499,18 @@ async def chat(
     try:
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
 
+        # Phase-2 observability: stage timing (no answer logic change)
+        try:
+            from backend.request_timing import RequestTimer
+            from backend.logging_utils import get_request_id
+
+            _req_timer = RequestTimer(
+                request_id=get_request_id() or "",
+                conversation_id=request.conversation_id or "",
+            )
+        except Exception:
+            _req_timer = None
+
         # --- AI Kernel (Strangler)：flag 開啟時走新核心，失敗可回退 Legacy ---
         kernel_response = await _try_kernel_chat(
             request, background_tasks, stream=stream, use_tools=use_tools
@@ -575,38 +587,61 @@ async def chat(
         )
 
         # 1. 執行所有「讀取」任務（必須在串流前完成）
-        recalled_memories = await memory_system.recall_memories(
-            request.user_message,
-            request.conversation_id,
-            user_id=request.user_id
-        )
-        conversation_history = memory_system.get_conversation_history(
-            request.conversation_id,
-            limit=5
-        )
+        if _req_timer:
+            with _req_timer.stage("memory_recall"):
+                recalled_memories = await memory_system.recall_memories(
+                    request.user_message,
+                    request.conversation_id,
+                    user_id=request.user_id,
+                )
+            with _req_timer.stage("supabase_history"):
+                conversation_history = memory_system.get_conversation_history(
+                    request.conversation_id,
+                    limit=5,
+                )
+        else:
+            recalled_memories = await memory_system.recall_memories(
+                request.user_message,
+                request.conversation_id,
+                user_id=request.user_id,
+            )
+            conversation_history = memory_system.get_conversation_history(
+                request.conversation_id,
+                limit=5,
+            )
 
         # Retrieve file / vision content from Redis
         file_content = ""
         try:
-            if redis_interface.redis:
-                keys = redis_interface.redis.keys(f"upload:{request.conversation_id}:*")
-                if keys:
-                    latest_key = keys[-1]
-                    file_data_json = redis_interface.redis.get(latest_key)
-                    if file_data_json:
-                        file_data = json.loads(file_data_json)
-                        file_content = (
-                            file_data.get("vision_analysis")
-                            or file_data.get("content")
-                            or ""
-                        )
-                        if file_data.get("is_image"):
-                            fname = file_data.get("file_name") or "image"
+            def _load_upload():
+                nonlocal file_content
+                if redis_interface.redis:
+                    keys = redis_interface.scan_keys(
+                        f"upload:{request.conversation_id}:*"
+                    )
+                    if keys:
+                        latest_key = sorted(keys)[-1]
+                        file_data_json = redis_interface.redis.get(latest_key)
+                        if file_data_json:
+                            file_data = json.loads(file_data_json)
                             file_content = (
-                                f"【使用者上傳圖片：{fname}】\n"
-                                f"視覺分析：\n{file_content}"
+                                file_data.get("vision_analysis")
+                                or file_data.get("content")
+                                or ""
                             )
-                        logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+                            if file_data.get("is_image"):
+                                fname = file_data.get("file_name") or "image"
+                                file_content = (
+                                    f"【使用者上傳圖片：{fname}】\n"
+                                    f"視覺分析：\n{file_content}"
+                                )
+                            logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+
+            if _req_timer:
+                with _req_timer.stage("redis_upload_read"):
+                    _load_upload()
+            else:
+                _load_upload()
         except Exception as e:
             logger.warning(f"⚠️ 從 Redis 檢索檔案內容失敗: {e}")
 
@@ -699,13 +734,28 @@ async def chat(
                                     tools=[],
                                 ) + "\n"
 
-                                tool_response = await generate_response_with_tools(
-                                    messages,
-                                    tools=tool_defs,
-                                    model=selected_model,
-                                    temperature=selected_temperature,
-                                    max_tokens=1000,
-                                )
+                                import time as _time_mod
+
+                                _t_tool = _time_mod.perf_counter()
+                                _tool_err = ""
+                                try:
+                                    tool_response = await generate_response_with_tools(
+                                        messages,
+                                        tools=tool_defs,
+                                        model=selected_model,
+                                        temperature=selected_temperature,
+                                        max_tokens=1000,
+                                    )
+                                except Exception as _te:
+                                    _tool_err = type(_te).__name__
+                                    raise
+                                finally:
+                                    if _req_timer:
+                                        _req_timer.record_stage(
+                                            "llm_tool_call",
+                                            int((_time_mod.perf_counter() - _t_tool) * 1000),
+                                            error_type=_tool_err,
+                                        )
                                 tool_usage = tool_response.get("usage")
 
                                 if (
@@ -813,23 +863,51 @@ async def chat(
                             final_messages = messages
 
                     # 真實 OpenAI stream=True：逐 token 推給前端
-                    async for event in generate_response_stream(
-                        final_messages,
-                        model=selected_model,
-                        temperature=selected_temperature,
-                        max_tokens=stream_max_tokens,
-                    ):
-                        if not isinstance(event, dict):
-                            # 相容舊字串
-                            full_response += str(event)
-                            yield str(event)
-                            continue
-                        if event.get("type") == "content":
-                            text = event.get("text") or ""
-                            full_response += text
-                            yield text
-                        elif event.get("type") == "usage":
-                            stream_usage = event.get("usage")
+                    import time as _time_mod
+
+                    _t_stream = _time_mod.perf_counter()
+                    _stream_err = ""
+                    try:
+                        async for event in generate_response_stream(
+                            final_messages,
+                            model=selected_model,
+                            temperature=selected_temperature,
+                            max_tokens=stream_max_tokens,
+                        ):
+                            if not isinstance(event, dict):
+                                # 相容舊字串
+                                text = str(event)
+                                full_response += text
+                                if _req_timer:
+                                    _req_timer.note_displayable_text(
+                                        text,
+                                        tool_prefix=TOOL_EVENT_PREFIX,
+                                        meta_prefix=USAGE_META_PREFIX,
+                                    )
+                                yield text
+                                continue
+                            if event.get("type") == "content":
+                                text = event.get("text") or ""
+                                full_response += text
+                                if _req_timer and text.strip():
+                                    _req_timer.note_displayable_text(
+                                        text,
+                                        tool_prefix=TOOL_EVENT_PREFIX,
+                                        meta_prefix=USAGE_META_PREFIX,
+                                    )
+                                yield text
+                            elif event.get("type") == "usage":
+                                stream_usage = event.get("usage")
+                    except Exception as _se:
+                        _stream_err = type(_se).__name__
+                        raise
+                    finally:
+                        if _req_timer:
+                            _req_timer.record_stage(
+                                "llm_stream",
+                                int((_time_mod.perf_counter() - _t_stream) * 1000),
+                                error_type=_stream_err,
+                            )
                 except Exception as e:
                     err = f"[ERROR] Streaming 失敗: {e}"
                     logger.error(err, exc_info=True)
@@ -899,6 +977,9 @@ async def chat(
                     logger.info(
                         f"✅ Streaming 完成，已排程背景任務（長度: {len(full_response)} 字）"
                     )
+                    if _req_timer:
+                        _req_timer.mark_complete()
+                        _req_timer.log_summary()
 
             return StreamingResponse(
                 stream_generator(),
@@ -916,6 +997,7 @@ async def chat(
         assistant_message = None
         collected_usages = []
         tools_used = []
+        import time as _time_mod
 
         try:
             registry = get_tool_registry()
@@ -924,13 +1006,26 @@ async def chat(
                 raise ValueError("tools_disabled")
 
             # 第一輪：讓 AI 決定要不要用工具
-            tool_response = await generate_response_with_tools(
-                messages,
-                tools=tool_defs,
-                model=selected_model,
-                temperature=selected_temperature,
-                max_tokens=1000
-            )
+            _t_tool = _time_mod.perf_counter()
+            _tool_err = ""
+            try:
+                tool_response = await generate_response_with_tools(
+                    messages,
+                    tools=tool_defs,
+                    model=selected_model,
+                    temperature=selected_temperature,
+                    max_tokens=1000
+                )
+            except Exception as _te:
+                _tool_err = type(_te).__name__
+                raise
+            finally:
+                if _req_timer:
+                    _req_timer.record_stage(
+                        "llm_tool_call",
+                        int((_time_mod.perf_counter() - _t_tool) * 1000),
+                        error_type=_tool_err,
+                    )
             if tool_response.get("usage"):
                 collected_usages.append(tool_response["usage"])
 
@@ -976,6 +1071,47 @@ async def chat(
                     )
 
                 # 第二輪：讓 AI 根據工具結果生成最終回答
+                _t_ns = _time_mod.perf_counter()
+                _ns_err = ""
+                try:
+                    final_result = await generate_response(
+                        openai_client,
+                        messages,
+                        model=selected_model,
+                        max_tokens=voice_max_tokens if request.voice_mode or request.car_mode else 1000,
+                        temperature=selected_temperature,
+                        return_usage=True,
+                    )
+                except Exception as _ne:
+                    _ns_err = type(_ne).__name__
+                    raise
+                finally:
+                    if _req_timer:
+                        _req_timer.record_stage(
+                            "llm_non_stream",
+                            int((_time_mod.perf_counter() - _t_ns) * 1000),
+                            error_type=_ns_err,
+                        )
+                assistant_message = final_result["content"]
+                collected_usages.append(final_result.get("usage"))
+            else:
+                # AI 不需要工具，直接用第一輪的回答（計入 tool round 已記錄）
+                assistant_message = tool_response["content"]
+                if not assistant_message:
+                    raise ValueError("empty_first_response")
+            if _req_timer and assistant_message:
+                _req_timer.note_displayable_text(
+                    assistant_message,
+                    tool_prefix=TOOL_EVENT_PREFIX,
+                    meta_prefix=USAGE_META_PREFIX,
+                )
+
+        except Exception as tool_err:
+            # 任何工具流程失敗，降級為不帶工具的普通呼叫
+            logger.warning(f"⚠️ Tool calling 流程失敗（{tool_err}），降級為普通 generate_response")
+            _t_ns = _time_mod.perf_counter()
+            _ns_err = ""
+            try:
                 final_result = await generate_response(
                     openai_client,
                     messages,
@@ -984,27 +1120,24 @@ async def chat(
                     temperature=selected_temperature,
                     return_usage=True,
                 )
-                assistant_message = final_result["content"]
-                collected_usages.append(final_result.get("usage"))
-            else:
-                # AI 不需要工具，直接用第一輪的回答
-                assistant_message = tool_response["content"]
-                if not assistant_message:
-                    raise ValueError("empty_first_response")
-
-        except Exception as tool_err:
-            # 任何工具流程失敗，降級為不帶工具的普通呼叫
-            logger.warning(f"⚠️ Tool calling 流程失敗（{tool_err}），降級為普通 generate_response")
-            final_result = await generate_response(
-                openai_client,
-                messages,
-                model=selected_model,
-                max_tokens=voice_max_tokens if request.voice_mode or request.car_mode else 1000,
-                temperature=selected_temperature,
-                return_usage=True,
-            )
+            except Exception as _ne:
+                _ns_err = type(_ne).__name__
+                raise
+            finally:
+                if _req_timer:
+                    _req_timer.record_stage(
+                        "llm_non_stream",
+                        int((_time_mod.perf_counter() - _t_ns) * 1000),
+                        error_type=_ns_err,
+                    )
             assistant_message = final_result["content"]
             collected_usages.append(final_result.get("usage"))
+            if _req_timer and assistant_message:
+                _req_timer.note_displayable_text(
+                    assistant_message,
+                    tool_prefix=TOOL_EVENT_PREFIX,
+                    meta_prefix=USAGE_META_PREFIX,
+                )
 
         # 輸出端審核（可選，預設開啟）
         if os.getenv("MODERATION_CHECK_OUTPUT", "true").lower() not in ("0", "false", "no"):
@@ -1045,14 +1178,27 @@ async def chat(
             logger.warning("token ledger skipped: %s", e)
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
-        await memory_system.save_memory(
-            request.conversation_id,
-            request.user_message,
-            assistant_message,
-            emotion_analysis,
-            ai_id=request.ai_id,
-            user_id=request.user_id,
-        )
+        if _req_timer:
+            with _req_timer.stage("memory_save"):
+                await memory_system.save_memory(
+                    request.conversation_id,
+                    request.user_message,
+                    assistant_message,
+                    emotion_analysis,
+                    ai_id=request.ai_id,
+                    user_id=request.user_id,
+                )
+            _req_timer.mark_complete()
+            _req_timer.log_summary()
+        else:
+            await memory_system.save_memory(
+                request.conversation_id,
+                request.user_message,
+                assistant_message,
+                emotion_analysis,
+                ai_id=request.ai_id,
+                user_id=request.user_id,
+            )
 
         background_tasks.add_task(
             run_post_chat_tasks,

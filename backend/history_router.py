@@ -17,12 +17,12 @@ from pydantic import BaseModel, Field
 
 from backend.supabase_handler import get_supabase
 from backend.openai_handler import get_openai_client
-from backend.redis_interface import RedisInterface
+from backend.redis_interface import get_shared_redis_interface
 
 router = APIRouter()
 logger = logging.getLogger("history_router")
 
-redis_interface = RedisInterface()
+redis_interface = get_shared_redis_interface()
 
 
 def _memories_table() -> str:
@@ -476,7 +476,7 @@ async def delete_conversation(
             if redis_interface.redis:
                 # 清除短期對話與上傳暫存
                 redis_interface.clear_conversation(conversation_id)
-                keys = redis_interface.redis.keys(f"upload:{conversation_id}:*")
+                keys = redis_interface.scan_keys(f"upload:{conversation_id}:*")
                 if keys:
                     redis_interface.redis.delete(*keys)
                 redis_cleared = True
