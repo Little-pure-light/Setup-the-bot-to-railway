@@ -386,6 +386,17 @@ python scripts/check_memory_graph_integrity.py
 已在現網 Backend 以 flag 開啟並通過 Staging 級對話與 Night Growth 驗證。  
 下階段應聚焦 **基礎設施韌性（Redis／持久化）** 與 **認知深度（非僅規則）**，而非再堆未驗證的模組數量。
 
----
+## 下一步（唯一）
 
-*文件維護：重大部署或 flag 策略變更時更新本檔日期、commit、§9 摘要與第 6／9／15 節。*
+目前禁止新增新功能。
+
+下一階段：
+
+Memory Quality Improvement
+
+目標：
+
+- 提升記憶品質
+- 提升 Retrieval
+- 提升 Reflection
+- 提升 Identity
