@@ -1,7 +1,7 @@
 from fastapi import APIRouter, UploadFile, File, HTTPException, Form
 from backend.supabase_handler import get_supabase
 from backend.openai_handler import get_openai_client
-from backend.redis_interface import RedisInterface
+from backend.redis_interface import get_shared_redis_interface
 from backend.vision import (
     analyze_image,
     VisionSafetyError,
@@ -19,7 +19,7 @@ supabase = get_supabase()
 router = APIRouter()
 logger = logging.getLogger("file_upload")
 
-redis_interface = RedisInterface()
+redis_interface = get_shared_redis_interface()
 
 SUPPORTED_EXTENSIONS = {
     'text': ['.txt', '.md', '.json'],

@@ -4,7 +4,10 @@ Last updated: 2026-07-25
 
 ## Current stage
 
-**Memory V2 Quality Improvement v1.0** (complete, pending deploy of quality commit)
+**Agent 工程執行與驗收通用規範 v1.0 已落地**（2026-07-25）  
+→ `docs/AGENT_EXECUTION_AND_ACCEPTANCE_STANDARD_v1.0.md` + `AGENTS.md` 最高效力引用  
+
+**Memory V2 Quality Improvement v1.0** 已 push（`8eee450`；redeploy 後確認 `/health` commit）
 
 Prior stages landed on `main`:
 

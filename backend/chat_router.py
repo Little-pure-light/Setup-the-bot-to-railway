@@ -14,7 +14,7 @@ supabase = get_supabase()
 from backend.openai_handler import get_openai_client, generate_response, generate_response_stream, generate_response_with_tools
 from backend.prompt_engine import PromptEngine
 from modules.memory_system import MemorySystem
-from backend.redis_interface import RedisInterface
+from backend.redis_interface import get_shared_redis_interface
 from backend.core_controller import get_core_controller
 from backend.tools import get_tool_registry, get_openai_tool_definitions
 from backend.token_tracker import get_token_tracker, estimate_cost_usd
@@ -22,7 +22,7 @@ from backend.moderation import moderate_text, format_block_message
 
 router = APIRouter()
 logger = logging.getLogger("chat_router")
-redis_interface = RedisInterface()
+redis_interface = get_shared_redis_interface()
 
 
 def _build_memory_system(openai_client, memories_table: str):
@@ -62,7 +62,7 @@ def get_reflection_storage():
             from backend.modules.pinecone_handler import PineconeHandler
 
             _reflection_storage = ReflectionStorage(
-                redis_interface=RedisInterface(),
+                redis_interface=get_shared_redis_interface(),
                 supabase_client=supabase,
                 pinecone_handler=PineconeHandler()
             )
@@ -499,6 +499,18 @@ async def chat(
     try:
         logger.info(f"🟢 接收到聊天請求，conversation_id: {request.conversation_id}, stream={stream}")
 
+        # Phase-2 observability: stage timing (no answer logic change)
+        try:
+            from backend.request_timing import RequestTimer
+            from backend.logging_utils import get_request_id
+
+            _req_timer = RequestTimer(
+                request_id=get_request_id() or "",
+                conversation_id=request.conversation_id or "",
+            )
+        except Exception:
+            _req_timer = None
+
         # --- AI Kernel (Strangler)：flag 開啟時走新核心，失敗可回退 Legacy ---
         kernel_response = await _try_kernel_chat(
             request, background_tasks, stream=stream, use_tools=use_tools
@@ -575,38 +587,61 @@ async def chat(
         )
 
         # 1. 執行所有「讀取」任務（必須在串流前完成）
-        recalled_memories = await memory_system.recall_memories(
-            request.user_message,
-            request.conversation_id,
-            user_id=request.user_id
-        )
-        conversation_history = memory_system.get_conversation_history(
-            request.conversation_id,
-            limit=5
-        )
+        if _req_timer:
+            with _req_timer.stage("memory_recall"):
+                recalled_memories = await memory_system.recall_memories(
+                    request.user_message,
+                    request.conversation_id,
+                    user_id=request.user_id,
+                )
+            with _req_timer.stage("supabase_history"):
+                conversation_history = memory_system.get_conversation_history(
+                    request.conversation_id,
+                    limit=5,
+                )
+        else:
+            recalled_memories = await memory_system.recall_memories(
+                request.user_message,
+                request.conversation_id,
+                user_id=request.user_id,
+            )
+            conversation_history = memory_system.get_conversation_history(
+                request.conversation_id,
+                limit=5,
+            )
 
         # Retrieve file / vision content from Redis
         file_content = ""
         try:
-            if redis_interface.redis:
-                keys = redis_interface.redis.keys(f"upload:{request.conversation_id}:*")
-                if keys:
-                    latest_key = keys[-1]
-                    file_data_json = redis_interface.redis.get(latest_key)
-                    if file_data_json:
-                        file_data = json.loads(file_data_json)
-                        file_content = (
-                            file_data.get("vision_analysis")
-                            or file_data.get("content")
-                            or ""
-                        )
-                        if file_data.get("is_image"):
-                            fname = file_data.get("file_name") or "image"
+            def _load_upload():
+                nonlocal file_content
+                if redis_interface.redis:
+                    keys = redis_interface.scan_keys(
+                        f"upload:{request.conversation_id}:*"
+                    )
+                    if keys:
+                        latest_key = sorted(keys)[-1]
+                        file_data_json = redis_interface.redis.get(latest_key)
+                        if file_data_json:
+                            file_data = json.loads(file_data_json)
                             file_content = (
-                                f"【使用者上傳圖片：{fname}】\n"
-                                f"視覺分析：\n{file_content}"
+                                file_data.get("vision_analysis")
+                                or file_data.get("content")
+                                or ""
                             )
-                        logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+                            if file_data.get("is_image"):
+                                fname = file_data.get("file_name") or "image"
+                                file_content = (
+                                    f"【使用者上傳圖片：{fname}】\n"
+                                    f"視覺分析：\n{file_content}"
+                                )
+                            logger.info(f"📄 成功從 Redis 檢索檔案內容: {latest_key}")
+
+            if _req_timer:
+                with _req_timer.stage("redis_upload_read"):
+                    _load_upload()
+            else:
+                _load_upload()
         except Exception as e:
             logger.warning(f"⚠️ 從 Redis 檢索檔案內容失敗: {e}")
 
@@ -1045,14 +1080,27 @@ async def chat(
             logger.warning("token ledger skipped: %s", e)
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
-        await memory_system.save_memory(
-            request.conversation_id,
-            request.user_message,
-            assistant_message,
-            emotion_analysis,
-            ai_id=request.ai_id,
-            user_id=request.user_id,
-        )
+        if _req_timer:
+            with _req_timer.stage("memory_save"):
+                await memory_system.save_memory(
+                    request.conversation_id,
+                    request.user_message,
+                    assistant_message,
+                    emotion_analysis,
+                    ai_id=request.ai_id,
+                    user_id=request.user_id,
+                )
+            _req_timer.mark_complete()
+            _req_timer.log_summary()
+        else:
+            await memory_system.save_memory(
+                request.conversation_id,
+                request.user_message,
+                assistant_message,
+                emotion_analysis,
+                ai_id=request.ai_id,
+                user_id=request.user_id,
+            )
 
         background_tasks.add_task(
             run_post_chat_tasks,

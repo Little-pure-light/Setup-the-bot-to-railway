@@ -61,9 +61,9 @@ def _build_manager():
     table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
     redis = None
     try:
-        from backend.redis_interface import RedisInterface
+        from backend.redis_interface import get_shared_redis_interface
 
-        redis = RedisInterface()
+        redis = get_shared_redis_interface()
     except Exception:
         redis = None
     v1 = MemorySystem(supabase, openai_client, table, redis_interface=redis)

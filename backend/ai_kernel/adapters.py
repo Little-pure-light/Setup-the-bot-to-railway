@@ -63,10 +63,13 @@ class FileContextAdapter:
         try:
             if not self.redis or not getattr(self.redis, "redis", None):
                 return ""
-            keys = self.redis.redis.keys(f"upload:{conversation_id}:*")
+            if hasattr(self.redis, "scan_keys"):
+                keys = self.redis.scan_keys(f"upload:{conversation_id}:*")
+            else:
+                keys = self.redis.redis.keys(f"upload:{conversation_id}:*")
             if not keys:
                 return ""
-            latest_key = keys[-1]
+            latest_key = sorted(keys)[-1]
             file_data_json = self.redis.redis.get(latest_key)
             if not file_data_json:
                 return ""

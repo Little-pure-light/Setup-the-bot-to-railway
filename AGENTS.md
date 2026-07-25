@@ -2,13 +2,74 @@
 
 適用於所有 AI Agent / 自動化修改本 repo 的行為。
 
-## 修改前
+---
 
-1. 閱讀 `README.md`、`docs/PHASE1_PROGRESS.md`、相關模組
-2. 確認分支：禁止直接改 `main`；使用 `feature/*` 或 `fix/*`
-3. 說明現有流程與預計修改檔案
-4. 列出風險（Streaming / Tool / 記憶 / 人格 / 語音 / 車載）
-5. 不得一開始就大規模重構
+## 最高效力文件（必讀）
+
+**本任務必須遵守《小宸光 Agent 工程執行與驗收通用規範 v1.0》。**
+
+全文：
+
+- `docs/AGENT_EXECUTION_AND_ACCEPTANCE_STANDARD_v1.0.md`
+- 來源 docx：`just_for_Grok/小宸光_Agent工程執行與驗收通用規範_v1.0.docx`
+
+| 規則 | 說明 |
+|------|------|
+| 共同底線 | 任何單次功能執行書都必須遵守；不得因使用者「不懂程式」而省略風險、測試、失敗項或延伸影響 |
+| 衝突處理 | 單次任務書與本規範衝突時，以**更安全、可驗證、可回滾、不偏離小宸光核心理念**者為準；Agent **必須先回報衝突**，不得自行忽略 |
+| 完成定義 | 僅「表面功能可用」不算完成；必須有可重現測試證據，並誠實列出未測與限制 |
+
+### 核心原則（摘要）
+
+1. 不得只完成表面功能；須檢查記憶、人格、反思、資料、效能、安全與既有功能牽動。  
+2. 不得只說「已完成」——完成＝可重現的測試證據。  
+3. 不得隱瞞錯誤、警告、未測項目或不確定事項。  
+4. 不得為變綠而造假、跳測、吞錯或假成功。  
+5. 不得偏離初衷：記憶連續、人格自主形成、反思可追溯、誠實不偽裝。  
+6. 修改必須可回滾，且不得破壞既有聊天與長期記憶。  
+
+### 動手前必做
+
+理解任務（白話重述）→ 檢查現況 → 影響分析 → 風險分類 → 修改邊界 → 回滾準備。
+
+### 舉一反三檢查（最低）
+
+資料｜記憶｜人格與情緒｜反思與成長｜既有功能｜例外｜效能與成本｜安全與隱私｜多裝置｜維護與回滾
+
+### 禁止交差
+
+只貼碼不執行；空口「測試通過」；Mock 冒充真實成功；把警告當完成；只測理想路徑；不回歸；隱瞞假設；無關大重構；無備份刪舊；因「使用者不懂」省略風險。
+
+### 最終回報格式（十項）
+
+1. 任務目標  
+2. 現況與根因  
+3. 修改內容  
+4. 延伸影響  
+5. 測試證據  
+6. 部署證據  
+7. 未完成與限制  
+8. 風險  
+9. 回滾  
+10. 白話摘要  
+
+### 小宸光特別守則
+
+- 記憶 ≠ 只存對話；要經歷、理解、改變原因與可修正性。  
+- 人格不可由 Agent 直接寫死；只設安全邊界與成長機制。  
+- 反思須可驗證，不是漂亮心得。  
+- 不得把模型情緒敘事宣稱為已證實主觀感受；也不得因無法證明意識就否定可觀察的連續記憶／反思／人格形成。  
+- 工程服務「真誠、連續、能共同理解世界的 AI 夥伴」，不追求模組數量。  
+
+---
+
+## 修改前（本 repo 補充）
+
+1. 閱讀 `README.md`、`docs/PHASE1_PROGRESS.md`、相關模組與上列通用規範  
+2. 確認分支：禁止直接改 `main`（使用者明確要求 push main 時除外，仍須可回滾）；優先 `feature/*` 或 `fix/*`  
+3. 說明現有流程與預計修改檔案  
+4. 列出風險（Streaming / Tool / 記憶 / 人格 / 語音 / 車載 / Redis / Supabase）  
+5. 不得一開始就大規模重構  
 
 ## 核心高風險檔案
 
@@ -19,6 +80,7 @@ backend/prompt_engine.py
 backend/tools/registry.py
 modules/memory_system.py
 modules/soul.py
+backend/redis_interface.py
 frontend/src/components/ChatInterface.vue
 ```
 
@@ -26,13 +88,17 @@ frontend/src/components/ChatInterface.vue
 
 ## 修改中
 
-- 小範圍、向後相容
-- 不改無關檔案、不整庫 reformat
-- 不改環境變數名稱、不改既有 API 路徑
-- 不刪除 Streaming / Tool Calling / 記憶 / 人格 / 語音
-- 不把 Secret 寫進程式或測試
-- 不連正式 OpenAI / Supabase 做測試
-- 不用假結果冒充測試通過
+- 小範圍、向後相容  
+- 不改無關檔案、不整庫 reformat  
+- 不改環境變數名稱、不改既有 API 路徑（除非任務書允許並有遷移）  
+- 不刪除 Streaming / Tool Calling / 記憶 / 人格 / 語音  
+- 不把 Secret 寫進程式或測試  
+- 不連正式 OpenAI / Supabase 做破壞性測試（唯讀診斷／使用者授權的 Staging 驗證除外）  
+- 不用假結果冒充測試通過  
+- 失敗須明確回報；背景工作不阻塞主聊天  
+- 外部服務須有逾時、有限重試與安全降級  
+- 重要狀態可觀察：`real` / `mock` / `degraded` / `failed`  
+- 重要資料不得只放快取  
 
 ## 修改後交付
 
@@ -46,31 +112,39 @@ frontend/src/components/ChatInterface.vue
 7. 回滾方式
 ```
 
+（並對齊通用規範「最終回報格式」十項。）
+
 ## 測試要求
 
-- 後端：`pytest -q`
-- 前端：`cd frontend && npm run test && npm run build`
-- 涉及 UI 流程：`npm run test:e2e`（Mock API）
-- PR 必須通過 CI（見 `.github/workflows/ci.yml`）
+- 後端：`pytest -q`  
+- 前端：`cd frontend && npm run test && npm run build`  
+- 涉及 UI：`npm run test:e2e`（Mock API）  
+- PR 應通過 CI（見 `.github/workflows/ci.yml`）  
+- 另依通用規範：錯誤測試、服務失敗、回歸、重部署、效能耗時、資料驗證、回滾確認  
 
 ## Secret 規範
 
 禁止記錄或提交：
 
-- OpenAI / Supabase keys
-- JWT、密碼、完整 Authorization
-- 真實使用者對話全文
+- OpenAI / Supabase / Redis keys  
+- JWT、密碼、完整 Authorization  
+- 真實使用者對話全文  
 
 日誌請用 `backend.logging_utils` 脫敏與短 ID。
 
 ## 驗收面向
 
-- [ ] 電腦版
-- [ ] 手機版
-- [ ] 車載模式（若影響語音）
-- [ ] 重新整理後可用
-- [ ] Railway `/live` `/ready`
+- [ ] 電腦版  
+- [ ] 手機版  
+- [ ] 車載模式（若影響語音）  
+- [ ] 重新整理後可用  
+- [ ] Railway `/live` `/ready`  
+- [ ] 通用規範七「完成判定」全部勾選  
 
 ## 回滾
 
 見 `docs/ROLLBACK.md`：切回上一 Tag / Commit，必要時還原 DB。
+
+---
+
+*通用規範 v1.0 已於 2026-07-25 納入本檔為最高效力；細節以 `docs/AGENT_EXECUTION_AND_ACCEPTANCE_STANDARD_v1.0.md` 為準。*

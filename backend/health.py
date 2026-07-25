@@ -107,12 +107,21 @@ def readiness_payload(*, check_dns: Optional[bool] = None) -> Dict[str, Any]:
         "redis": "not_configured",
         "supabase": "unknown",
     }
+    redis_detail: Dict[str, Any] = {}
 
-    # Redis：僅設定檢查，不連線
-    if _env_configured("REDIS_URL") or _env_configured("REDIS_HOST"):
-        services["redis"] = "configured"
-    else:
-        services["redis"] = "unavailable"
+    # Redis：短時間 PING（區分 not_configured / mock / ping_ok / ping_fail）
+    try:
+        from backend.redis_interface import redis_ping_status
+
+        redis_detail = redis_ping_status()
+        # map to services.redis string for compatibility + clarity
+        st = redis_detail.get("status") or "not_configured"
+        services["redis"] = st
+        services["redis_mode"] = str(redis_detail.get("mode") or "")
+    except Exception as e:
+        services["redis"] = "ping_fail"
+        services["redis_mode"] = "unknown"
+        redis_detail = {"status": "ping_fail", "error_type": type(e).__name__}
 
     # Supabase：預設僅設定；可選 DNS（非 DB 可用性）
     sb_url = (os.getenv("SUPABASE_URL") or "").strip()
@@ -143,7 +152,10 @@ def readiness_payload(*, check_dns: Optional[bool] = None) -> Dict[str, Any]:
         status = "not_ready"
     elif services["supabase"] in ("dns_failed", "dns_error", "invalid_url"):
         status = "degraded"
-    elif services["redis"] == "unavailable":
+    elif services["redis"] in ("ping_fail", "not_configured", "unavailable"):
+        status = "degraded"
+    elif services["redis"] == "mock":
+        # mock is explicit degraded observability — not silent "OK"
         status = "degraded"
     else:
         status = "ok"
@@ -153,9 +165,10 @@ def readiness_payload(*, check_dns: Optional[bool] = None) -> Dict[str, Any]:
         "check": "readiness",
         **_version_fields(),
         "services": services,
+        "redis_detail": redis_detail,
         "notes": {
             "supabase": "config_and_optional_dns_only_not_db_probe",
-            "redis": "env_presence_only_not_ping",
+            "redis": "short_ping_with_mode_real_mock_none",
             "openai": "key_presence_only_no_api_call",
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -187,7 +200,12 @@ async def readiness_payload_async() -> Dict[str, Any]:
             base["status"] = "degraded"
         elif base["status"] != "not_ready":
             # dns_ok + 其餘正常 → ok（仍非 DB 探測）
-            if base["services"].get("redis") == "unavailable":
+            if base["services"].get("redis") in (
+                "unavailable",
+                "not_configured",
+                "ping_fail",
+                "mock",
+            ):
                 base["status"] = "degraded"
             else:
                 base["status"] = "ok"

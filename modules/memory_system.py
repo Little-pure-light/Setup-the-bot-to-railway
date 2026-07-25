@@ -25,8 +25,8 @@ class MemorySystem:
         self.redis = redis_interface
         if self.redis is None:
             try:
-                from backend.redis_interface import RedisInterface
-                self.redis = RedisInterface()
+                from backend.redis_interface import get_shared_redis_interface
+                self.redis = get_shared_redis_interface()
             except Exception as e:
                 print(f"⚠️ Redis 初始化略過（不影響長期記憶）: {e}")
                 self.redis = None

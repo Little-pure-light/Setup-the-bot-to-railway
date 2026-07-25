@@ -23,14 +23,21 @@ def test_readiness_config_only_no_dns_by_default(monkeypatch):
     monkeypatch.setenv("SUPABASE_ANON_KEY", "test-anon")
     monkeypatch.delenv("REDIS_URL", raising=False)
     monkeypatch.delenv("REDIS_HOST", raising=False)
+    monkeypatch.delenv("REDIS_ENDPOINT", raising=False)
+    monkeypatch.delenv("REDIS_TOKEN", raising=False)
     monkeypatch.setenv("READY_CHECK_SUPABASE_DNS", "false")
+    import backend.redis_interface as ri
+
+    ri._shared_interface = None
     from backend.health import readiness_payload
 
     p = readiness_payload()
     assert p["services"]["openai_config"] == "configured"
     assert p["services"]["supabase"] == "config_only"
-    assert p["services"]["redis"] == "unavailable"
+    # unconfigured → mock (explicit) or not_configured — never silent "ok" for redis
+    assert p["services"]["redis"] in ("mock", "not_configured", "unavailable")
     assert p["notes"]["supabase"] == "config_and_optional_dns_only_not_db_probe"
+    assert p["notes"]["redis"] == "short_ping_with_mode_real_mock_none"
     assert p["status"] in ("ok", "degraded")
     assert "OPENAI_API_KEY" not in str(p)
 

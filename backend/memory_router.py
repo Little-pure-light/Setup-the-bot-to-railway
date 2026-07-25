@@ -9,7 +9,7 @@ from backend.supabase_handler import get_supabase
 from backend.openai_handler import get_openai_client
 from modules.memory_system import MemorySystem
 from backend.modules.reflection_storage import ReflectionStorage
-from backend.redis_interface import RedisInterface
+from backend.redis_interface import get_shared_redis_interface
 from backend.modules.pinecone_handler import PineconeHandler
 
 supabase = get_supabase()
@@ -26,7 +26,7 @@ def get_memory_system() -> MemorySystem:
 def get_reflection_storage() -> ReflectionStorage:
     try:
         return ReflectionStorage(
-            redis_interface=RedisInterface(),
+            redis_interface=get_shared_redis_interface(),
             supabase_client=supabase,
             pinecone_handler=PineconeHandler()
         )
