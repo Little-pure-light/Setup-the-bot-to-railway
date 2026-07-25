@@ -277,33 +277,34 @@ class NightGrowth:
                     related_ids.append(str(rec["id"]))
                     attention_saves += 1
 
-            if decision.update_identity and refl and (refl.get("lessons") or refl.get("summary")):
+            # Identity evolution (quality stage): do NOT lower confidence threshold.
+            # Root causes of patches=0 historically:
+            #  1) no reflection on turns → no lessons
+            #  2) IDENTITY_UPDATE_MODE=candidate → formal patches stay 0 by design
+            #  3) hollow reflections skipped
+            # Fix: use actionable reflection lessons OR structured preference/self-intro
+            # signals with real confidence from classifier/reflection (still gated).
+            if decision.update_identity:
                 try:
-                    lesson = (refl.get("lessons") or [refl.get("summary")])[0]
-                    cur = self.identity.load()
-                    principles = list(
-                        dict.fromkeys(
-                            (cur.get("principles") or []) + [str(lesson)[:120]]
-                        )
-                    )[:20]
-                    conf = float(refl.get("confidence") or 0.5)
-                    id_result = self.identity.update(
-                        {"principles": principles},
-                        change_reason="night_growth_reflection",
-                        confidence=conf,
-                        source=f"night_growth:{execution_id}",
+                    id_result = self._maybe_identity_update(
+                        user_message=um,
+                        reflection=refl,
+                        classification=clf.to_dict(),
+                        execution_id=execution_id,
                         decision_identity_update=True,
                     )
-                    if id_result.get("status") == "formal":
-                        identity_patches += 1
-                        ch = id_result.get("charter") or {}
-                        identity_version_id = f"{ch.get('identity_id')}:v{ch.get('version')}"
-                    elif id_result.get("status") == "candidate":
-                        identity_patches += 0  # candidate only
-                        steps_summary.setdefault("identity_candidates", 0)
-                        steps_summary["identity_candidates"] = (
-                            steps_summary.get("identity_candidates", 0) + 1
-                        )
+                    if id_result:
+                        if id_result.get("status") == "formal":
+                            identity_patches += 1
+                            ch = id_result.get("charter") or {}
+                            identity_version_id = (
+                                f"{ch.get('identity_id')}:v{ch.get('version')}"
+                            )
+                        elif id_result.get("status") == "candidate":
+                            steps_summary.setdefault("identity_candidates", 0)
+                            steps_summary["identity_candidates"] = (
+                                int(steps_summary.get("identity_candidates") or 0) + 1
+                            )
                 except Exception as e:
                     logger.warning("identity update failed: %s", e)
 
@@ -410,6 +411,83 @@ class NightGrowth:
             "turns_considered": len(turns),
             "fatal_error": None,
         }
+
+    def _maybe_identity_update(
+        self,
+        *,
+        user_message: str,
+        reflection: Optional[Dict[str, Any]],
+        classification: Dict[str, Any],
+        execution_id: str,
+        decision_identity_update: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Propose identity change without lowering confidence thresholds.
+        Prefer actionable reflection lessons; else preference/self-intro patches.
+        """
+        from backend.modules.reflection_contract import (
+            is_actionable_reflection,
+            normalize_reflection,
+        )
+
+        patch: Dict[str, Any] = {}
+        reason = ""
+        conf = 0.0
+        source = f"night_growth:{execution_id}"
+
+        refl = normalize_reflection(reflection) if reflection else None
+        if refl and is_actionable_reflection(refl) and refl.get("lessons"):
+            conf = float(refl.get("confidence") or 0.0)
+            lesson = str((refl.get("lessons") or [""])[0])[:120]
+            if lesson and conf >= 0.55:
+                cur = self.identity.load()
+                principles = list(
+                    dict.fromkeys((cur.get("principles") or []) + [lesson])
+                )[:20]
+                patch = {"principles": principles}
+                reason = "night_growth_actionable_reflection"
+                source = f"night_growth:reflection:{execution_id}"
+
+        # Preference / self-intro → relationship_context (not core_values), still versioned
+        if not patch:
+            um = (user_message or "").strip()
+            tags = list(classification.get("tags") or [])
+            conf = float(classification.get("confidence") or 0.0)
+            # require solid classifier confidence — same spirit as threshold, not relaxed
+            if conf < 0.55:
+                return None
+            cur = self.identity.load()
+            rel = dict(cur.get("relationship_context") or {})
+            changed = False
+            if "self_intro" in tags or "我叫" in um or "我的名字" in um:
+                # capture short self label
+                label = um[:80]
+                if rel.get("last_self_intro") != label:
+                    rel["last_self_intro"] = label
+                    changed = True
+                    reason = "night_growth_self_intro"
+            if "preference" in tags or "我喜歡" in um or "我偏好" in um:
+                prefs = list(rel.get("preferences") or [])
+                item = um[:100]
+                if item and item not in prefs:
+                    prefs = (prefs + [item])[-20:]
+                    rel["preferences"] = prefs
+                    changed = True
+                    reason = reason or "night_growth_preference"
+            if changed:
+                patch = {"relationship_context": rel}
+                source = f"night_growth:signal:{execution_id}"
+
+        if not patch or not reason:
+            return None
+
+        return self.identity.update(
+            patch,
+            change_reason=reason,
+            confidence=conf,
+            source=source,
+            decision_identity_update=decision_identity_update,
+        )
 
     def register_scheduler(self, *, interval_seconds: float = 86400.0, user_id: str = "default_user"):
         """

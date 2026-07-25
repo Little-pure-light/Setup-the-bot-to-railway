@@ -37,6 +37,9 @@ class ClassificationResult:
     tags: List[str] = field(default_factory=list)
     relations: List[Dict[str, Any]] = field(default_factory=list)
     secondary_types: List[str] = field(default_factory=list)
+    # Quality stage: High / Medium / Low write policy (no new memory types)
+    value_tier: str = "medium"  # high | medium | low
+    should_persist: bool = True  # typed V2 permanent row
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

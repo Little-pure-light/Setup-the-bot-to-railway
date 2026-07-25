@@ -2,8 +2,9 @@
 
 | 項目 | 內容 |
 |------|------|
-| 文件版本 | 1.0 |
+| 文件版本 | 1.1 |
 | 日期 | 2026-07-25 |
+| 品質階段 | Memory V2 Quality Improvement v1.0（代碼完成；待 redeploy） |
 | 程式庫 | `Little-pure-light/Setup-the-bot-to-railway` |
 | 分支 | `main` |
 | 已部署 commit | `791506dd64500677ed6a264b893e259e5371195d`（短：`791506d`） |
@@ -31,6 +32,34 @@ Identity 深度不足
 目前唯一工作：
 
 Memory 品質優化
+
+
+
+
+
+
+# 專案目前狀態（給老闆看的）
+
+目前版本：
+V2
+
+目前狀態：
+🟢 穩定
+
+目前部署：
+Production
+
+目前驗證：
+全部完成
+
+目前風險：
+Redis 暫停
+Identity 深度不足
+
+目前唯一工作：
+
+Memory 品質優化
+
 
 
 
@@ -95,7 +124,7 @@ Memory 品質優化
 | 接觸／API | 請求調度、串流、OpenAI 相容 | `chat_router`, `openai_compat_router` | 肉（router 仍偏大） |
 | Kernel（可選） | 規劃／工具／策略 | `backend/ai_kernel/*` | 既有；獨立 flag |
 | 記憶心臟 V1 | conversation 連續 | `modules/memory_system.py` | 肉；始終可回退 |
-| 記憶心臟 V2 | 分類／檢索／圖譜 | `memory_manager`, `classifier`, `retrieval`, `graph` | 肉（規則+向量） |
+| 記憶心臟 V2 | 分類／檢索／圖譜 | `memory_manager`, `classifier`, `retrieval`, `graph` | 肉（規則+向量）；**Quality：三級寫入閘門 + graph hydrate** |
 | 身份 | 版本化自我描述 | `identity_engine` (Charter) | 肉（FS 存；非多裝置 DB） |
 | 語義／決策 | 抽象知識、可測規則 | `semantic_builder`, `decision_engine` | **規則版肉**（非 LLM 深層） |
 | 夜間成長 | 鞏固、寫入、防雙跑 | `night_growth`, `night_growth_safety` | 肉（endpoint 驗證通過） |
@@ -399,30 +428,40 @@ python scripts/check_memory_graph_integrity.py
 ## 15. 狀態印章
 
 ```text
-架構：Memory V2 + Infra Contract + Fix-stage Safety  已落地
-部署：ai2.dreamground.net @ 791506d                 已對齊
-驗證：§9 聊天／記憶／Night Growth                     已通過
+架構：Memory V2 + Infra + Fix-stage Safety + Quality polish  已落地（代碼）
+部署：ai2.dreamground.net @ 791506d（Quality 待 redeploy 後更新 commit）
+驗證：§9 聊天／記憶／Night Growth                     已通過（791506d）
+品質：Classifier 三級閘門 / Ranking / Reflection insight / Graph hydrate
 已知降級：Redis unavailable
 認知深度：規則 + 向量 + 版本化身份（非主觀感受）
 回滾：MEMORY_V2_ENABLED=false 可用
 ```
 
 **結論：**  
-小宸光 V2 目前是 **可開關、可驗證、可鞏固的認知記憶正式工程版**；  
-已在現網 Backend 以 flag 開啟並通過 Staging 級對話與 Night Growth 驗證。  
-下階段應聚焦 **基礎設施韌性（Redis／持久化）** 與 **認知深度（非僅規則）**，而非再堆未驗證的模組數量。
+小宸光 V2 已是 **可開關、可驗證、可鞏固** 的認知記憶工程版，並完成 **Quality Improvement**（記更值得、檢索更準、反思更有 insight、Graph 真正參與）。  
+Redeploy 後請更新本節 commit；下階段仍建議 **Redis／持久化** 與更深認知，而非堆功能。
 
-## 下一步（唯一）
+### 15.1 Quality stage 現況（v1.1）
 
-目前禁止新增新功能。
+詳見 `docs/quality_reports/`。核心行為變更：
 
-下一階段：
+- Low-tier 閒聊 **不寫** typed 永久記憶（V1 連續仍在）  
+- Retrieval：importance/graph 權重↑，graph 鄰居內容 hydrate  
+- Reflection：可執行 lessons + quality score  
+- Identity：`patches=0` 根因已分析；多訊號候選，**不降 confidence 門檻**
 
-Memory Quality Improvement
+---
 
-目標：
+## 下一步（建議）
 
-- 提升記憶品質
-- 提升 Retrieval
-- 提升 Reflection
-- 提升 Identity
+**Memory Quality Improvement v1.0：已完成（本 commit）。**
+
+目前仍建議：
+
+- 禁止為堆疊而新增大型功能  
+- Redeploy Backend 後更新 `/health` 的 `git_commit`  
+- Redis 就緒或明確接受 degraded  
+- Identity／Graph 持久化 volume  
+- 可選：再跑一輪 §9 smoke  
+
+*文件維護：重大部署或 flag 策略變更時更新本檔日期、commit、§9 摘要與第 6／9／15 節。*

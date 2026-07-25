@@ -13,6 +13,7 @@ All modules (ReflectionStorage, Memory, API) MUST use this schema:
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -181,6 +182,125 @@ def validate_reflection(data: Any) -> tuple[bool, str]:
     if not isinstance(data["timestamp"], str) or not data["timestamp"]:
         return False, "timestamp must be non-empty string"
     return True, "ok"
+
+
+# Hollow / low-insight patterns (quality stage)
+_HOLLOW_SUMMARY = re.compile(
+    r"^(ok|okay|好的|嗯|無|none|n/a|一般|正常|還可以|沒有特別|無特別)$",
+    re.I,
+)
+
+
+def reflection_quality_score(raw: Any) -> Dict[str, Any]:
+    """
+    Score insight quality of a reflection (0..1).
+    Higher when causes + lessons + non-hollow summary present.
+    Does not change API schema; for merge/filter/Night Growth.
+    """
+    r = normalize_reflection(raw)
+    summary = (r.get("summary") or "").strip()
+    causes = [c for c in (r.get("causes") or []) if str(c).strip()]
+    lessons = [x for x in (r.get("lessons") or []) if str(x).strip()]
+    conf = float(r.get("confidence") or 0)
+
+    score = 0.0
+    flags: List[str] = []
+    if summary and len(summary) >= 12 and not _HOLLOW_SUMMARY.match(summary):
+        score += 0.28
+    else:
+        flags.append("weak_summary")
+    if causes:
+        score += min(0.28, 0.12 * len(causes))
+    else:
+        flags.append("no_causes")
+    if lessons:
+        # prefer actionable lessons
+        actionable = sum(
+            1
+            for L in lessons
+            if any(k in str(L) for k in ("下次", "應", "可", "避免", "優先", "記住", "should", "next"))
+        )
+        score += min(0.32, 0.12 * len(lessons) + 0.08 * actionable)
+    else:
+        flags.append("no_lessons")
+    score += 0.12 * conf
+    score = max(0.0, min(1.0, score))
+    has_insight = score >= 0.45 and "no_lessons" not in flags
+    return {
+        "score": round(score, 4),
+        "has_insight": has_insight,
+        "flags": flags,
+        "normalized": r,
+    }
+
+
+def merge_reflections(
+    *parts: Any,
+    prefer_higher_confidence: bool = True,
+) -> Dict[str, Any]:
+    """
+    Merge multiple reflection payloads into one contract object.
+    Dedupes causes/lessons; keeps strongest summary; never invents API fields.
+    """
+    norms = [normalize_reflection(p) for p in parts if p is not None]
+    if not norms:
+        return empty_reflection()
+
+    # pick best summary by quality then confidence
+    best = norms[0]
+    best_q = reflection_quality_score(best)["score"]
+    for n in norms[1:]:
+        q = reflection_quality_score(n)["score"]
+        if q > best_q or (
+            prefer_higher_confidence
+            and abs(q - best_q) < 0.05
+            and float(n.get("confidence") or 0) > float(best.get("confidence") or 0)
+        ):
+            best = n
+            best_q = q
+
+    causes: List[str] = []
+    lessons: List[str] = []
+    seen_c, seen_l = set(), set()
+    for n in norms:
+        for c in n.get("causes") or []:
+            k = str(c).strip()
+            if k and k not in seen_c:
+                seen_c.add(k)
+                causes.append(k)
+        for L in n.get("lessons") or []:
+            k = str(L).strip()
+            if k and k not in seen_l:
+                seen_l.add(k)
+                lessons.append(k)
+
+    confs = [float(n.get("confidence") or 0) for n in norms]
+    conf = max(confs) if confs else 0.0
+    # quality-aware confidence floor when insight present
+    qmeta = reflection_quality_score(
+        {
+            "summary": best.get("summary") or "",
+            "causes": causes[:8],
+            "lessons": lessons[:8],
+            "confidence": conf,
+            "timestamp": best.get("timestamp") or _iso_now(),
+        }
+    )
+    if qmeta["has_insight"] and conf < 0.55:
+        conf = min(0.72, max(conf, 0.55))
+
+    return {
+        "summary": (best.get("summary") or "").strip(),
+        "causes": causes[:8],
+        "lessons": lessons[:8],
+        "confidence": conf,
+        "timestamp": best.get("timestamp") or _iso_now(),
+    }
+
+
+def is_actionable_reflection(raw: Any, *, min_quality: float = 0.45) -> bool:
+    meta = reflection_quality_score(raw)
+    return bool(meta["has_insight"] and meta["score"] >= min_quality)
 
 
 def merge_reflection_into_api_payload(

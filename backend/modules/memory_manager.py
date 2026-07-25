@@ -115,6 +115,10 @@ class MemoryManager:
         )
         if force_type and force_type in MEMORY_TYPES:
             clf.memory_type = force_type
+            # forced typed writes (e.g. Night Growth) always persist
+            clf.should_persist = True
+            if not getattr(clf, "value_tier", None) or clf.value_tier == "low":
+                clf.value_tier = "high"
 
         # ensure graph user scope
         self.graph.user_id = user_id or "default_user"
@@ -136,8 +140,12 @@ class MemoryManager:
             v1_saved = True
 
         typed_id = None
-        # Store typed cognitive record (uses same table, different memory_type)
-        if force_type or clf.memory_type in MEMORY_TYPES:
+        # Quality gate: only High/Medium (should_persist) write typed permanent rows.
+        # Low-value chitchat keeps V1 continuity but skips permanent typed pollution.
+        persist_typed = bool(force_type) or (
+            clf.should_persist and clf.memory_type in MEMORY_TYPES
+        )
+        if persist_typed:
             typed_id = await self._insert_typed_record(
                 memory_type=clf.memory_type,
                 user_message=user_message or "",
@@ -152,6 +160,7 @@ class MemoryManager:
                     "secondary_types": clf.secondary_types,
                     "relations": clf.relations,
                     "classification": clf.to_dict(),
+                    "value_tier": getattr(clf, "value_tier", "medium"),
                 },
             )
             if typed_id is not None:
@@ -168,6 +177,8 @@ class MemoryManager:
             "ok": True,
             "v1_saved": v1_saved,
             "id": typed_id,
+            "typed_persisted": bool(typed_id) and persist_typed,
+            "value_tier": getattr(clf, "value_tier", "medium"),
             "memory_type": clf.memory_type,
             "importance": clf.importance,
             "confidence": clf.confidence,

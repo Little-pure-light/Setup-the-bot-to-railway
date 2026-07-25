@@ -2,6 +2,27 @@
 
 本專案遵循 [Semantic Versioning](https://semver.org/)。
 
+## [Unreleased] — Memory V2 Quality Improvement
+
+### Improved
+
+- **MemoryClassifier**: High / Medium / Low value tiers; skip permanent typed rows for chitchat/courtesy
+- **MemoryManager**: typed persist gated by `should_persist` (V1 conversation continuity unchanged)
+- **RetrievalEngine**: rebalanced rank weights (importance↑, graph↑, recency↓); hydrate graph neighbor content
+- **Reflection**: actionable `lessons`, quality score / merge helpers; summary must include next direction
+- **DecisionEngine**: respect value tier; hollow reflection does not force identity
+- **NightGrowth identity**: multi-signal path (actionable reflection + preference/self-intro) without lowering confidence threshold
+
+### Docs / Tests
+
+- `docs/quality_reports/*` (quality, retrieval, reflection, identity, graph, performance, architecture impact)
+- `tests/unit/test_memory_v2_quality.py`
+- `PROJECT_STATE.md`
+
+### Constraints honored
+
+- No new API, memory type, DB, router, Redis migration, or UI
+
 ## [Unreleased] — Phase 1 foundation
 
 ### Added

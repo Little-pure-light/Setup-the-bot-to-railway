@@ -91,6 +91,14 @@ class RetrievalEngine:
             logger.warning("embed failed: %s", e)
             return None
 
+    # Quality stage weights: prioritize relevance + importance over bare recency
+    # (avoid old-but-unimportant beating true matches)
+    RANK_W_VECTOR = 0.36
+    RANK_W_IMPORTANCE = 0.20
+    RANK_W_TYPE = 0.16
+    RANK_W_GRAPH = 0.16
+    RANK_W_RECENCY = 0.12
+
     def _rank_score(
         self,
         *,
@@ -101,16 +109,18 @@ class RetrievalEngine:
         graph_conf: float,
         source: str,
     ) -> float:
-        # weighted blend
         score = (
-            0.40 * vector_sim
-            + 0.20 * type_match
-            + 0.15 * importance
-            + 0.15 * recency
-            + 0.10 * graph_conf
+            self.RANK_W_VECTOR * vector_sim
+            + self.RANK_W_IMPORTANCE * importance
+            + self.RANK_W_TYPE * type_match
+            + self.RANK_W_GRAPH * graph_conf
+            + self.RANK_W_RECENCY * recency
         )
         if source == "typed_keyword_fallback":
-            score *= 0.85  # slight penalty vs real embedding
+            score *= 0.82
+        if source == "graph_expansion":
+            # graph edges must contribute, but not dominate pure semantic hits
+            score = max(score, 0.25 + 0.55 * graph_conf + 0.15 * importance)
         return max(0.0, min(1.0, score))
 
     async def retrieve(
@@ -168,47 +178,110 @@ class RetrievalEngine:
                 fallback_used = True
         results.extend(typed)
 
-        # 3) Graph expansion by memory_id
+        # 3) Graph expansion by memory_id — load neighbor content when possible
         graph_hits: List[Dict[str, Any]] = []
         expanded: List[Dict[str, Any]] = []
+        graph_used = False
         if self.graph is not None:
-            for it in list(results):
-                mid = it.get("id")
-                if mid is None:
-                    continue
+            seed_ids = [str(it.get("id")) for it in results if it.get("id") is not None][
+                :8
+            ]
+            neighbor_ids: List[str] = []
+            edge_by_neighbor: Dict[str, Dict[str, Any]] = {}
+            for mid in seed_ids:
                 try:
-                    for edge in self.graph.get_neighbors(str(mid), limit=5):
+                    for edge in self.graph.get_neighbors(str(mid), limit=6):
                         graph_hits.append(edge)
                         other = (
                             edge.get("target_memory_id")
                             if str(edge.get("source_memory_id")) == str(mid)
                             else edge.get("source_memory_id")
                         )
+                        if not other or str(other) == str(mid):
+                            continue
+                        other = str(other)
                         gconf = float(edge.get("confidence") or 0.5)
-                        if other:
-                            expanded.append(
-                                {
-                                    "memory_type": "graph",
-                                    "source": "graph_expansion",
-                                    "content": f"related_memory:{other} via {edge.get('relation')}",
-                                    "score": self._rank_score(
-                                        vector_sim=0.2,
-                                        type_match=0.3,
-                                        importance=0.3,
-                                        recency=0.3,
-                                        graph_conf=gconf,
-                                        source="graph_expansion",
-                                    ),
-                                    "id": other,
-                                    "vector_sim": 0.2,
-                                    "type_match": 0.3,
-                                    "importance": 0.3,
-                                    "recency": 0.3,
-                                    "graph_conf": gconf,
-                                }
-                            )
+                        # keep strongest edge per neighbor
+                        prev = edge_by_neighbor.get(other)
+                        if prev is None or gconf > float(prev.get("confidence") or 0):
+                            edge_by_neighbor[other] = edge
+                            if other not in neighbor_ids:
+                                neighbor_ids.append(other)
                 except Exception as e:
                     logger.warning("graph expand failed: %s", e)
+
+            # hydrate neighbor content from store (graph utilization)
+            hydrated = await self._hydrate_memories_by_ids(
+                neighbor_ids[:12], user_id=user_id
+            )
+            for other, row in hydrated.items():
+                edge = edge_by_neighbor.get(other) or {}
+                gconf = float(edge.get("confidence") or 0.5)
+                rel = edge.get("relation") or "related"
+                blob = (
+                    f"{row.get('user_message') or ''} "
+                    f"{row.get('assistant_message') or ''} "
+                    f"{row.get('document_content') or ''}"
+                ).strip()
+                if not blob:
+                    blob = f"related_memory:{other} via {rel}"
+                try:
+                    importance = float(row.get("importance_score") or 0.55)
+                except (TypeError, ValueError):
+                    importance = 0.55
+                mt = row.get("memory_type") or "graph"
+                type_match = 1.0 if mt in types else 0.45
+                item = {
+                    "memory_type": mt if mt in MEMORY_TYPES else "graph",
+                    "source": "graph_expansion",
+                    "content": blob[:500],
+                    "id": other,
+                    "importance": importance,
+                    "vector_sim": 0.25,
+                    "type_match": type_match,
+                    "recency": 0.45,
+                    "graph_conf": gconf,
+                    "graph_relation": rel,
+                    "via_graph": True,
+                }
+                item["score"] = self._rank_score(
+                    vector_sim=item["vector_sim"],
+                    type_match=type_match,
+                    importance=importance,
+                    recency=0.45,
+                    graph_conf=gconf,
+                    source="graph_expansion",
+                )
+                expanded.append(item)
+                graph_used = True
+
+            # fallback stub edges if hydration empty but edges exist
+            if not expanded:
+                for other, edge in list(edge_by_neighbor.items())[:5]:
+                    gconf = float(edge.get("confidence") or 0.5)
+                    expanded.append(
+                        {
+                            "memory_type": "graph",
+                            "source": "graph_expansion",
+                            "content": f"related_memory:{other} via {edge.get('relation')}",
+                            "score": self._rank_score(
+                                vector_sim=0.15,
+                                type_match=0.25,
+                                importance=0.35,
+                                recency=0.3,
+                                graph_conf=gconf,
+                                source="graph_expansion",
+                            ),
+                            "id": other,
+                            "vector_sim": 0.15,
+                            "type_match": 0.25,
+                            "importance": 0.35,
+                            "recency": 0.3,
+                            "graph_conf": gconf,
+                            "via_graph": True,
+                        }
+                    )
+                    graph_used = True
         results.extend(expanded)
 
         # 4) Rank
@@ -230,9 +303,47 @@ class RetrievalEngine:
             "formatted": formatted,
             "graph_edges": graph_hits[:20],
             "used_embedding": query_vec is not None,
+            "used_graph": graph_used or bool(graph_hits),
+            "graph_expanded_count": len(expanded),
             "fallback_used": fallback_used,
             "fallback_source": "typed_keyword_fallback" if fallback_used else None,
+            "rank_weights": {
+                "vector": self.RANK_W_VECTOR,
+                "importance": self.RANK_W_IMPORTANCE,
+                "type": self.RANK_W_TYPE,
+                "graph": self.RANK_W_GRAPH,
+                "recency": self.RANK_W_RECENCY,
+            },
         }
+
+    async def _hydrate_memories_by_ids(
+        self, ids: List[str], *, user_id: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Fetch memory rows by id for graph expansion content."""
+        out: Dict[str, Dict[str, Any]] = {}
+        if not ids or self.ms is None or not getattr(self.ms, "supabase", None):
+            return out
+        table = getattr(self.ms, "memories_table", "xiaochenguang_memories")
+        for mid in ids:
+            try:
+                q = (
+                    self.ms.supabase.table(table)
+                    .select(
+                        "id, user_message, assistant_message, document_content, "
+                        "memory_type, importance_score, user_id, created_at"
+                    )
+                    .eq("id", mid)
+                    .limit(1)
+                )
+                if user_id:
+                    q = q.eq("user_id", user_id)
+                result = q.execute()
+                rows = result.data or []
+                if rows:
+                    out[str(mid)] = rows[0]
+            except Exception as e:
+                logger.warning("hydrate memory %s failed: %s", mid, e)
+        return out
 
     async def _fetch_typed_embedding(
         self,

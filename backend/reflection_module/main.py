@@ -209,10 +209,15 @@ class ReflectionModule(BaseModule):
         )
         
         improvements = self._generate_improvements(causes, observation)
+        # Actionable lessons (quality stage): always map to contract field "lessons"
+        lessons = self._to_actionable_lessons(improvements, causes, observation)
         
         summary = self._synthesize_summary(causes, improvements, observation)
         
         confidence = self._calculate_reflection_confidence(causes, observation)
+        # Boost confidence slightly when real multi-layer causes + lessons exist
+        if len(causes) >= 2 and lessons and not any("無明顯缺陷" in c for c in causes[:1]):
+            confidence = min(0.92, confidence + 0.08)
         
         meta_analysis = self._meta_cognitive_analysis(
             user_message,
@@ -225,6 +230,8 @@ class ReflectionModule(BaseModule):
             "summary": summary,
             "causes": causes[:self.reflection_depth],
             "improvements": improvements[:self.reflection_depth],
+            # Unified contract field (normalize_reflection already maps improvements→lessons)
+            "lessons": lessons[:self.reflection_depth],
             "confidence": confidence,
             "observation": observation,
             "meta_analysis": meta_analysis,
@@ -344,6 +351,38 @@ class ReflectionModule(BaseModule):
         
         return improvements
     
+    def _to_actionable_lessons(
+        self,
+        improvements: List[str],
+        causes: List[str],
+        observation: Dict[str, Any],
+    ) -> List[str]:
+        """
+        Quality stage: convert improvements into concrete next-action lessons
+        (insight, not hollow summary).
+        """
+        lessons: List[str] = []
+        for imp in improvements or []:
+            text = str(imp).strip()
+            # strip decorative emoji prefixes for cleaner storage
+            for pfx in ("💡 ", "📚 ", "📐 ", "🎯 ", "🌟 ", "🔍 ", "❤️ ", "🤝 ", "🔗 ", "📍 ", "🧠 ", "📊 ", "✨ ", "🚀 "):
+                if text.startswith(pfx):
+                    text = text[len(pfx):]
+                    break
+            if not text:
+                continue
+            if not text.startswith("下次") and "應" not in text[:4]:
+                text = f"下次回應時：{text}"
+            if text not in lessons:
+                lessons.append(text)
+        if not lessons and causes:
+            lessons.append("下次回應時：先對齊使用者核心意圖，再補一個具體例子或可執行建議")
+        if observation.get("length_category") == "too_short" and not any(
+            "長度" in L or "範例" in L for L in lessons
+        ):
+            lessons.append("下次回應時：在簡短確認後至少補充一句具體例子或下一步")
+        return lessons[: max(3, self.reflection_depth)]
+
     def _synthesize_summary(
         self,
         causes: List[str],
@@ -351,21 +390,31 @@ class ReflectionModule(BaseModule):
         observation: Dict[str, Any]
     ) -> str:
         """
-        摘要層：綜合反思結果生成簡潔摘要
+        摘要層：綜合反思結果 → 必須含 insight（因果 + 後續方向），非空洞客套。
         """
         if not causes:
-            return "此次回應質量良好，持續保持現有水準"
+            return "核心發現：回應大致達標；後續應維持對齊意圖並補具體性。"
         
         primary_cause = causes[0] if causes else "無明顯問題"
-        
-        level_marker = primary_cause.split("】")[0] if "】" in primary_cause else "L1"
         core_issue = primary_cause.split("】")[1] if "】" in primary_cause else primary_cause
         
-        summary = f"🔍 核心發現：{core_issue}。"
-        summary += f"已進行 {len(causes)} 層因果分析，提出 {len(improvements)} 項改進方向。"
+        next_step = ""
+        if improvements:
+            raw = str(improvements[0])
+            for pfx in ("💡 ", "📚 ", "📐 ", "🎯 ", "🌟 ", "🔍 ", "❤️ ", "🤝 ", "🔗 ", "📍 ", "🧠 ", "📊 ", "✨ ", "🚀 "):
+                if raw.startswith(pfx):
+                    raw = raw[len(pfx):]
+                    break
+            next_step = raw
         
-        if observation["length_category"] in ["too_short", "too_long"]:
-            summary += f" 回應長度需調整（當前 {observation['length']} 字）。"
+        summary = f"核心發現：{core_issue}。"
+        if next_step:
+            summary += f" 後續方向：{next_step}。"
+        else:
+            summary += f" 已完成 {len(causes)} 層因果分析，需轉成可執行的下次調整。"
+        
+        if observation.get("length_category") in ["too_short", "too_long"]:
+            summary += f" 長度訊號：當前 {observation.get('length', 0)} 字需校正。"
         
         return summary
     

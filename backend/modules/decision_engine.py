@@ -56,8 +56,18 @@ class DecisionEngine:
         )
         tags = list(clf.get("tags") or [])
         secondary = list(clf.get("secondary_types") or [])
+        value_tier = (clf.get("value_tier") or "medium").lower()
+        should_persist = clf.get("should_persist")
+        if should_persist is None:
+            should_persist = value_tier != "low"
 
-        d = GrowthDecision(scores={"importance": imp, "confidence": conf})
+        d = GrowthDecision(
+            scores={
+                "importance": imp,
+                "confidence": conf,
+                "value_tier_high": 1.0 if value_tier == "high" else 0.0,
+            }
+        )
 
         um = (user_message or "").strip()
         am = (assistant_message or "").strip()
@@ -68,8 +78,23 @@ class DecisionEngine:
             d.reasons.append("empty_or_error_response")
             return d
 
+        # Quality gate: low-tier chitchat → forget typed permanent path
+        if value_tier == "low" or should_persist is False:
+            if mem_type == "episodic" and not reflection and not semantic_items:
+                d.forget = True
+                d.archive = True
+                d.save = False
+                d.reasons.append("low_value_tier_skip")
+                return d
+
         # identity signals first (even short turns)
-        if mem_type == "identity" or "identity" in secondary or "identity_query" in tags:
+        if (
+            mem_type == "identity"
+            or "identity" in secondary
+            or "identity_query" in tags
+            or "self_intro" in tags
+            or "preference" in tags
+        ):
             d.save = True
             d.update_identity = True
             d.reasons.append("identity_signal")
@@ -92,19 +117,35 @@ class DecisionEngine:
             d.reasons.append("trivial_chitchat")
             return d
 
-        # reflection present with content
+        # reflection present with actionable insight (not hollow summary)
         refl = reflection or {}
         if refl.get("summary") or refl.get("causes") or refl.get("lessons"):
-            d.save = True
-            d.form_long_term_knowledge = True
+            try:
+                from backend.modules.reflection_contract import (
+                    is_actionable_reflection,
+                    reflection_quality_score,
+                )
+
+                q = reflection_quality_score(refl)
+                actionable = is_actionable_reflection(refl)
+            except Exception:
+                q = {"score": 0.4, "has_insight": bool(refl.get("lessons"))}
+                actionable = bool(refl.get("lessons"))
+
+            if actionable or float(q.get("score") or 0) >= 0.45:
+                d.save = True
+                d.form_long_term_knowledge = True
+                d.reasons.append("has_actionable_reflection")
+            else:
+                d.reasons.append("hollow_reflection_skipped_for_identity")
+
             conf_r = float(refl.get("confidence") or 0)
-            if conf_r >= 0.55:
-                d.update_identity = d.update_identity or False
-                # light identity nudge only if lessons exist
-                if refl.get("lessons"):
-                    d.update_identity = True
-                    d.reasons.append("reflection_lessons")
-            d.reasons.append("has_reflection")
+            # Do NOT lower threshold: still require lessons + confidence for identity
+            if conf_r >= 0.55 and refl.get("lessons") and actionable:
+                d.update_identity = True
+                d.reasons.append("reflection_lessons")
+            elif conf_r >= 0.55 and refl.get("lessons") and not actionable:
+                d.reasons.append("lessons_present_but_low_insight")
 
         # semantic knowledge items
         if semantic_items:
