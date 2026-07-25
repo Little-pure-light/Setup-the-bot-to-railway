@@ -242,15 +242,25 @@ def create_redis_client() -> Tuple[Any, str, Optional[str]]:
 
 
 def get_shared_redis_interface(*, force_refresh: bool = False) -> "RedisInterface":
-    """Process-wide singleton RedisInterface."""
+    """
+    Process-wide singleton RedisInterface.
+
+    Critical: force_refresh reconnects **in-place** on the same object so
+    module-level holders (chat_router.redis_interface, MemorySystem.redis, …)
+    keep working after mock→real without swapping Python references.
+    """
     global _shared_interface, _redis_mode
     with _lock:
-        if _shared_interface is not None and not force_refresh:
-            return _shared_interface
-        iface = RedisInterface(use_shared_init=True)
-        _shared_interface = iface
-        _redis_mode = iface.mode
-        return iface
+        if _shared_interface is None:
+            iface = RedisInterface(use_shared_init=True)
+            _shared_interface = iface
+            _redis_mode = iface.mode
+            return iface
+        if force_refresh:
+            client, mode, _err = create_redis_client()
+            _shared_interface.adopt_backend(client, mode)
+            _redis_mode = mode
+        return _shared_interface
 
 
 def _has_redis_config() -> bool:
@@ -264,59 +274,70 @@ def _has_redis_config() -> bool:
     )
 
 
-def maybe_reconnect_redis(*, force: bool = False) -> "RedisInterface":
+def maybe_reconnect_redis(
+    *, force: bool = False, allow_from_real: bool = False
+) -> "RedisInterface":
     """
-    If started in mock because real connect failed (or config now present),
-    attempt force_refresh at most once per REDIS_RECONNECT_COOLDOWN_SECONDS.
-    Not called on every chat — intended for /ready (and explicit health).
+    Rate-limited reconnect that mutates the shared interface in-place.
+
+    - mock/none + config → try real again
+    - real + allow_from_real (ping failed) → try new connection (may become mock/real)
+    Not invoked on every chat — /ready (and explicit health).
     """
-    global _last_reconnect_attempt, _shared_interface, _redis_mode
+    global _last_reconnect_attempt, _redis_mode
     iface = get_shared_redis_interface()
-    if iface.mode == "real":
-        return iface
     if not _has_redis_config():
         return iface
-    # only reconnect when we have config but are mock/none
-    if iface.mode not in ("mock", "none"):
+    if iface.mode == "real" and not allow_from_real:
         return iface
+    if iface.mode not in ("mock", "none", "real"):
+        return iface
+
     now = time.time()
     with _lock:
         cooldown = _reconnect_cooldown_seconds()
         if not force and (now - _last_reconnect_attempt) < cooldown:
             return iface
         _last_reconnect_attempt = now
+
+    prev = iface.mode
     logger.info(
-        "redis_reconnect_attempt previous_mode=%s cooldown_s=%s force=%s",
-        iface.mode,
+        "redis_reconnect_attempt previous_mode=%s cooldown_s=%s force=%s allow_from_real=%s",
+        prev,
         _reconnect_cooldown_seconds(),
         force,
+        allow_from_real,
     )
-    new_iface = get_shared_redis_interface(force_refresh=True)
-    if new_iface.mode == "real":
-        logger.info("redis_reconnect_success mode=real")
-        print("✅ Redis reconnected mode=real")
+    # In-place refresh (same object identity)
+    client, mode, _err = create_redis_client()
+    iface.adopt_backend(client, mode)
+    _redis_mode = mode
+    if mode == "real":
+        logger.info("redis_reconnect_success mode=real previous=%s", prev)
+        print(f"✅ Redis reconnected mode=real (was {prev})")
     else:
         logger.info(
-            "redis_reconnect_still_mock mode=%s err=%s",
-            new_iface.mode,
+            "redis_reconnect_not_real mode=%s err=%s previous=%s",
+            mode,
             get_redis_last_error().get("error_type"),
+            prev,
         )
-    return new_iface
+    return iface
 
 
 def redis_ping_status() -> Dict[str, Any]:
     """
     For /ready — short ping with classification.
     Returns status: not_configured | ping_ok | ping_fail | mock
-    May attempt rate-limited reconnect when mock+configured.
+    May attempt rate-limited reconnect when mock/configured or real disconnect.
     """
     has_config = _has_redis_config()
-    # Rate-limited reconnect when degraded to mock but config exists
     if has_config:
-        iface = maybe_reconnect_redis(force=False)
+        iface = maybe_reconnect_redis(force=False, allow_from_real=False)
     else:
         iface = get_shared_redis_interface()
     mode = iface.mode
+
     if mode == "mock":
         if not has_config:
             return {
@@ -339,17 +360,14 @@ def redis_ping_status() -> Dict[str, Any]:
             "configured": has_config,
             "error_type": get_redis_last_error().get("error_type") or "",
         }
-    # real — verify ping still works
+
+    # real — verify ping; on failure try reconnect once (rate-limited)
     t0 = time.perf_counter()
+    client = iface.get_client()
     try:
-        if iface.redis is None:
-            return {
-                "status": "ping_fail",
-                "mode": mode,
-                "configured": has_config,
-                "error_type": "NoClient",
-            }
-        iface.redis.ping()
+        if client is None:
+            raise RuntimeError("NoClient")
+        client.ping()
         ms = int((time.perf_counter() - t0) * 1000)
         return {
             "status": "ping_ok",
@@ -359,17 +377,48 @@ def redis_ping_status() -> Dict[str, Any]:
             "error_type": "",
         }
     except Exception as e:
+        first_err = type(e).__name__
+        # try recovery without waiting forever on ping_fail
+        iface = maybe_reconnect_redis(force=False, allow_from_real=True)
+        client2 = iface.get_client()
+        t1 = time.perf_counter()
+        try:
+            if iface.mode == "real" and client2 is not None:
+                client2.ping()
+                return {
+                    "status": "ping_ok",
+                    "mode": "real",
+                    "configured": True,
+                    "ping_ms": int((time.perf_counter() - t1) * 1000),
+                    "error_type": "",
+                    "recovered_from": first_err,
+                }
+        except Exception as e2:
+            return {
+                "status": "ping_fail" if iface.mode == "real" else iface.mode,
+                "mode": iface.mode,
+                "configured": True,
+                "error_type": type(e2).__name__,
+                "previous_error_type": first_err,
+                "ping_ms": int((time.perf_counter() - t0) * 1000),
+            }
         return {
-            "status": "ping_fail",
-            "mode": "real",
+            "status": "ping_fail" if iface.mode == "real" else iface.mode,
+            "mode": iface.mode,
             "configured": True,
-            "error_type": type(e).__name__,
+            "error_type": first_err,
             "ping_ms": int((time.perf_counter() - t0) * 1000),
         }
 
 
 class RedisInterface:
-    """Redis 短期記憶接口"""
+    """
+    Redis 短期記憶接口.
+
+    Shared singleton keeps object identity stable; adopt_backend() swaps the
+    underlying client under a lock so chat_router / MemorySystem / ReflectionStorage
+    module-level references keep using the live client after reconnect.
+    """
 
     def __init__(
         self,
@@ -379,32 +428,43 @@ class RedisInterface:
         mode: Optional[str] = None,
     ):
         self.ttl_seconds = int(os.getenv("MEMORY_REDIS_TTL_SECONDS", "86400"))
+        self._client_lock = threading.RLock()
         self.mode: str = "none"
         self.redis = redis_client
         if self.redis is not None:
-            # injected client (tests / DI)
             if mode in ("real", "mock", "none"):
                 self.mode = mode
             else:
                 name = type(self.redis).__name__
-                # RedisMock only — unittest MagicMock is treated as real when testing ping
                 self.mode = "mock" if name == "RedisMock" else "real"
             return
         client, mode_auto, _err = create_redis_client()
         self.redis = client
         self.mode = mode_auto
 
+    def adopt_backend(self, client: Any, mode: str) -> None:
+        """Thread-safe in-place client swap (preserves object identity)."""
+        with self._client_lock:
+            self.redis = client
+            self.mode = mode if mode in ("real", "mock", "none") else "none"
+
+    def get_client(self) -> Any:
+        """Current underlying client (may change after adopt_backend)."""
+        with self._client_lock:
+            return self.redis
+
     def scan_keys(self, match: str, count: int = 100) -> List[str]:
-        return _scan_keys(self.redis, match, count=count)
+        return _scan_keys(self.get_client(), match, count=count)
 
     def store_short_term(self, conversation_id: str, data: Dict[str, Any]) -> bool:
-        if not self.redis:
+        client = self.get_client()
+        if not client:
             return False
         try:
             payload = self.normalize_latest_payload(data)
             key = self._get_conversation_key(conversation_id)
-            self.redis.set(key, json.dumps(payload, ensure_ascii=False))
-            self.redis.expire(key, self.ttl_seconds)
+            client.set(key, json.dumps(payload, ensure_ascii=False))
+            client.expire(key, self.ttl_seconds)
             return True
         except Exception as e:
             logger.warning("redis_store_failed type=%s", type(e).__name__)
@@ -412,11 +472,12 @@ class RedisInterface:
             return False
 
     def load_recent_context(self, conversation_id: str) -> Optional[Dict[str, Any]]:
-        if not self.redis:
+        client = self.get_client()
+        if not client:
             return None
         try:
             key = self._get_conversation_key(conversation_id)
-            value = self.redis.get(key)
+            value = client.get(key)
             if not value:
                 return None
             if isinstance(value, bytes):
@@ -495,10 +556,11 @@ class RedisInterface:
         return payload
 
     def clear_conversation(self, conversation_id: str) -> bool:
-        if not self.redis:
+        client = self.get_client()
+        if not client:
             return False
         try:
-            self.redis.delete(self._get_conversation_key(conversation_id))
+            client.delete(self._get_conversation_key(conversation_id))
             return True
         except Exception as e:
             logger.warning("redis_clear_failed type=%s", type(e).__name__)
@@ -509,14 +571,15 @@ class RedisInterface:
         return f"conv:{conversation_id}:latest"
 
     def get_stats(self) -> Dict[str, Any]:
-        if not self.redis:
-            return {"status": "unavailable", "mode": "none"}
+        client = self.get_client()
+        if not client:
+            return {"status": "unavailable", "mode": self.mode or "none"}
         try:
             return {
                 "status": "active",
                 "ttl_seconds": self.ttl_seconds,
                 "mode": self.mode,
-                "client": type(self.redis).__name__,
+                "client": type(client).__name__,
             }
         except Exception as e:
             return {"status": "error", "error_type": type(e).__name__, "mode": self.mode}

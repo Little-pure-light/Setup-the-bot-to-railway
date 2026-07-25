@@ -107,6 +107,7 @@ def test_redis_reconnect_mock_to_real(monkeypatch):
         # force reconnect immediately
         ri._last_reconnect_attempt = 0.0
         iface2 = maybe_reconnect_redis(force=True)
+        assert iface2 is iface1  # in-place: same object
         assert iface2.mode == "real"
         assert calls["n"] >= 2
 
