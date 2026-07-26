@@ -70,6 +70,12 @@
 | `REFLECTION_INCLUDE_WAIT_MS` | 可選 bounded wait（毫秒）；0=立即 pending | `0` |
 | `REFLECTION_INCLUDE_WAIT_MAX_MS` | wait 上限 | `1500` |
 | `APP_ENV` | 環境標記（staging/production） | 空 |
+| `SILENCE_ENGINE_ENABLED` | 靜默引擎主開關（回答路徑切換，**非** sleep） | `false` |
+| `SILENCE_ENGINE_MODE` | `observe`（只記錄）/ `shadow`（內部可比較、不改答案）/ `active`（僅 allowlist 可改路徑） | `observe` |
+| `SILENCE_ENGINE_ALLOWLIST` | 逗號分隔：`user:<id>`、`conv:<id>`、`ai:<id>` 或裸 id | 空＝無人在 active 放行 |
+| `SILENCE_ENGINE_MIN_CONFIDENCE` | 路由最低信心（0–1） | `0.75` |
+| `SILENCE_ENGINE_MAX_HYPOTHESES` | C1n 最多假設數（原型 ≤2） | `2` |
+| `SILENCE_ENGINE_LOGGING_ENABLED` | 是否打 silence_engine 結構化 log | `true` |
 
 ## 前端（Vite）
 
@@ -89,6 +95,7 @@
 OPENAI_API_KEY=test-key
 SUPABASE_URL=http://mock.supabase.local
 SUPABASE_ANON_KEY=test-key
+SILENCE_ENGINE_ENABLED=false
 ```
 
 ## 變更規則
