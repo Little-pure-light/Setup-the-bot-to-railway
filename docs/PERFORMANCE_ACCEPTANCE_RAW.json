@@ -1,0 +1,309 @@
+{
+  "started_at": "2026-07-25T14:58:52.392139+00:00",
+  "base_url": "https://ai2.dreamground.net",
+  "has_secret": true,
+  "runs": [
+    {
+      "cat": "seed",
+      "code": 200,
+      "total_ms": 14302,
+      "first_token_ms": 14302,
+      "ok": true
+    },
+    {
+      "cat": "seed",
+      "code": 200,
+      "total_ms": 8633,
+      "first_token_ms": 8633,
+      "ok": true
+    },
+    {
+      "cat": "seed",
+      "code": 200,
+      "total_ms": 5621,
+      "first_token_ms": 5621,
+      "ok": true
+    },
+    {
+      "cat": "D_non_stream",
+      "code": 200,
+      "total_ms": 5805,
+      "first_token_ms": 5805,
+      "ok": true
+    },
+    {
+      "cat": "D_non_stream",
+      "code": 200,
+      "total_ms": 6099,
+      "first_token_ms": 6099,
+      "ok": true
+    },
+    {
+      "cat": "D_non_stream",
+      "code": 200,
+      "total_ms": 6532,
+      "first_token_ms": 6532,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 6845,
+      "first_token_ms": 2527,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 6315,
+      "first_token_ms": 2481,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 6585,
+      "first_token_ms": 2902,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 5874,
+      "first_token_ms": 2500,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 5988,
+      "first_token_ms": 2557,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 6809,
+      "first_token_ms": 3276,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 6342,
+      "first_token_ms": 2562,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 8083,
+      "first_token_ms": 3723,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 6101,
+      "first_token_ms": 2487,
+      "ok": true
+    },
+    {
+      "cat": "A_C_stream_pure",
+      "code": 200,
+      "total_ms": 5840,
+      "first_token_ms": 2500,
+      "ok": true
+    },
+    {
+      "cat": "B_memory_recall",
+      "code": 200,
+      "total_ms": 5688,
+      "first_token_ms": 5688,
+      "ok": true,
+      "snippet": "親愛的，你的名字是效能測A！😊✨ 有什麼我可以幫助你的嗎？",
+      "reflection_status": null
+    },
+    {
+      "cat": "B_memory_recall",
+      "code": 200,
+      "total_ms": 5762,
+      "first_token_ms": 5762,
+      "ok": true,
+      "snippet": "親愛的效能測A，你的飲料偏好是無糖綠茶哦！💚✨還有其他你喜歡的飲品或想分享的事情嗎？哈尼～",
+      "reflection_status": null
+    },
+    {
+      "cat": "B_memory_recall",
+      "code": 200,
+      "total_ms": 5628,
+      "first_token_ms": 5628,
+      "ok": true,
+      "snippet": "嘿嘿～親愛的效能測A，你的專案代號是 LightSoul-Perf-Accept！✨還有其他想討論的內容或者問題嗎？😊",
+      "reflection_status": null
+    },
+    {
+      "cat": "E_consecutive",
+      "code": 200,
+      "total_ms": 5344,
+      "first_token_ms": 2611,
+      "ok": true,
+      "seq": 1
+    },
+    {
+      "cat": "E_consecutive",
+      "code": 200,
+      "total_ms": 5647,
+      "first_token_ms": 2510,
+      "ok": true,
+      "seq": 2
+    },
+    {
+      "cat": "E_consecutive",
+      "code": 200,
+      "total_ms": 5080,
+      "first_token_ms": 2321,
+      "ok": true,
+      "seq": 3
+    },
+    {
+      "cat": "E_consecutive",
+      "code": 200,
+      "total_ms": 4987,
+      "first_token_ms": 2168,
+      "ok": true,
+      "seq": 4
+    },
+    {
+      "cat": "E_consecutive",
+      "code": 200,
+      "total_ms": 5261,
+      "first_token_ms": 2375,
+      "ok": true,
+      "seq": 5
+    }
+  ],
+  "errors": [],
+  "health": {
+    "code": 200,
+    "ms": 447,
+    "body": {
+      "status": "ok",
+      "check": "liveness",
+      "version": "1.0.1",
+      "git_commit": "ce9bfe17e60a033281939cac51a8c9595fd62f47",
+      "timestamp": "2026-07-25T14:58:52.819024+00:00"
+    }
+  },
+  "ready": {
+    "code": 200,
+    "ms": 306,
+    "body": {
+      "status": "ok",
+      "check": "readiness",
+      "version": "1.0.1",
+      "git_commit": "ce9bfe17e60a033281939cac51a8c9595fd62f47",
+      "services": {
+        "app": "ok",
+        "openai_config": "configured",
+        "supabase_config": "configured",
+        "redis": "ping_ok",
+        "supabase": "config_only",
+        "redis_mode": "real"
+      },
+      "redis_detail": {
+        "status": "ping_ok",
+        "mode": "real",
+        "configured": true,
+        "ping_ms": 0,
+        "error_type": ""
+      },
+      "notes": {
+        "supabase": "config_and_optional_dns_only_not_db_probe",
+        "redis": "short_ping_with_mode_real_mock_none",
+        "openai": "key_presence_only_no_api_call"
+      },
+      "timestamp": "2026-07-25T14:58:53.135146+00:00"
+    }
+  },
+  "summary": {
+    "A_C_stream_pure_total": {
+      "n": 10,
+      "avg": 6478.2,
+      "median": 6328.5,
+      "min": 5840,
+      "max": 8083,
+      "all": [
+        5840,
+        5874,
+        5988,
+        6101,
+        6315,
+        6342,
+        6585,
+        6809,
+        6845,
+        8083
+      ]
+    },
+    "A_C_stream_pure_first_token": {
+      "n": 10,
+      "avg": 2751.5,
+      "median": 2542.0,
+      "min": 2481,
+      "max": 3723,
+      "all": [
+        2481,
+        2487,
+        2500,
+        2500,
+        2527,
+        2557,
+        2562,
+        2902,
+        3276,
+        3723
+      ]
+    },
+    "B_memory_recall": {
+      "n": 3,
+      "avg": 5692.7,
+      "median": 5688,
+      "min": 5628,
+      "max": 5762,
+      "all": [
+        5628,
+        5688,
+        5762
+      ]
+    },
+    "D_non_stream": {
+      "n": 3,
+      "avg": 6145.3,
+      "median": 6099,
+      "min": 5805,
+      "max": 6532,
+      "all": [
+        5805,
+        6099,
+        6532
+      ]
+    },
+    "E_consecutive": {
+      "n": 5,
+      "avg": 5263.8,
+      "median": 5261,
+      "min": 4987,
+      "max": 5647,
+      "all": [
+        4987,
+        5080,
+        5261,
+        5344,
+        5647
+      ]
+    }
+  },
+  "finished_at": "2026-07-25T15:01:35.619715+00:00",
+  "note": "Client-side timings. Server-side llm_stream/embedding/redis stage breakdown requires Railway chat_timing logs (not available in this script)."
+}
