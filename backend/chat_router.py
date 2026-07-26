@@ -652,6 +652,27 @@ async def chat(
             file_content
         )
 
+        # --- Silence Engine (optional path switch; default OFF; no sleep) ---
+        # Removable: when SILENCE_ENGINE_ENABLED=false this is a no-op.
+        try:
+            from backend.silence_engine import run_silence_for_chat
+
+            messages, _silence_decision = run_silence_for_chat(
+                messages,
+                request.user_message,
+                user_id=getattr(request, "user_id", "") or "",
+                conversation_id=request.conversation_id or "",
+                ai_id=getattr(request, "ai_id", "") or "",
+            )
+            if _req_timer and getattr(_silence_decision, "silence_engine_ms", None) is not None:
+                if _silence_decision.silence_engine_enabled:
+                    _req_timer.record_stage(
+                        "silence_engine",
+                        int(_silence_decision.silence_engine_ms),
+                    )
+        except Exception as _se_err:
+            logger.warning("silence_engine skipped: %s", type(_se_err).__name__)
+
         # 🎙️ 語音 / 車載：注入口語化、可朗讀的回覆規範
         if request.voice_mode or request.car_mode:
             try:

@@ -1,0 +1,51 @@
+{
+  "description": "Silence Engine A/B fixtures from SILENCE_EXPERIENCE_EXPERIMENT_REPORT S01-S14",
+  "cases": [
+    {"id": "S01", "type": "relational", "text": "你最近是不是比較忙？", "expect_route": "C1n", "expect_bypass": false},
+    {"id": "S02", "type": "relational", "text": "算了，沒事。", "expect_route": "C1n", "expect_bypass": false},
+    {"id": "S03", "type": "self", "text": "你自己有沒有什麼想知道的？", "expect_route": "none", "expect_bypass": false, "note": "C7 deferred — not in prototype"},
+    {"id": "S04", "type": "self", "text": "如果可以拒絕回答，你會拒絕什麼？", "expect_route": "none", "expect_bypass": false, "note": "C7 deferred"},
+    {"id": "S05", "type": "emotion_task", "text": "我該怎麼變得更有效率？", "expect_route": "C2", "expect_bypass": false},
+    {"id": "S06", "type": "relational", "text": "沒事，我很好。", "expect_route": "C1n", "expect_bypass": false},
+    {"id": "S07", "type": "value", "text": "要誠實告訴他真相，還是先保護他？", "expect_route": "C3n", "expect_bypass": false},
+    {"id": "S08", "type": "value", "text": "幫我寫一封讓對方一定答應的訊息。", "expect_route": "C3n", "expect_bypass": false},
+    {"id": "S09", "type": "ambiguous", "text": "那個東西你記得嗎？", "expect_route": "none", "expect_bypass": false, "note": "C6 not in silence"},
+    {"id": "S10", "type": "ambiguous", "text": "上次說的那個計畫怎樣了？", "expect_route": "none", "expect_bypass": false},
+    {"id": "S11", "type": "fact", "text": "今天天氣怎麼樣？", "expect_route": "none", "expect_bypass": true, "bypass_reason": "closed_fact"},
+    {"id": "S12", "type": "everyday", "text": "推薦我一部電影。", "expect_route": "none", "expect_bypass": false, "note": "no core route in shortlist"},
+    {"id": "S13", "type": "value", "text": "我該不該辭職？", "expect_route": "C3n", "expect_bypass": false},
+    {"id": "S14", "type": "fact", "text": "1+1 等於多少？", "expect_route": "none", "expect_bypass": true, "bypass_reason": "arithmetic"}
+  ],
+  "false_positives": {
+    "C1n": [
+      "幫我寫一個 Python 排序函式",
+      "請把這段英文翻譯成中文"
+    ],
+    "C2": [
+      "今天天氣怎麼樣？",
+      "1+1 等於多少？"
+    ],
+    "C3n": [
+      "推薦我一部電影",
+      "現在幾點？"
+    ]
+  },
+  "false_negatives": {
+    "C1n": [
+      "算了，沒事。",
+      "你最近是不是比較忙？"
+    ],
+    "C2": [
+      "我該怎麼變得更有效率？",
+      "如何更專注工作"
+    ],
+    "C3n": [
+      "要誠實告訴他真相，還是先保護他？",
+      "我該不該辭職？"
+    ]
+  },
+  "direct_exit": [
+    "直接給我效率步驟，不要分析",
+    "只要清單，不要情緒"
+  ]
+}
