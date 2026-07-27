@@ -389,7 +389,7 @@ import {
   CHAT_API,
   API_BASE,
   API_SECRET,
-  CLIENT_ID,
+  getClientId,
   getAuthHeaders,
   VOICE_EVENTS_API,
   VOICE_PREPARE_SPEECH_API,
@@ -927,7 +927,7 @@ export default {
               conversation_id: this.conversationId,
               user_id: this.userId,
               // 入口標記（VITE_CLIENT_ID；空字串表示未標記；非授權）
-              client_id: CLIENT_ID || '',
+              client_id: getClientId(),
               voice_mode: voiceMode,
               car_mode: this.carMode,
               input_method: inputMethod,

@@ -33,6 +33,11 @@ export const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || ''
 // Cloudflare 測試部署可設 VITE_CLIENT_ID=cloudflare-test
 export const CLIENT_ID = (import.meta.env.VITE_CLIENT_ID || '').trim()
 
+/** Runtime reader (testable) for chat body client_id */
+export function getClientId() {
+  return (CLIENT_ID || '').trim()
+}
+
 // 取得帶有 Auth 的通用請求 headers（同步版；優先使用 localStorage 中的 session 由呼叫端覆寫）
 export const getAuthHeaders = () => {
   const headers = { 'Content-Type': 'application/json' }
