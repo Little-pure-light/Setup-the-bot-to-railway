@@ -82,6 +82,8 @@ class ChatRequest(BaseModel):
     user_id: str = "default_user"
     # ✅ 新增 AI 寶貝切換開關
     ai_id: str = os.getenv("AI_ID", "xiaochenguang_v1")
+    # 前端入口路由提示（可偽造；僅 Silence 實驗分流，非授權）
+    client_id: str = ""
     # 🎙️ 語音 / 車載
     voice_mode: bool = False  # 語音友善回覆（簡短口語）
     car_mode: bool = False  # 車載：更短、重點前置
@@ -663,6 +665,7 @@ async def chat(
                 user_id=getattr(request, "user_id", "") or "",
                 conversation_id=request.conversation_id or "",
                 ai_id=getattr(request, "ai_id", "") or "",
+                client_id=getattr(request, "client_id", "") or "",
             )
             if _req_timer and getattr(_silence_decision, "silence_engine_ms", None) is not None:
                 if _silence_decision.silence_engine_enabled:

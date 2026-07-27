@@ -72,7 +72,7 @@
 | `APP_ENV` | 環境標記（staging/production） | 空 |
 | `SILENCE_ENGINE_ENABLED` | 靜默引擎主開關（回答路徑切換，**非** sleep） | `false` |
 | `SILENCE_ENGINE_MODE` | `observe`（只記錄）/ `shadow`（內部可比較、不改答案）/ `active`（僅 allowlist 可改路徑） | `observe` |
-| `SILENCE_ENGINE_ALLOWLIST` | 逗號分隔：`user:<id>`、`conv:<id>`、`ai:<id>` 或裸 id | 空＝無人在 active 放行 |
+| `SILENCE_ENGINE_ALLOWLIST` | 逗號分隔：`user:<id>`、`conv:<id>`、`ai:<id>`、`client:<id>` 或裸 id（裸 id 不含 client） | 空＝無人在 active 放行 |
 | `SILENCE_ENGINE_MIN_CONFIDENCE` | 路由最低信心（0–1） | `0.75` |
 | `SILENCE_ENGINE_MAX_HYPOTHESES` | C1n 最多假設數（原型 ≤2） | `2` |
 | `SILENCE_ENGINE_LOGGING_ENABLED` | 是否打 silence_engine 結構化 log | `true` |
@@ -83,9 +83,10 @@
 |------|------|
 | `VITE_API_URL` | 後端 API base |
 | `VITE_COPILOT_API_URL` | Copilot |
-| `VITE_API_SECRET` | 對應後端 API_SECRET |
+| `VITE_API_SECRET` | 對應後端 API_SECRET（**不建議**；優先 Supabase JWT） |
 | `VITE_SUPABASE_URL` | 前端 Auth |
 | `VITE_SUPABASE_ANON_KEY` | 前端 Auth |
+| `VITE_CLIENT_ID` | 前端入口標記（如 `cloudflare-test`）；空＝不送標記。**非 secret、非授權** |
 
 生產預設見 `frontend/.env.production`（僅 URL，無 key）。
 
