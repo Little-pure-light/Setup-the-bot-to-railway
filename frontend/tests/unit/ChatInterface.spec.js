@@ -20,6 +20,15 @@ vi.mock('../../src/lib/auth.js', () => ({
   isAuthConfigured: vi.fn(() => false),
 }))
 
+const clientIdState = vi.hoisted(() => ({ value: '' }))
+vi.mock('../../src/config.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
+    ...actual,
+    getClientId: () => clientIdState.value,
+  }
+})
+
 vi.mock('../../src/lib/voice.js', async () => {
   const actual = await vi.importActual('../../src/lib/voice.js')
   return {
@@ -159,5 +168,63 @@ describe('ChatInterface', () => {
     await flushPromises()
     const last = w.vm.messages[w.vm.messages.length - 1]
     expect(last.type === 'system' || /錯誤|error|HTTP/i.test(last.content)).toBe(true)
+  })
+
+  it('sends client_id=cloudflare-test from getClientId into /api/chat body', async () => {
+    clientIdState.value = 'cloudflare-test'
+    const w = mountChat()
+    await flushPromises()
+    w.vm.userInput = '算了，沒事。'
+    w.vm.isLoading = false
+    w.vm.isStreaming = false
+
+    const bodies = []
+    globalThis.fetch = vi.fn(async (url, init) => {
+      expect(String(url)).toContain('/api/chat')
+      bodies.push(JSON.parse(init.body))
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('ok'))
+          controller.close()
+        },
+      })
+      return { ok: true, body: stream, status: 200, text: async () => 'ok' }
+    })
+
+    await w.vm.sendMessage()
+    await flushPromises()
+    expect(bodies.length).toBeGreaterThan(0)
+    expect(bodies[0].client_id).toBe('cloudflare-test')
+    expect(bodies[0]).toMatchObject({
+      user_message: '算了，沒事。',
+      client_id: 'cloudflare-test',
+    })
+  })
+
+  it('sends empty client_id when getClientId is empty (backward compatible)', async () => {
+    clientIdState.value = ''
+    const w = mountChat()
+    await flushPromises()
+    w.vm.userInput = 'hello'
+    w.vm.isLoading = false
+    w.vm.isStreaming = false
+
+    const bodies = []
+    globalThis.fetch = vi.fn(async (_url, init) => {
+      bodies.push(JSON.parse(init.body))
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('ok'))
+          controller.close()
+        },
+      })
+      return { ok: true, body: stream, status: 200, text: async () => 'ok' }
+    })
+
+    await w.vm.sendMessage()
+    await flushPromises()
+    expect(bodies.length).toBeGreaterThan(0)
+    expect(bodies[0].client_id).toBe('')
+    expect(bodies[0]).toHaveProperty('client_id')
   })
 })

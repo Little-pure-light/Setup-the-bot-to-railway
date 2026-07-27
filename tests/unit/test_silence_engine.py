@@ -14,10 +14,12 @@ from backend.silence_engine import (
     apply_silence_framing,
     check_bypass,
     evaluate_silence_route,
+    resolve_allowlist_match,
     run_silence_for_chat,
     score_routes,
     silence_engine_enabled,
 )
+from backend.chat_router import ChatRequest
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "silence_s01_s14.json"
 
@@ -320,3 +322,152 @@ def test_public_metadata_has_no_raw_cot(enable_active):
     assert "chain" not in blob.lower()
     assert "hidden" not in blob.lower()
     assert "silence_route_selected" in meta
+    assert "silence_match_source" in meta
+
+
+# ---------------------------------------------------------------------------
+# client_id isolation (Task 002)
+# ---------------------------------------------------------------------------
+
+def test_chat_request_optional_client_id_default_empty():
+    req = ChatRequest(
+        user_message="hi",
+        conversation_id="c1",
+        user_id="u1",
+    )
+    assert req.client_id == ""
+
+
+def test_parser_user_conv_ai_bare_still_match(monkeypatch):
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST",
+        "user:u-alpha, conv:c-beta , ai:xiaochenguang_v1, bare-token",
+    )
+    ok, src = resolve_allowlist_match(user_id="u-alpha")
+    assert ok is True and src == "user"
+    ok, src = resolve_allowlist_match(conversation_id="c-beta")
+    assert ok is True and src == "conv"
+    ok, src = resolve_allowlist_match(ai_id="xiaochenguang_v1")
+    assert ok is True and src == "ai"
+    ok, src = resolve_allowlist_match(user_id="bare-token")
+    assert ok is True and src == "any"
+
+
+def test_client_exact_match_only(monkeypatch):
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST", "client:cloudflare-test"
+    )
+    ok, src = resolve_allowlist_match(client_id="cloudflare-test")
+    assert ok is True and src == "client"
+    ok, src = resolve_allowlist_match(client_id="other-client")
+    assert ok is False and src == "none"
+    # bare form must not match client ids
+    ok, src = resolve_allowlist_match(user_id="cloudflare-test")
+    assert ok is False
+
+
+def test_client_match_survives_changing_user_and_conv(monkeypatch):
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST", "client:cloudflare-test"
+    )
+    monkeypatch.setenv("SILENCE_ENGINE_ENABLED", "true")
+    monkeypatch.setenv("SILENCE_ENGINE_MODE", "shadow")
+    monkeypatch.setenv("SILENCE_ENGINE_LOGGING_ENABLED", "false")
+    for uid, conv in [("uuid-A", "conv-1"), ("uuid-B", "conv-9")]:
+        d = evaluate_silence_route(
+            "算了，沒事。",
+            user_id=uid,
+            conversation_id=conv,
+            client_id="cloudflare-test",
+        )
+        assert d.silence_allowlisted is True
+        assert d.silence_match_source == "client"
+        assert d.silence_apply_framing is False  # shadow
+
+
+def test_missing_client_id_unmatched(monkeypatch):
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST", "client:cloudflare-test"
+    )
+    ok, src = resolve_allowlist_match(
+        user_id="any", conversation_id="any", client_id=""
+    )
+    assert ok is False and src == "none"
+    d = evaluate_silence_route(
+        "算了，沒事。",
+        user_id="openwebui_user",
+        conversation_id="owui_x",
+        client_id="",
+        force_enabled=True,
+        force_mode="shadow",
+    )
+    assert d.silence_allowlisted is False
+    assert d.silence_match_source == "none"
+
+
+def test_shadow_apply_false_when_client_allowlisted(monkeypatch):
+    monkeypatch.setenv("SILENCE_ENGINE_ENABLED", "true")
+    monkeypatch.setenv("SILENCE_ENGINE_MODE", "shadow")
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST", "client:cloudflare-test"
+    )
+    monkeypatch.setenv("SILENCE_ENGINE_LOGGING_ENABLED", "false")
+    msgs = [{"role": "system", "content": "BASE"}]
+    out, d = run_silence_for_chat(
+        msgs,
+        "算了，沒事。",
+        client_id="cloudflare-test",
+        user_id="changing",
+        conversation_id="also-changing",
+    )
+    assert d.silence_allowlisted is True
+    assert d.silence_match_source == "client"
+    assert d.silence_apply_framing is False
+    assert out[0]["content"] == "BASE"
+
+
+def test_active_applies_only_for_client_allowlist(monkeypatch):
+    monkeypatch.setenv("SILENCE_ENGINE_ENABLED", "true")
+    monkeypatch.setenv("SILENCE_ENGINE_MODE", "active")
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST", "client:cloudflare-test"
+    )
+    monkeypatch.setenv("SILENCE_ENGINE_LOGGING_ENABLED", "false")
+    d_ok = evaluate_silence_route(
+        "算了，沒事。", client_id="cloudflare-test"
+    )
+    assert d_ok.silence_apply_framing is True
+    assert d_ok.silence_match_source == "client"
+    d_no = evaluate_silence_route(
+        "算了，沒事。",
+        user_id="openwebui_user",
+        conversation_id="owui_x",
+        client_id="",
+    )
+    assert d_no.silence_apply_framing is False
+    assert d_no.silence_allowlisted is False
+
+
+def test_match_source_in_log_not_raw_ids(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setenv("SILENCE_ENGINE_ENABLED", "true")
+    monkeypatch.setenv("SILENCE_ENGINE_MODE", "shadow")
+    monkeypatch.setenv(
+        "SILENCE_ENGINE_ALLOWLIST", "client:cloudflare-test"
+    )
+    monkeypatch.setenv("SILENCE_ENGINE_LOGGING_ENABLED", "true")
+    secretish = "supabase-uuid-should-not-appear-in-log"
+    with caplog.at_level(logging.INFO, logger="silence_engine"):
+        d = evaluate_silence_route(
+            "算了，沒事。",
+            user_id=secretish,
+            conversation_id="conv_secret_should_not_log",
+            client_id="cloudflare-test",
+        )
+        d.log()
+    blob = " ".join(r.message for r in caplog.records)
+    assert "match_source=client" in blob
+    assert secretish not in blob
+    assert "conv_secret_should_not_log" not in blob
+    assert "Bearer" not in blob

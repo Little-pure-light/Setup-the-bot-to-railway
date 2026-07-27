@@ -80,11 +80,18 @@ def silence_logging_enabled() -> bool:
 def _parse_allowlist() -> Dict[str, set]:
     """
     SILENCE_ENGINE_ALLOWLIST formats (comma-separated tokens):
-      user:<id>  conv:<id>  ai:<id>  bare token matches any of the three
+      user:<id>  conv:<id>  conversation:<id>  ai:<id>  client:<id>
+      bare token matches user/conv/ai/any (not client)
     Empty allowlist → no identity is allowlisted (active cannot alter answers).
     """
     raw = (os.getenv("SILENCE_ENGINE_ALLOWLIST") or "").strip()
-    out: Dict[str, set] = {"user": set(), "conv": set(), "ai": set(), "any": set()}
+    out: Dict[str, set] = {
+        "user": set(),
+        "conv": set(),
+        "ai": set(),
+        "client": set(),
+        "any": set(),
+    }
     if not raw:
         return out
     for part in raw.split(","):
@@ -98,9 +105,49 @@ def _parse_allowlist() -> Dict[str, set]:
             out["conv"].add(token.split(":", 1)[1].strip())
         elif lower.startswith("ai:"):
             out["ai"].add(token.split(":", 1)[1].strip())
+        elif lower.startswith("client:"):
+            out["client"].add(token.split(":", 1)[1].strip())
         else:
             out["any"].add(token)
     return out
+
+
+def resolve_allowlist_match(
+    *,
+    user_id: str = "",
+    conversation_id: str = "",
+    ai_id: str = "",
+    client_id: str = "",
+) -> Tuple[bool, str]:
+    """
+    Returns (matched, match_source).
+    match_source is one of: client|user|conv|ai|any|none
+    Does not return raw IDs (safe for logs).
+    Priority: client → user → conv → ai → any (first hit).
+    """
+    al = _parse_allowlist()
+    if not any(al.values()):
+        return False, "none"
+    cid = (client_id or "").strip()
+    if cid and cid in al["client"]:
+        return True, "client"
+    uid = (user_id or "").strip()
+    if uid and uid in al["user"]:
+        return True, "user"
+    conv = (conversation_id or "").strip()
+    if conv and conv in al["conv"]:
+        return True, "conv"
+    aid = (ai_id or "").strip()
+    if aid and aid in al["ai"]:
+        return True, "ai"
+    # bare tokens match user/conv/ai only (not client — client requires client: prefix)
+    if uid and uid in al["any"]:
+        return True, "any"
+    if conv and conv in al["any"]:
+        return True, "any"
+    if aid and aid in al["any"]:
+        return True, "any"
+    return False, "none"
 
 
 def is_allowlisted(
@@ -108,19 +155,15 @@ def is_allowlisted(
     user_id: str = "",
     conversation_id: str = "",
     ai_id: str = "",
+    client_id: str = "",
 ) -> bool:
-    al = _parse_allowlist()
-    if not any(al.values()):
-        return False
-    if user_id and (user_id in al["user"] or user_id in al["any"]):
-        return True
-    if conversation_id and (
-        conversation_id in al["conv"] or conversation_id in al["any"]
-    ):
-        return True
-    if ai_id and (ai_id in al["ai"] or ai_id in al["any"]):
-        return True
-    return False
+    matched, _src = resolve_allowlist_match(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        ai_id=ai_id,
+        client_id=client_id,
+    )
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +182,7 @@ class SilenceDecision:
     silence_direct_exit_offered: bool = False
     silence_engine_ms: int = 0
     silence_allowlisted: bool = False
+    silence_match_source: str = "none"  # client|user|conv|ai|any|none
     silence_apply_framing: bool = False  # only true in active + allowlist + route
     framing_instruction: str = ""
     hypotheses: List[str] = field(default_factory=list)
@@ -157,6 +201,7 @@ class SilenceDecision:
             "silence_direct_exit_offered": self.silence_direct_exit_offered,
             "silence_engine_ms": self.silence_engine_ms,
             "silence_allowlisted": self.silence_allowlisted,
+            "silence_match_source": self.silence_match_source or "none",
             "silence_apply_framing": self.silence_apply_framing,
         }
 
@@ -170,7 +215,7 @@ class SilenceDecision:
         logger.info(
             "silence_engine enabled=%s mode=%s candidate=%s selected=%s "
             "bypass=%s conf=%.2f structure=%s direct_exit=%s ms=%s "
-            "allowlist=%s apply=%s",
+            "allowlist=%s match_source=%s apply=%s",
             self.silence_engine_enabled,
             self.silence_engine_mode,
             self.silence_route_candidate,
@@ -181,6 +226,7 @@ class SilenceDecision:
             self.silence_direct_exit_offered,
             self.silence_engine_ms,
             self.silence_allowlisted,
+            self.silence_match_source or "none",
             self.silence_apply_framing,
         )
 
@@ -392,6 +438,7 @@ def evaluate_silence_route(
     user_id: str = "",
     conversation_id: str = "",
     ai_id: str = "",
+    client_id: str = "",
     force_enabled: Optional[bool] = None,
     force_mode: Optional[str] = None,
 ) -> SilenceDecision:
@@ -409,12 +456,14 @@ def evaluate_silence_route(
         silence_engine_enabled=bool(enabled),
         silence_engine_mode=mode,
     )
-    allow = is_allowlisted(
+    allow, match_source = resolve_allowlist_match(
         user_id=user_id or "",
         conversation_id=conversation_id or "",
         ai_id=ai_id or "",
+        client_id=client_id or "",
     )
     decision.silence_allowlisted = allow
+    decision.silence_match_source = match_source
 
     if not enabled:
         decision.silence_bypass_reason = "master_disabled"
@@ -503,6 +552,7 @@ def run_silence_for_chat(
     user_id: str = "",
     conversation_id: str = "",
     ai_id: str = "",
+    client_id: str = "",
 ) -> Tuple[List[Dict[str, Any]], SilenceDecision]:
     """
     Single entry used by chat_router. Safe when disabled.
@@ -512,6 +562,7 @@ def run_silence_for_chat(
         user_id=user_id,
         conversation_id=conversation_id,
         ai_id=ai_id,
+        client_id=client_id,
     )
     try:
         decision.log()
