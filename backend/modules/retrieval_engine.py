@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence
@@ -18,6 +19,30 @@ from typing import Any, Dict, List, Optional, Sequence
 from backend.modules.memory_types import MEMORY_TYPES, V1_CONVERSATION_TYPE
 
 logger = logging.getLogger("memory.retrieval")
+
+
+def _legacy_ai_default() -> str:
+    """The single historical AI these legacy rows belonged to before ai_id existed."""
+    return (os.getenv("AI_ID", "xiaochenguang_v1") or "xiaochenguang_v1").strip()
+
+
+def _ai_match(row_ai: Any, requested_ai: Optional[str]) -> bool:
+    """Owner (ai) match with legacy-NULL compatibility.
+
+    Task 006 (PR18 review round 2, P0): keep BOTH invariants —
+      1. Never leak across an EXPLICIT different ai_id.
+      2. Existing legit single-AI memories (ai_id NULL/empty, pre-migration)
+         remain retrievable — but ONLY for the legacy default AI.
+    A row with no ai_id is treated as belonging to the legacy default AI; a
+    request for any OTHER explicit AI must NOT see it. user_id is enforced
+    strictly by the caller (this only decides the ai dimension).
+    """
+    ra = str(row_ai).strip() if row_ai is not None else ""
+    req = str(requested_ai or "").strip()
+    if not ra:
+        # legacy row without ai_id → belongs to the historical/default AI only
+        return bool(req) and req == _legacy_ai_default()
+    return ra == req
 
 _IDENTITY_Q = re.compile(r"(你是誰|你叫|名字|身份|who are you|your name)", re.I)
 _SEMANTIC_Q = re.compile(r"(什麼是|如何|怎麼|為什麼|定義|what is|how to|explain)", re.I)
@@ -132,18 +157,21 @@ class RetrievalEngine:
         memory_types: Optional[Sequence[str]] = None,
         limit: int = 5,
         include_v1_conversation: bool = True,
+        ai_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         types = list(memory_types) if memory_types else self.infer_types(query)
         results: List[Dict[str, Any]] = []
         fallback_used = False
+        resolved_ai = (ai_id or __import__("os").getenv("AI_ID", "xiaochenguang_v1") or "").strip()
 
-        # 1) V1 conversation recall
+        # 1) V1 conversation recall (must pass ai_id for multi-AI isolation)
         if include_v1_conversation and self.ms is not None:
             try:
                 v1_text = await self.ms.recall_memories(
                     user_message=query,
                     conversation_id=conversation_id,
                     user_id=user_id,
+                    ai_id=resolved_ai or None,
                 )
                 if v1_text:
                     results.append(
@@ -172,6 +200,7 @@ class RetrievalEngine:
             user_id=user_id,
             types=types,
             limit=limit * 3,
+            ai_id=resolved_ai or None,
         )
         for it in typed:
             if it.get("source") == "typed_keyword_fallback":
@@ -212,7 +241,7 @@ class RetrievalEngine:
 
             # hydrate neighbor content from store (graph utilization)
             hydrated = await self._hydrate_memories_by_ids(
-                neighbor_ids[:12], user_id=user_id
+                neighbor_ids[:12], user_id=user_id, ai_id=resolved_ai or None
             )
             for other, row in hydrated.items():
                 edge = edge_by_neighbor.get(other) or {}
@@ -317,11 +346,14 @@ class RetrievalEngine:
         }
 
     async def _hydrate_memories_by_ids(
-        self, ids: List[str], *, user_id: str
+        self, ids: List[str], *, user_id: str, ai_id: Optional[str] = None
     ) -> Dict[str, Dict[str, Any]]:
-        """Fetch memory rows by id for graph expansion content."""
+        """Fetch memory rows by id for graph expansion content (owner fail-closed)."""
         out: Dict[str, Dict[str, Any]] = {}
         if not ids or self.ms is None or not getattr(self.ms, "supabase", None):
+            return out
+        uid = (user_id or "").strip()
+        if not uid:
             return out
         table = getattr(self.ms, "memories_table", "xiaochenguang_memories")
         for mid in ids:
@@ -330,20 +362,80 @@ class RetrievalEngine:
                     self.ms.supabase.table(table)
                     .select(
                         "id, user_message, assistant_message, document_content, "
-                        "memory_type, importance_score, user_id, created_at"
+                        "memory_type, importance_score, user_id, ai_id, created_at"
                     )
                     .eq("id", mid)
+                    .eq("user_id", uid)
                     .limit(1)
                 )
-                if user_id:
-                    q = q.eq("user_id", user_id)
+                # Do NOT .eq(ai_id) at query level (would drop legacy NULL rows).
+                # Fetch by strict user_id, then apply legacy-aware ai match.
                 result = q.execute()
                 rows = result.data or []
-                if rows:
+                if rows and _ai_match(rows[0].get("ai_id"), ai_id):
                     out[str(mid)] = rows[0]
             except Exception as e:
                 logger.warning("hydrate memory %s failed: %s", mid, e)
         return out
+
+    _TYPED_SELECT = (
+        "id, user_message, assistant_message, document_content, "
+        "memory_type, importance_score, conversation_id, user_id, "
+        "ai_id, embedding, created_at"
+    )
+
+    def _owner_scoped_rows(
+        self, table: str, select_cols: str, *, mt: str, uid: str,
+        requested_ai: str, per_query_limit: int,
+    ) -> List[Dict[str, Any]]:
+        """Owner-scoped fetch that filters ai_id at the DATABASE level to avoid
+        cross-AI query-limit starvation (PR18 review round 3, P1-A).
+
+        - Query 1: exact ai_id match in SQL (other AIs never take limit slots).
+        - Query 2: only when requested_ai is the legacy default — a SECOND
+          bounded query for legacy rows whose ai_id IS NULL.
+        user_id is always enforced in SQL. Rows are de-duplicated.
+        """
+        sb = self.ms.supabase
+        seen: set = set()
+        combined: List[Dict[str, Any]] = []
+
+        def _collect(rows: Optional[List[Dict[str, Any]]]) -> None:
+            for r in rows or []:
+                if r.get("user_id") != uid:
+                    continue
+                key = r.get("id")
+                if key is None:
+                    key = id(r)
+                if key in seen:
+                    continue
+                seen.add(key)
+                combined.append(r)
+
+        # 1) explicit ai match at DB level
+        try:
+            q1 = (
+                sb.table(table).select(select_cols)
+                .eq("memory_type", mt).eq("user_id", uid).eq("ai_id", requested_ai)
+                .limit(per_query_limit)
+            )
+            _collect(q1.execute().data)
+        except Exception as e:
+            logger.warning("owner rows q1 failed (%s): %s", mt, e)
+
+        # 2) legacy NULL ai rows, ONLY when the requested ai is the legacy default
+        if requested_ai == _legacy_ai_default():
+            try:
+                q2 = (
+                    sb.table(table).select(select_cols)
+                    .eq("memory_type", mt).eq("user_id", uid).is_("ai_id", "null")
+                    .limit(per_query_limit)
+                )
+                _collect(q2.execute().data)
+            except Exception as e:
+                logger.warning("owner rows q2 legacy-null failed (%s): %s", mt, e)
+
+        return combined
 
     async def _fetch_typed_embedding(
         self,
@@ -354,9 +446,14 @@ class RetrievalEngine:
         user_id: str,
         types: List[str],
         limit: int,
+        ai_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         if self.ms is None or not getattr(self.ms, "supabase", None):
             return []
+        uid = (user_id or "").strip()
+        if not uid:
+            return []
+        req = (ai_id or "").strip() or _legacy_ai_default()
         out: List[Dict[str, Any]] = []
         table = getattr(self.ms, "memories_table", "xiaochenguang_memories")
         now_ts = datetime.now(timezone.utc).timestamp()
@@ -364,23 +461,15 @@ class RetrievalEngine:
             if mt not in MEMORY_TYPES:
                 continue
             try:
-                q = (
-                    self.ms.supabase.table(table)
-                    .select(
-                        "id, user_message, assistant_message, document_content, "
-                        "memory_type, importance_score, conversation_id, user_id, "
-                        "embedding, created_at"
-                    )
-                    .eq("memory_type", mt)
-                    .limit(max(limit, 10))
+                rows = self._owner_scoped_rows(
+                    table, self._TYPED_SELECT, mt=mt, uid=uid,
+                    requested_ai=req, per_query_limit=max(limit, 10),
                 )
-                # isolation: always filter user_id when provided
-                if user_id:
-                    q = q.eq("user_id", user_id)
-                result = q.execute()
-                for row in result.data or []:
-                    # double-check isolation
-                    if user_id and row.get("user_id") and row.get("user_id") != user_id:
+                for row in rows:
+                    # fail-closed isolation double-check (user strict; ai legacy-aware)
+                    if row.get("user_id") != uid:
+                        continue
+                    if not _ai_match(row.get("ai_id"), req):
                         continue
                     blob = (
                         f"{row.get('user_message','')} "

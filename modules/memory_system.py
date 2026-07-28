@@ -15,6 +15,32 @@ from typing import Optional, Any, Dict
 from modules.emotion_detector import EnhancedEmotionDetector
 
 CONTRACT_VERSION = "task006_v1"
+# Conservative cosine floor; calibrate with real samples at Gate C.
+DEFAULT_MIN_SIMILARITY = 0.55
+
+
+def _owner_id(value: Optional[str]) -> Optional[str]:
+    """Fail-closed owner: empty → None (caller must not query). 'default_user' is a real owner key."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
+def _ai_match_legacy(row_ai: Any, requested_ai: Optional[str]) -> bool:
+    """AI-owner match with legacy-NULL compatibility (PR18 review round 2).
+
+    - Explicit row ai_id must equal the requested ai_id (no cross-AI leak).
+    - A legacy row without ai_id belongs to the historical/default AI only, so
+      it is returned ONLY when the requested ai is that legacy default.
+    user_id isolation is enforced strictly by the caller.
+    """
+    ra = str(row_ai).strip() if row_ai is not None else ""
+    req = str(requested_ai or "").strip()
+    if not ra:
+        legacy_default = (os.getenv("AI_ID", "xiaochenguang_v1") or "xiaochenguang_v1").strip()
+        return bool(req) and req == legacy_default
+    return ra == req
 
 
 class MemorySystem:
@@ -30,8 +56,15 @@ class MemorySystem:
         self.memories_table = memories_table
         self.emotion_detector = EnhancedEmotionDetector()
         self.redis = redis_interface
-        # MEMORY_RPC_NAME: match_memories_v2 (default) | match_memories (legacy)
-        self.memory_rpc_name = os.getenv("MEMORY_RPC_NAME", "match_memories_v2").strip() or "match_memories_v2"
+        # Only match_memories_v2 is supported for app paths (legacy RPC raises).
+        self.memory_rpc_name = (
+            os.getenv("MEMORY_RPC_NAME", "match_memories_v2").strip() or "match_memories_v2"
+        )
+        # user_ai_cross_conversation (default) | conversation_only
+        self.semantic_scope = (
+            os.getenv("MEMORY_SEMANTIC_SCOPE", "user_ai_cross_conversation").strip()
+            or "user_ai_cross_conversation"
+        )
         if self.redis is None:
             try:
                 from backend.redis_interface import get_shared_redis_interface
@@ -202,30 +235,44 @@ class MemorySystem:
             print(f"❌ 獲取歷史失敗：{e}")
             return ""
 
+    def _min_similarity(self) -> float:
+        try:
+            return float(os.getenv("MEMORY_MIN_SIMILARITY", str(DEFAULT_MIN_SIMILARITY)))
+        except (TypeError, ValueError):
+            return DEFAULT_MIN_SIMILARITY
+
     def _build_match_rpc_params(
         self,
         query_embedding,
         limit: int,
-        conversation_id: str,
-        user_id: Optional[str] = None,
-        ai_id: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Build RPC params for v2 or legacy match_memories."""
-        if self.memory_rpc_name == "match_memories":
-            return {
-                "query_embedding": query_embedding,
-                "match_count": limit,
-                "conversation_id": conversation_id,
-            }
-        min_sim = float(os.getenv("MEMORY_MIN_SIMILARITY", "0.0") or 0.0)
+        *,
+        conversation_id: Optional[str],
+        user_id: Optional[str],
+        ai_id: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Build match_memories_v2 params. None if owner filters incomplete (fail-closed)."""
+        uid = _owner_id(user_id)
+        aid = _owner_id(ai_id)
+        if not uid or not aid:
+            return None
         return {
             "query_embedding": query_embedding,
             "match_count": limit,
-            "filter_conversation_id": conversation_id,
-            "filter_user_id": user_id or None,
-            "filter_ai_id": ai_id or None,
-            "min_similarity": min_sim,
+            "filter_conversation_id": conversation_id or None,
+            "filter_user_id": uid,
+            "filter_ai_id": aid,
+            "min_similarity": self._min_similarity(),
         }
+
+    def _format_memory_rows(self, rows) -> str:
+        memories = []
+        for memory in rows or []:
+            um = memory.get("user_message")
+            am = memory.get("assistant_message")
+            if um is None and am is None:
+                continue
+            memories.append(f"相關記憶: {um} -> {am}")
+        return "\n".join(memories)
 
     async def search_relevant_memories(
         self,
@@ -235,7 +282,18 @@ class MemorySystem:
         user_id: Optional[str] = None,
         ai_id: Optional[str] = None,
     ):
-        """向量相似度搜尋相關記憶（Task006: match_memories_v2 + isolation）"""
+        """
+        向量相似度搜尋。
+        Scope: same user_id + ai_id (cross-conversation by default).
+        Prefer current conversation first, then expand across conversations.
+        Fail-closed when user_id/ai_id missing.
+        """
+        uid = _owner_id(user_id)
+        aid = _owner_id(ai_id) or _owner_id(os.getenv("AI_ID", "xiaochenguang_v1"))
+        if not uid or not aid:
+            print("⚠️ 搜尋記憶略過：缺少 user_id 或 ai_id（fail-closed）")
+            return ""
+
         try:
             embedding_response = self.openai_client.embeddings.create(
                 model="text-embedding-3-small",
@@ -243,24 +301,41 @@ class MemorySystem:
             )
             query_embedding = embedding_response.data[0].embedding
 
-            params = self._build_match_rpc_params(
-                query_embedding, limit, conversation_id, user_id=user_id, ai_id=ai_id
-            )
-            result = self.supabase.rpc(self.memory_rpc_name, params).execute()
+            # 1) conversation-scoped (if provided)
+            scopes: list[Optional[str]] = []
+            if conversation_id:
+                scopes.append(conversation_id)
+            if self.semantic_scope != "conversation_only":
+                scopes.append(None)  # cross-conversation long-term
+            # dedupe while preserving order
+            seen = set()
+            ordered_scopes = []
+            for s in scopes:
+                key = s if s is not None else ""
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered_scopes.append(s)
 
-            if result.data:
-                memories = []
-                for memory in result.data:
-                    memories.append(
-                        f"相關記憶: {memory['user_message']} -> {memory['assistant_message']}"
-                    )
-                return "\n".join(memories)
+            for scope_conv in ordered_scopes:
+                params = self._build_match_rpc_params(
+                    query_embedding,
+                    limit,
+                    conversation_id=scope_conv,
+                    user_id=uid,
+                    ai_id=aid,
+                )
+                if not params:
+                    return ""
+                result = self.supabase.rpc("match_memories_v2", params).execute()
+                if result.data:
+                    return self._format_memory_rows(result.data)
             return ""
 
         except Exception as e:
             print(f"❌ 搜尋記憶失敗：{e}")
             return await self.traditional_search(
-                conversation_id, query, limit, user_id=user_id, ai_id=ai_id
+                conversation_id, query, limit, user_id=uid, ai_id=aid
             )
 
     async def traditional_search(
@@ -271,25 +346,51 @@ class MemorySystem:
         user_id: Optional[str] = None,
         ai_id: Optional[str] = None,
     ):
-        """傳統文字搜尋（備用方案；仍套用 user/ai 隔離）"""
+        """傳統文字搜尋：fail-closed owner；可跨 conversation（同 user+ai）"""
+        uid = _owner_id(user_id)
+        aid = _owner_id(ai_id)
+        if not uid or not aid:
+            return ""
         try:
-            q = (
-                self.supabase.table(self.memories_table)
-                .select("user_message, assistant_message, user_id, ai_id")
-                .eq("conversation_id", conversation_id)
-                .eq("memory_type", "conversation")
-            )
-            if user_id and user_id not in ("", "default_user"):
-                q = q.eq("user_id", user_id)
-            if ai_id:
-                q = q.eq("ai_id", ai_id)
-            result = q.limit(limit * 2).execute()
+            # DB-level ai filtering to avoid cross-AI query-limit starvation
+            # (PR18 review round 3): explicit ai in SQL; legacy NULL fetched via a
+            # SECOND bounded query only for the legacy default AI. user_id strict.
+            select_cols = "user_message, assistant_message, user_id, ai_id, conversation_id"
+            legacy_default = (os.getenv("AI_ID", "xiaochenguang_v1") or "xiaochenguang_v1").strip()
 
-            if result.data:
+            def _fetch(legacy_null: bool):
+                qq = (
+                    self.supabase.table(self.memories_table)
+                    .select(select_cols)
+                    .eq("memory_type", "conversation")
+                    .eq("user_id", uid)
+                )
+                if legacy_null:
+                    qq = qq.is_("ai_id", "null")
+                else:
+                    qq = qq.eq("ai_id", aid)
+                if self.semantic_scope == "conversation_only" and conversation_id:
+                    qq = qq.eq("conversation_id", conversation_id)
+                return qq.limit(limit * 4).execute().data or []
+
+            rows = list(_fetch(False))
+            if aid == legacy_default:
+                rows.extend(_fetch(True))
+
+            if rows:
                 relevant = []
                 query_words = query.lower().split()
-
-                for memory in result.data:
+                # Prefer same-conversation hits first
+                if conversation_id:
+                    rows.sort(
+                        key=lambda r: 0 if r.get("conversation_id") == conversation_id else 1
+                    )
+                for memory in rows:
+                    # user strict; ai legacy-aware double-check
+                    if memory.get("user_id") != uid:
+                        continue
+                    if not _ai_match_legacy(memory.get("ai_id"), aid):
+                        continue
                     user_msg = (memory.get("user_message") or "").lower()
                     if any(word in user_msg for word in query_words):
                         relevant.append(
@@ -297,7 +398,6 @@ class MemorySystem:
                         )
                         if len(relevant) >= limit:
                             break
-
                 return "\n".join(relevant)
             return ""
         except Exception as e:
@@ -311,27 +411,30 @@ class MemorySystem:
         user_id: str = "default_user",
         ai_id: Optional[str] = None,
     ) -> str:
-        """從記憶庫召回相關對話（支援跨對話 user_id；隔離 ai_id）"""
+        """召回：語意（user+ai 跨對話）→ 近期同對話 → 近期同 user+ai。fail-closed。"""
+        uid = _owner_id(user_id)
+        aid = _owner_id(ai_id) or _owner_id(os.getenv("AI_ID", "xiaochenguang_v1"))
+        if not uid or not aid:
+            print("⚠️ 記憶召回略過：缺少 user_id 或 ai_id（fail-closed）")
+            return ""
         try:
             raw_memories = await self.search_relevant_memories(
                 conversation_id,
                 user_message,
                 limit=3,
-                user_id=user_id,
-                ai_id=ai_id,
+                user_id=uid,
+                ai_id=aid,
             )
 
-            if not raw_memories:
+            if not raw_memories and conversation_id:
                 q = (
                     self.supabase.table(self.memories_table)
                     .select("user_message, assistant_message")
                     .eq("conversation_id", conversation_id)
                     .eq("memory_type", "conversation")
+                    .eq("user_id", uid)
+                    .eq("ai_id", aid)
                 )
-                if user_id and user_id not in ("", "default_user"):
-                    q = q.eq("user_id", user_id)
-                if ai_id:
-                    q = q.eq("ai_id", ai_id)
                 recent_result = q.order("created_at", desc=True).limit(5).execute()
                 if recent_result.data:
                     raw_memories = "\n".join([
@@ -339,15 +442,14 @@ class MemorySystem:
                         for m in recent_result.data
                     ])
 
-            if not raw_memories and user_id and user_id != "default_user":
+            if not raw_memories:
                 q = (
                     self.supabase.table(self.memories_table)
                     .select("user_message, assistant_message")
-                    .eq("user_id", user_id)
+                    .eq("user_id", uid)
+                    .eq("ai_id", aid)
                     .eq("memory_type", "conversation")
                 )
-                if ai_id:
-                    q = q.eq("ai_id", ai_id)
                 cross_result = q.order("created_at", desc=True).limit(5).execute()
                 if cross_result.data:
                     raw_memories = "\n".join([

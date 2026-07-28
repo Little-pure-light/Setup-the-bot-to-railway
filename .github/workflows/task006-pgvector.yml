@@ -1,0 +1,95 @@
+name: Task006 pgvector migration
+
+# Isolated proof for Task 006 data contracts. Spins up a DISPOSABLE
+# pgvector/pgvector:pg16 service (destroyed when the job ends), applies the
+# forward migration twice (idempotency), runs the isolation contract smoke,
+# then rolls back. No production Supabase, no secrets are used.
+
+on:
+  push:
+    branches: [feature/task006-core-data-contract-repair]
+    paths:
+      - 'supabase/migrations/20260728_task006_core_data_contracts_forward.sql'
+      - 'supabase/migrations/20260728_task006_core_data_contracts_rollback.sql'
+      - 'supabase/migrations/task006_pgvector_smoke.sql'
+      - '.github/workflows/task006-pgvector.yml'
+  pull_request:
+    paths:
+      - 'supabase/migrations/20260728_task006_core_data_contracts_forward.sql'
+      - 'supabase/migrations/20260728_task006_core_data_contracts_rollback.sql'
+      - 'supabase/migrations/task006_pgvector_smoke.sql'
+      - '.github/workflows/task006-pgvector.yml'
+  workflow_dispatch: {}
+
+jobs:
+  pgvector-smoke:
+    name: Isolated pgvector forward/smoke/rollback
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: task006
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d task006"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      PGHOST: localhost
+      PGPORT: "5432"
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: task006
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Wait for database
+        run: |
+          for i in $(seq 1 30); do
+            pg_isready -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" && break
+            sleep 2
+          done
+
+      - name: Bootstrap Supabase roles (disposable CI database only)
+        # Clean pgvector/pgvector:pg16 has no Supabase roles, but the forward
+        # migration REVOKEs/GRANTs anon/authenticated/service_role. Create them
+        # as NOLOGIN roles that exist ONLY inside this ephemeral CI container.
+        # Idempotent; never touches production; uses no secrets.
+        run: |
+          psql -v ON_ERROR_STOP=1 -c "DO \$\$
+          BEGIN
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN
+              CREATE ROLE anon NOLOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN
+              CREATE ROLE authenticated NOLOGIN;
+            END IF;
+            IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'service_role') THEN
+              CREATE ROLE service_role NOLOGIN;
+            END IF;
+          END
+          \$\$;"
+
+      - name: Forward migration
+        run: psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260728_task006_core_data_contracts_forward.sql
+
+      - name: Forward migration — idempotent re-apply
+        run: psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260728_task006_core_data_contracts_forward.sql
+
+      - name: Contract smoke (user/ai/conversation isolation + owner constraints)
+        run: psql -v ON_ERROR_STOP=1 -f supabase/migrations/task006_pgvector_smoke.sql
+
+      - name: Rollback migration
+        run: psql -v ON_ERROR_STOP=1 -f supabase/migrations/20260728_task006_core_data_contracts_rollback.sql
+
+      - name: Rollback is clean re-runnable (functions gone)
+        run: |
+          psql -v ON_ERROR_STOP=1 -c "DO \$\$ BEGIN IF EXISTS (SELECT 1 FROM pg_proc WHERE proname='match_memories_v2') THEN RAISE EXCEPTION 'match_memories_v2 should be dropped by rollback'; END IF; END \$\$;"

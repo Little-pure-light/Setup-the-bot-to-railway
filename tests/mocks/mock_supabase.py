@@ -43,6 +43,14 @@ class MockQuery:
         self._filters.append(("eq", key, value))
         return self
 
+    def is_(self, key: str, value: Any):
+        # PostgREST-style .is_(col, "null") → IS NULL (row missing/None)
+        if value in (None, "null", "NULL"):
+            self._filters.append(("is_null", key, None))
+        else:
+            self._filters.append(("eq", key, value))
+        return self
+
     def order(self, key: str, desc: bool = False):
         self._order = (key, desc)
         return self
@@ -57,6 +65,8 @@ class MockQuery:
         def match(row: dict) -> bool:
             for op, k, v in self._filters:
                 if op == "eq" and row.get(k) != v:
+                    return False
+                if op == "is_null" and row.get(k) is not None:
                     return False
             return True
 
@@ -145,27 +155,46 @@ class MockSupabase:
 
         class _Rpc:
             def execute(self_inner):
-                # Task006: simulate match_memories / match_memories_v2 isolation filters
-                if name in ("match_memories", "match_memories_v2"):
+                # Task006 (PR18 review): faithfully simulate the forward.sql behavior.
+                # - match_memories is RETIRED and raises (no public bypass).
+                # - match_memories_v2 is FAIL-CLOSED: filter_user_id AND filter_ai_id
+                #   are required; 'default_user' is a real owner (NOT a bypass);
+                #   min_similarity excludes low-similarity rows.
+                if name == "match_memories":
+                    raise Exception(
+                        "match_memories is retired (task006). Use match_memories_v2 "
+                        "with filter_user_id and filter_ai_id."
+                    )
+                if name == "match_memories_v2":
                     table = parent.table("xiaochenguang_memories")
                     rows = [
                         r for r in table.rows
                         if r.get("memory_type", "conversation") == "conversation"
+                        and r.get("embedding") is not None
                     ]
-                    if name == "match_memories":
-                        conv = params.get("conversation_id")
-                        if conv is not None:
-                            rows = [r for r in rows if r.get("conversation_id") == conv]
-                    else:
-                        f_conv = params.get("filter_conversation_id")
-                        f_user = params.get("filter_user_id")
-                        f_ai = params.get("filter_ai_id")
-                        if f_conv:
-                            rows = [r for r in rows if r.get("conversation_id") == f_conv]
-                        if f_user and f_user not in ("", "default_user"):
-                            rows = [r for r in rows if r.get("user_id") == f_user]
-                        if f_ai:
-                            rows = [r for r in rows if r.get("ai_id") == f_ai]
+                    f_conv = params.get("filter_conversation_id")
+                    f_user = params.get("filter_user_id")
+                    f_ai = params.get("filter_ai_id")
+                    min_sim = params.get("min_similarity")
+                    if min_sim is None:
+                        min_sim = 0.55
+
+                    # fail-closed: missing owner filters yield zero rows
+                    if not f_user or str(f_user).strip() == "":
+                        return MockResult([])
+                    if not f_ai or str(f_ai).strip() == "":
+                        return MockResult([])
+
+                    rows = [r for r in rows if r.get("user_id") == f_user]
+                    rows = [r for r in rows if r.get("ai_id") == f_ai]
+                    if f_conv:
+                        rows = [r for r in rows if r.get("conversation_id") == f_conv]
+
+                    # fixed simulated similarity; excluded when below min_similarity
+                    sim = 0.9
+                    if sim < float(min_sim):
+                        rows = []
+
                     limit = int(params.get("match_count") or 3)
                     out = []
                     for r in rows[:limit]:
@@ -173,7 +202,7 @@ class MockSupabase:
                             "user_message": r.get("user_message"),
                             "assistant_message": r.get("assistant_message"),
                             "created_at": r.get("created_at"),
-                            "similarity": 0.9,
+                            "similarity": sim,
                             "conversation_id": r.get("conversation_id"),
                             "user_id": r.get("user_id"),
                             "ai_id": r.get("ai_id"),

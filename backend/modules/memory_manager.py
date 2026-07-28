@@ -194,6 +194,7 @@ class MemoryManager:
         user_id: str = "default_user",
         memory_types: Optional[List[str]] = None,
         limit: int = 5,
+        ai_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         self.graph.user_id = user_id or "default_user"
         return await self.retrieval.retrieve(
@@ -202,6 +203,7 @@ class MemoryManager:
             user_id=user_id,
             memory_types=memory_types,
             limit=limit,
+            ai_id=ai_id,
         )
 
     async def update(
@@ -406,27 +408,17 @@ class LegacyMemoryAdapter:
         user_id: str = "default_user",
         ai_id: Optional[str] = None,
     ) -> str:
-        # Prefer V1 path with isolation when manager.retrieve lacks ai_id
-        try:
-            result = await self.manager.retrieve(
-                user_message,
-                conversation_id=conversation_id,
-                user_id=user_id,
-                limit=5,
-            )
-        except TypeError:
-            result = await self.v1.recall_memories(
-                user_message,
-                conversation_id,
-                user_id=user_id,
-                ai_id=ai_id,
-            )
-            return result
-        # Prefer formatted V2 block; fall back to V1-only text
+        """V2 path: manager.retrieve → RetrievalEngine → V1 with ai_id isolation."""
+        result = await self.manager.retrieve(
+            user_message,
+            conversation_id=conversation_id,
+            user_id=user_id,
+            limit=5,
+            ai_id=ai_id,
+        )
         formatted = (result or {}).get("formatted") or ""
         if formatted:
             return formatted
-        # extract v1 content if present
         for it in (result or {}).get("items") or []:
             if it.get("memory_type") == V1_CONVERSATION_TYPE:
                 return it.get("content") or ""

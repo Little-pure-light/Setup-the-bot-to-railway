@@ -1,6 +1,5 @@
--- Task 006 — Core data contracts (FORWARD)
--- Idempotent / additive only. Safe on new exported schema and empty schema.
--- DO NOT apply to production without Gate C approval.
+-- Task 006 — Core data contracts (FORWARD) v1.1 (PR18 review fixes)
+-- Idempotent / additive. NEVER apply to production without Gate C.
 -- contract_version: task006_v1
 
 BEGIN;
@@ -9,7 +8,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 -- ---------------------------------------------------------------------------
--- 1) emotional_states: ensure canonical columns (new schema already has them)
+-- 1) emotional_states (canonical new schema)
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.emotional_states (
   id BIGSERIAL PRIMARY KEY,
@@ -21,24 +20,37 @@ CREATE TABLE IF NOT EXISTS public.emotional_states (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-ALTER TABLE public.emotional_states
-  ADD COLUMN IF NOT EXISTS dominant_emotion TEXT;
-ALTER TABLE public.emotional_states
-  ADD COLUMN IF NOT EXISTS intensity DOUBLE PRECISION;
-ALTER TABLE public.emotional_states
-  ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION;
-ALTER TABLE public.emotional_states
-  ADD COLUMN IF NOT EXISTS context TEXT;
-ALTER TABLE public.emotional_states
-  ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
-ALTER TABLE public.emotional_states
-  ADD COLUMN IF NOT EXISTS user_id TEXT;
+ALTER TABLE public.emotional_states ADD COLUMN IF NOT EXISTS dominant_emotion TEXT;
+ALTER TABLE public.emotional_states ADD COLUMN IF NOT EXISTS intensity DOUBLE PRECISION;
+ALTER TABLE public.emotional_states ADD COLUMN IF NOT EXISTS confidence DOUBLE PRECISION;
+ALTER TABLE public.emotional_states ADD COLUMN IF NOT EXISTS context TEXT;
+ALTER TABLE public.emotional_states ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
+ALTER TABLE public.emotional_states ADD COLUMN IF NOT EXISTS user_id TEXT;
+
+-- Bounds: intensity/confidence in [0,1] when present
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'emotional_states_intensity_range'
+  ) THEN
+    ALTER TABLE public.emotional_states
+      ADD CONSTRAINT emotional_states_intensity_range
+      CHECK (intensity IS NULL OR (intensity >= 0 AND intensity <= 1));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'emotional_states_confidence_range'
+  ) THEN
+    ALTER TABLE public.emotional_states
+      ADD CONSTRAINT emotional_states_confidence_range
+      CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1));
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_emotional_states_user_created
   ON public.emotional_states (user_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- 2) xiaochenguang_reflections: keep bigint id; add reflection_key + confidence
+-- 2) xiaochenguang_reflections
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.xiaochenguang_reflections (
   id BIGSERIAL PRIMARY KEY,
@@ -52,16 +64,11 @@ CREATE TABLE IF NOT EXISTS public.xiaochenguang_reflections (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-ALTER TABLE public.xiaochenguang_reflections
-  ADD COLUMN IF NOT EXISTS reflection_key UUID;
-ALTER TABLE public.xiaochenguang_reflections
-  ADD COLUMN IF NOT EXISTS confidence_score DOUBLE PRECISION DEFAULT 0.0;
-ALTER TABLE public.xiaochenguang_reflections
-  ADD COLUMN IF NOT EXISTS ai_id TEXT DEFAULT 'xiaochenguang_v1';
-ALTER TABLE public.xiaochenguang_reflections
-  ADD COLUMN IF NOT EXISTS contract_version TEXT DEFAULT 'task006_v1';
+ALTER TABLE public.xiaochenguang_reflections ADD COLUMN IF NOT EXISTS reflection_key UUID;
+ALTER TABLE public.xiaochenguang_reflections ADD COLUMN IF NOT EXISTS confidence_score DOUBLE PRECISION DEFAULT 0.0;
+ALTER TABLE public.xiaochenguang_reflections ADD COLUMN IF NOT EXISTS ai_id TEXT DEFAULT 'xiaochenguang_v1';
+ALTER TABLE public.xiaochenguang_reflections ADD COLUMN IF NOT EXISTS contract_version TEXT DEFAULT 'task006_v1';
 
--- Backfill reflection_key for existing rows
 UPDATE public.xiaochenguang_reflections
 SET reflection_key = gen_random_uuid()
 WHERE reflection_key IS NULL;
@@ -69,7 +76,10 @@ WHERE reflection_key IS NULL;
 ALTER TABLE public.xiaochenguang_reflections
   ALTER COLUMN reflection_key SET DEFAULT gen_random_uuid();
 
--- Unique only when non-null during transition; then enforce NOT NULL via new inserts default
+-- Enforce NOT NULL (ADR alignment)
+ALTER TABLE public.xiaochenguang_reflections
+  ALTER COLUMN reflection_key SET NOT NULL;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -79,15 +89,51 @@ BEGIN
     ALTER TABLE public.xiaochenguang_reflections
       ADD CONSTRAINT xiaochenguang_reflections_reflection_key_key UNIQUE (reflection_key);
   END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'reflections_confidence_score_range'
+  ) THEN
+    ALTER TABLE public.xiaochenguang_reflections
+      ADD CONSTRAINT reflections_confidence_score_range
+      CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1));
+  END IF;
+END $$;
+
+-- ---------------------------------------------------------------------------
+-- Reflections legacy owner backfill (PR18 review round 3, P1-B)
+-- Same class of fix as memories: existing reflections with NULL/empty user_id
+-- or ai_id are the known single-user / single-AI legacy owner — NOT readable by
+-- all. Set defaults, backfill BOTH user_id AND ai_id, then guarded NOT NULL.
+-- ---------------------------------------------------------------------------
+ALTER TABLE public.xiaochenguang_reflections ALTER COLUMN user_id SET DEFAULT 'default_user';
+ALTER TABLE public.xiaochenguang_reflections ALTER COLUMN ai_id   SET DEFAULT 'xiaochenguang_v1';
+
+UPDATE public.xiaochenguang_reflections
+  SET user_id = 'default_user'
+  WHERE user_id IS NULL OR btrim(user_id) = '';
+UPDATE public.xiaochenguang_reflections
+  SET ai_id = 'xiaochenguang_v1'
+  WHERE ai_id IS NULL OR btrim(ai_id) = '';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.xiaochenguang_reflections WHERE user_id IS NULL) THEN
+    ALTER TABLE public.xiaochenguang_reflections ALTER COLUMN user_id SET NOT NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.xiaochenguang_reflections WHERE ai_id IS NULL) THEN
+    ALTER TABLE public.xiaochenguang_reflections ALTER COLUMN ai_id SET NOT NULL;
+  END IF;
 END $$;
 
 CREATE INDEX IF NOT EXISTS idx_reflections_conversation_created
   ON public.xiaochenguang_reflections (conversation_id, created_at DESC);
-CREATE INDEX IF NOT EXISTS idx_reflections_user_created
-  ON public.xiaochenguang_reflections (user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_reflections_user_ai_created
+  ON public.xiaochenguang_reflections (user_id, ai_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- 3) user_preferences (canonical from active call sites)
+-- 3) user_preferences
+-- SECURITY: Do NOT enable RLS without policies while backend may use anon key.
+-- Backend data plane must use service_role (see supabase_handler + ADR).
+-- RLS / least-privilege JWT policies deferred to Gate C auth design.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.user_preferences (
   id BIGSERIAL PRIMARY KEY,
@@ -108,12 +154,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_user_preferences_user_id
 CREATE INDEX IF NOT EXISTS idx_user_preferences_conversation_id
   ON public.user_preferences (conversation_id);
 
--- RLS note: service-role backend is expected for server paths.
--- Policy proposals are documented in ADR; not invented here.
-ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
+-- If a previous migration enabled RLS without policies, keep table usable for service_role.
+-- Do not re-enable RLS here.
 
 -- ---------------------------------------------------------------------------
--- 4) memories table: ensure ai_id / user_id exist (new schema already has them)
+-- 4) memories indexes
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.xiaochenguang_memories (
   id BIGSERIAL PRIMARY KEY,
@@ -133,10 +178,41 @@ CREATE TABLE IF NOT EXISTS public.xiaochenguang_memories (
   message_type TEXT DEFAULT 'text'
 );
 
-ALTER TABLE public.xiaochenguang_memories
-  ADD COLUMN IF NOT EXISTS user_id TEXT DEFAULT 'default_user';
-ALTER TABLE public.xiaochenguang_memories
-  ADD COLUMN IF NOT EXISTS ai_id TEXT DEFAULT 'xiaochenguang_v1';
+ALTER TABLE public.xiaochenguang_memories ADD COLUMN IF NOT EXISTS user_id TEXT DEFAULT 'default_user';
+ALTER TABLE public.xiaochenguang_memories ADD COLUMN IF NOT EXISTS ai_id TEXT DEFAULT 'xiaochenguang_v1';
+
+-- ---------------------------------------------------------------------------
+-- Legacy owner backfill (PR18 review round 2, P1)
+-- ADD COLUMN IF NOT EXISTS does NOT set a default or backfill when the column
+-- ALREADY exists (the new schema already has user_id/ai_id). Without this,
+-- strict isolation would make existing single-user / single-AI memories with
+-- NULL owner suddenly unretrievable. This project historically ran as ONE user
+-- and ONE AI, so a NULL owner is that known legacy owner — NOT "readable by all".
+-- ---------------------------------------------------------------------------
+-- 1) Ensure the column defaults exist even when columns pre-existed.
+ALTER TABLE public.xiaochenguang_memories ALTER COLUMN user_id SET DEFAULT 'default_user';
+ALTER TABLE public.xiaochenguang_memories ALTER COLUMN ai_id  SET DEFAULT 'xiaochenguang_v1';
+
+-- 2) Backfill existing NULL/empty owners to the known legacy owner.
+UPDATE public.xiaochenguang_memories
+  SET user_id = 'default_user'
+  WHERE user_id IS NULL OR btrim(user_id) = '';
+UPDATE public.xiaochenguang_memories
+  SET ai_id = 'xiaochenguang_v1'
+  WHERE ai_id IS NULL OR btrim(ai_id) = '';
+
+-- 3) Enforce NOT NULL ONLY after backfill leaves zero NULLs (guarded — if any
+--    NULL somehow remains, we DO NOT force NOT NULL; the row stays quarantined
+--    as nullable rather than failing the migration or hiding data silently).
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM public.xiaochenguang_memories WHERE user_id IS NULL) THEN
+    ALTER TABLE public.xiaochenguang_memories ALTER COLUMN user_id SET NOT NULL;
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM public.xiaochenguang_memories WHERE ai_id IS NULL) THEN
+    ALTER TABLE public.xiaochenguang_memories ALTER COLUMN ai_id SET NOT NULL;
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_memories_user_ai_created
   ON public.xiaochenguang_memories (user_id, ai_id, created_at DESC);
@@ -144,7 +220,11 @@ CREATE INDEX IF NOT EXISTS idx_memories_conversation_created
   ON public.xiaochenguang_memories (conversation_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- 5) match_memories_v2 — cosine distance, explicit filters, isolation
+-- 5) match_memories_v2 — fail-closed owner filters + cosine + conservative floor
+-- Scope decision (product): long-term semantic memory is **same user_id + ai_id
+-- across conversations**. filter_conversation_id is optional narrowing only.
+-- filter_user_id and filter_ai_id are REQUIRED (NULL → empty result set).
+-- default min_similarity 0.55 (calibrate upward with real samples at Gate C).
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.match_memories_v2(
   query_embedding vector(1536),
@@ -152,7 +232,7 @@ CREATE OR REPLACE FUNCTION public.match_memories_v2(
   filter_conversation_id text DEFAULT NULL,
   filter_user_id text DEFAULT NULL,
   filter_ai_id text DEFAULT NULL,
-  min_similarity double precision DEFAULT 0.0
+  min_similarity double precision DEFAULT 0.55
 )
 RETURNS TABLE (
   user_message text,
@@ -177,29 +257,24 @@ AS $$
   FROM public.xiaochenguang_memories m
   WHERE m.embedding IS NOT NULL
     AND m.memory_type = 'conversation'
+    -- fail-closed: missing owner filters yield zero rows
+    AND filter_user_id IS NOT NULL
+    AND btrim(filter_user_id) <> ''
+    AND filter_ai_id IS NOT NULL
+    AND btrim(filter_ai_id) <> ''
+    AND m.user_id = filter_user_id
+    AND m.ai_id = filter_ai_id
     AND (filter_conversation_id IS NULL OR m.conversation_id = filter_conversation_id)
-    AND (
-      filter_user_id IS NULL
-      OR filter_user_id = ''
-      OR filter_user_id = 'default_user'
-      OR m.user_id = filter_user_id
-    )
-    AND (
-      filter_ai_id IS NULL
-      OR filter_ai_id = ''
-      OR m.ai_id = filter_ai_id
-    )
-    AND (1 - (m.embedding <=> query_embedding)) >= min_similarity
+    AND (1 - (m.embedding <=> query_embedding)) >= COALESCE(min_similarity, 0.55)
   ORDER BY m.embedding <=> query_embedding
   LIMIT GREATEST(COALESCE(match_count, 3), 1);
 $$;
 
 COMMENT ON FUNCTION public.match_memories_v2 IS
-  'Task006 v1 cosine memory match with optional conversation/user/ai isolation filters';
+  'task006_v1: cosine match; requires filter_user_id+filter_ai_id; optional conversation; default min_sim 0.55';
 
 -- ---------------------------------------------------------------------------
--- 6) Legacy-compatible match_memories wrapper (conversation-scoped only)
---     Prefer application using match_memories_v2. Wrapper kept for rollout.
+-- 6) Retired legacy match_memories — hard block public bypass
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.match_memories(
   query_embedding vector,
@@ -212,30 +287,24 @@ RETURNS TABLE (
   created_at timestamptz,
   similarity double precision
 )
-LANGUAGE sql
+LANGUAGE plpgsql
 STABLE
 AS $$
-  SELECT
-    v.user_message,
-    v.assistant_message,
-    v.created_at,
-    v.similarity
-  FROM public.match_memories_v2(
-    query_embedding::vector(1536),
-    match_count,
-    conversation_id,
-    NULL,
-    NULL,
-    0.0
-  ) AS v;
+BEGIN
+  RAISE EXCEPTION
+    'match_memories is retired (task006). Use match_memories_v2 with filter_user_id and filter_ai_id.';
+END;
 $$;
 
-GRANT EXECUTE ON FUNCTION public.match_memories_v2(
-  vector, integer, text, text, text, double precision
-) TO anon, authenticated, service_role;
-
-GRANT EXECUTE ON FUNCTION public.match_memories(
-  vector, integer, text
-) TO anon, authenticated, service_role;
+-- Grants: data RPCs only for service_role (backend data plane).
+-- anon/authenticated must NOT call unscoped memory search.
+REVOKE ALL ON FUNCTION public.match_memories_v2(vector, integer, text, text, text, double precision)
+  FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION public.match_memories(vector, integer, text)
+  FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.match_memories_v2(vector, integer, text, text, text, double precision)
+  TO service_role;
+GRANT EXECUTE ON FUNCTION public.match_memories(vector, integer, text)
+  TO service_role;
 
 COMMIT;

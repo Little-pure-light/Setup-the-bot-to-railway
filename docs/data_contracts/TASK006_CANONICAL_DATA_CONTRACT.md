@@ -6,8 +6,11 @@ This repo copy is the source-of-truth summary for migrations.
 ## Memory RPC
 - Primary: `match_memories_v2(query_embedding vector(1536), match_count, filter_conversation_id, filter_user_id, filter_ai_id, min_similarity)`
 - Distance: cosine `<=>` → similarity `1 - distance`
-- Legacy wrapper: `match_memories(query_embedding, match_count, conversation_id)` delegates to v2
-- Env: `MEMORY_RPC_NAME` default `match_memories_v2`; `MEMORY_MIN_SIMILARITY` default `0.0`
+- **Fail-closed**: `filter_user_id` AND `filter_ai_id` are required (NULL/empty → zero rows). `default_user` is a real owner value, NOT a bypass.
+- Scope: long-term semantic memory is **same user_id + ai_id across conversations**; `filter_conversation_id` is optional narrowing only.
+- Legacy `match_memories(query_embedding, match_count, conversation_id)` is **RETIRED** — it raises an exception. App paths use `match_memories_v2` only; the app no longer calls the legacy RPC.
+- Grants: both RPCs are granted to `service_role` only; `anon`/`authenticated` are revoked (no unscoped public memory search).
+- Env: `MEMORY_RPC_NAME` default `match_memories_v2`; `MEMORY_MIN_SIMILARITY` default **`0.55`** (conservative cosine floor; calibrate upward with real samples at Gate C); `MEMORY_SEMANTIC_SCOPE` default `user_ai_cross_conversation`.
 
 ## Emotion
 - Table `emotional_states`: `user_id`, `dominant_emotion`, `intensity`, `confidence`, `context`, `created_at`
@@ -19,4 +22,6 @@ This repo copy is the source-of-truth summary for migrations.
 
 ## User preferences
 - Table `user_preferences`: unique `user_id`, JSONB `personality_profile` / `voice_settings`, optional conversation_id, timestamps
-- RLS enabled; policies require auth audit before production (service role backend expected)
+- **RLS is NOT enabled by this migration.** Enabling RLS without policies while the backend may run on an anon key would break `user_preferences` read/write. The forward migration intentionally leaves RLS off.
+- Data-plane identity: backend prefers `SUPABASE_SERVICE_ROLE_KEY` (see `supabase_handler.py`). Earlier claims that "the backend already uses service role" were **not** accurate — the handler previously preferred the anon key. It now prefers service_role and falls back to anon with a loud warning.
+- Least-privilege JWT/RLS policies for end-users are deferred to Gate C auth design and must be reviewed by Codex before any "secure multi-tenant isolation" claim.
