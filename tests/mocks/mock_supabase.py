@@ -140,8 +140,45 @@ class MockSupabase:
         return self._tables[name]
 
     def rpc(self, name: str, params: Optional[dict] = None):
+        params = params or {}
+        parent = self
+
         class _Rpc:
             def execute(self_inner):
+                # Task006: simulate match_memories / match_memories_v2 isolation filters
+                if name in ("match_memories", "match_memories_v2"):
+                    table = parent.table("xiaochenguang_memories")
+                    rows = [
+                        r for r in table.rows
+                        if r.get("memory_type", "conversation") == "conversation"
+                    ]
+                    if name == "match_memories":
+                        conv = params.get("conversation_id")
+                        if conv is not None:
+                            rows = [r for r in rows if r.get("conversation_id") == conv]
+                    else:
+                        f_conv = params.get("filter_conversation_id")
+                        f_user = params.get("filter_user_id")
+                        f_ai = params.get("filter_ai_id")
+                        if f_conv:
+                            rows = [r for r in rows if r.get("conversation_id") == f_conv]
+                        if f_user and f_user not in ("", "default_user"):
+                            rows = [r for r in rows if r.get("user_id") == f_user]
+                        if f_ai:
+                            rows = [r for r in rows if r.get("ai_id") == f_ai]
+                    limit = int(params.get("match_count") or 3)
+                    out = []
+                    for r in rows[:limit]:
+                        out.append({
+                            "user_message": r.get("user_message"),
+                            "assistant_message": r.get("assistant_message"),
+                            "created_at": r.get("created_at"),
+                            "similarity": 0.9,
+                            "conversation_id": r.get("conversation_id"),
+                            "user_id": r.get("user_id"),
+                            "ai_id": r.get("ai_id"),
+                        })
+                    return MockResult(out)
                 return MockResult([])
 
         return _Rpc()

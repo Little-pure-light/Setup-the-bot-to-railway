@@ -595,6 +595,7 @@ async def chat(
                     request.user_message,
                     request.conversation_id,
                     user_id=request.user_id,
+                    ai_id=getattr(request, "ai_id", None),
                 )
             with _req_timer.stage("supabase_history"):
                 conversation_history = memory_system.get_conversation_history(
@@ -606,6 +607,7 @@ async def chat(
                 request.user_message,
                 request.conversation_id,
                 user_id=request.user_id,
+                ai_id=getattr(request, "ai_id", None),
             )
             conversation_history = memory_system.get_conversation_history(
                 request.conversation_id,

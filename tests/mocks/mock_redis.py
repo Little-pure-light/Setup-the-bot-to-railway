@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 class MockRedisClient:
     def __init__(self):
         self.store: Dict[str, str] = {}
+        self.lists: Dict[str, list] = {}
 
     def get(self, key: str):
         return self.store.get(key)
@@ -26,17 +27,42 @@ class MockRedisClient:
             if k in self.store:
                 del self.store[k]
                 n += 1
+            if k in self.lists:
+                del self.lists[k]
+                n += 1
         return n
 
     def keys(self, pattern: str = "*"):
         # 極簡 glob：只支援 prefix*
+        all_keys = list(self.store.keys()) + list(self.lists.keys())
         if pattern.endswith("*"):
             prefix = pattern[:-1]
-            return [k for k in self.store if k.startswith(prefix)]
-        return [k for k in self.store if k == pattern]
+            return [k for k in all_keys if k.startswith(prefix)]
+        return [k for k in all_keys if k == pattern]
 
     def exists(self, key: str):
-        return 1 if key in self.store else 0
+        return 1 if key in self.store or key in self.lists else 0
+
+    def lpush(self, key: str, value: str):
+        self.lists.setdefault(key, [])
+        self.lists[key].insert(0, value)
+        return len(self.lists[key])
+
+    def ltrim(self, key: str, start: int, end: int):
+        if key not in self.lists:
+            return True
+        # redis end is inclusive
+        self.lists[key] = self.lists[key][start : end + 1]
+        return True
+
+    def expire(self, key: str, ttl: int):
+        return True
+
+    def lrange(self, key: str, start: int, end: int):
+        items = self.lists.get(key, [])
+        if end == -1:
+            return items[start:]
+        return items[start : end + 1]
 
 
 class MockRedisInterface:

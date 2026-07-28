@@ -147,3 +147,51 @@ class PineconeHandler:
     def delete(self, reflection_id: str) -> None:
         """別名 → delete_reflection"""
         self.delete_reflection(reflection_id)
+
+    # Task 006 — adapters expected by ReflectionStorage
+    def store_reflection_with_text(
+        self,
+        reflection_id: str,
+        reflection_text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        """Store reflection vector; returns False when disabled or on failure."""
+        if not self.enabled:
+            return False
+        try:
+            self.insert_reflection(reflection_id, reflection_text or "", metadata or {})
+            return True
+        except Exception as e:
+            print(f"❌ [PineconeHandler] store_reflection_with_text failed: {type(e).__name__}")
+            return False
+
+    def query_similar_reflections(
+        self,
+        query_embedding: Optional[List[float]] = None,
+        top_k: int = 5,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+        query_text: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Query similar reflections; supports embedding or text + optional metadata filter."""
+        if not self.enabled:
+            return []
+        try:
+            if query_embedding is None:
+                if not query_text:
+                    return []
+                query_embedding = self.generate_embedding(query_text)
+            if not query_embedding:
+                return []
+            kwargs: Dict[str, Any] = {
+                "vector": query_embedding,
+                "top_k": top_k,
+                "include_metadata": True,
+            }
+            if filter_metadata:
+                kwargs["filter"] = filter_metadata
+            res = self.index.query(**kwargs)
+            matches = res.get("matches", []) if isinstance(res, dict) else getattr(res, "matches", [])
+            return matches or []
+        except Exception as e:
+            print(f"❌ [PineconeHandler] query_similar_reflections failed: {type(e).__name__}")
+            return []

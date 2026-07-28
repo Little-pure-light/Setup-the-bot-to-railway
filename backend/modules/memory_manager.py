@@ -404,13 +404,24 @@ class LegacyMemoryAdapter:
         user_message: str,
         conversation_id: str,
         user_id: str = "default_user",
+        ai_id: Optional[str] = None,
     ) -> str:
-        result = await self.manager.retrieve(
-            user_message,
-            conversation_id=conversation_id,
-            user_id=user_id,
-            limit=5,
-        )
+        # Prefer V1 path with isolation when manager.retrieve lacks ai_id
+        try:
+            result = await self.manager.retrieve(
+                user_message,
+                conversation_id=conversation_id,
+                user_id=user_id,
+                limit=5,
+            )
+        except TypeError:
+            result = await self.v1.recall_memories(
+                user_message,
+                conversation_id,
+                user_id=user_id,
+                ai_id=ai_id,
+            )
+            return result
         # Prefer formatted V2 block; fall back to V1-only text
         formatted = (result or {}).get("formatted") or ""
         if formatted:

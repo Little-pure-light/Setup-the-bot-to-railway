@@ -4,10 +4,17 @@
 唯一正式的對話記憶入口：
 - 長期：Supabase（含 embedding 向量召回）
 - 短期：Redis（conv:{id}:latest，可選降級 Mock）
+
+Task 006 contract_version: task006_v1
+- Semantic recall prefers match_memories_v2 (user_id/ai_id isolation)
+- Emotion writes use new-schema canonical fields
 """
-from datetime import datetime
+import os
+from datetime import datetime, timezone
 from typing import Optional, Any, Dict
 from modules.emotion_detector import EnhancedEmotionDetector
+
+CONTRACT_VERSION = "task006_v1"
 
 
 class MemorySystem:
@@ -23,6 +30,8 @@ class MemorySystem:
         self.memories_table = memories_table
         self.emotion_detector = EnhancedEmotionDetector()
         self.redis = redis_interface
+        # MEMORY_RPC_NAME: match_memories_v2 (default) | match_memories (legacy)
+        self.memory_rpc_name = os.getenv("MEMORY_RPC_NAME", "match_memories_v2").strip() or "match_memories_v2"
         if self.redis is None:
             try:
                 from backend.redis_interface import get_shared_redis_interface
@@ -193,8 +202,40 @@ class MemorySystem:
             print(f"❌ 獲取歷史失敗：{e}")
             return ""
 
-    async def search_relevant_memories(self, conversation_id: str, query: str, limit: int = 3):
-        """向量相似度搜尋相關記憶"""
+    def _build_match_rpc_params(
+        self,
+        query_embedding,
+        limit: int,
+        conversation_id: str,
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Build RPC params for v2 or legacy match_memories."""
+        if self.memory_rpc_name == "match_memories":
+            return {
+                "query_embedding": query_embedding,
+                "match_count": limit,
+                "conversation_id": conversation_id,
+            }
+        min_sim = float(os.getenv("MEMORY_MIN_SIMILARITY", "0.0") or 0.0)
+        return {
+            "query_embedding": query_embedding,
+            "match_count": limit,
+            "filter_conversation_id": conversation_id,
+            "filter_user_id": user_id or None,
+            "filter_ai_id": ai_id or None,
+            "min_similarity": min_sim,
+        }
+
+    async def search_relevant_memories(
+        self,
+        conversation_id: str,
+        query: str,
+        limit: int = 3,
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
+    ):
+        """向量相似度搜尋相關記憶（Task006: match_memories_v2 + isolation）"""
         try:
             embedding_response = self.openai_client.embeddings.create(
                 model="text-embedding-3-small",
@@ -202,11 +243,10 @@ class MemorySystem:
             )
             query_embedding = embedding_response.data[0].embedding
 
-            result = self.supabase.rpc('match_memories', {
-                'query_embedding': query_embedding,
-                'match_count': limit,
-                'conversation_id': conversation_id
-            }).execute()
+            params = self._build_match_rpc_params(
+                query_embedding, limit, conversation_id, user_id=user_id, ai_id=ai_id
+            )
+            result = self.supabase.rpc(self.memory_rpc_name, params).execute()
 
             if result.data:
                 memories = []
@@ -219,24 +259,38 @@ class MemorySystem:
 
         except Exception as e:
             print(f"❌ 搜尋記憶失敗：{e}")
-            return await self.traditional_search(conversation_id, query, limit)
+            return await self.traditional_search(
+                conversation_id, query, limit, user_id=user_id, ai_id=ai_id
+            )
 
-    async def traditional_search(self, conversation_id: str, query: str, limit: int = 3):
-        """傳統文字搜尋（備用方案）"""
+    async def traditional_search(
+        self,
+        conversation_id: str,
+        query: str,
+        limit: int = 3,
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
+    ):
+        """傳統文字搜尋（備用方案；仍套用 user/ai 隔離）"""
         try:
-            result = self.supabase.table(self.memories_table)\
-                .select("user_message, assistant_message")\
-                .eq("conversation_id", conversation_id)\
-                .eq("memory_type", "conversation")\
-                .limit(limit * 2)\
-                .execute()
+            q = (
+                self.supabase.table(self.memories_table)
+                .select("user_message, assistant_message, user_id, ai_id")
+                .eq("conversation_id", conversation_id)
+                .eq("memory_type", "conversation")
+            )
+            if user_id and user_id not in ("", "default_user"):
+                q = q.eq("user_id", user_id)
+            if ai_id:
+                q = q.eq("ai_id", ai_id)
+            result = q.limit(limit * 2).execute()
 
             if result.data:
                 relevant = []
                 query_words = query.lower().split()
 
                 for memory in result.data:
-                    user_msg = memory['user_message'].lower()
+                    user_msg = (memory.get("user_message") or "").lower()
                     if any(word in user_msg for word in query_words):
                         relevant.append(
                             f"相關記憶: {memory['user_message']} -> {memory['assistant_message']}"
@@ -255,21 +309,30 @@ class MemorySystem:
         user_message: str,
         conversation_id: str,
         user_id: str = "default_user",
+        ai_id: Optional[str] = None,
     ) -> str:
-        """從記憶庫召回相關對話（支援跨對話 user_id）"""
+        """從記憶庫召回相關對話（支援跨對話 user_id；隔離 ai_id）"""
         try:
             raw_memories = await self.search_relevant_memories(
-                conversation_id, user_message, limit=3
+                conversation_id,
+                user_message,
+                limit=3,
+                user_id=user_id,
+                ai_id=ai_id,
             )
 
             if not raw_memories:
-                recent_result = self.supabase.table(self.memories_table)\
-                    .select("user_message, assistant_message")\
-                    .eq("conversation_id", conversation_id)\
-                    .eq("memory_type", "conversation")\
-                    .order("created_at", desc=True)\
-                    .limit(5)\
-                    .execute()
+                q = (
+                    self.supabase.table(self.memories_table)
+                    .select("user_message, assistant_message")
+                    .eq("conversation_id", conversation_id)
+                    .eq("memory_type", "conversation")
+                )
+                if user_id and user_id not in ("", "default_user"):
+                    q = q.eq("user_id", user_id)
+                if ai_id:
+                    q = q.eq("ai_id", ai_id)
+                recent_result = q.order("created_at", desc=True).limit(5).execute()
                 if recent_result.data:
                     raw_memories = "\n".join([
                         f"相關記憶: {m['user_message']} -> {m['assistant_message']}"
@@ -277,13 +340,15 @@ class MemorySystem:
                     ])
 
             if not raw_memories and user_id and user_id != "default_user":
-                cross_result = self.supabase.table(self.memories_table)\
-                    .select("user_message, assistant_message")\
-                    .eq("user_id", user_id)\
-                    .eq("memory_type", "conversation")\
-                    .order("created_at", desc=True)\
-                    .limit(5)\
-                    .execute()
+                q = (
+                    self.supabase.table(self.memories_table)
+                    .select("user_message, assistant_message")
+                    .eq("user_id", user_id)
+                    .eq("memory_type", "conversation")
+                )
+                if ai_id:
+                    q = q.eq("ai_id", ai_id)
+                cross_result = q.order("created_at", desc=True).limit(5).execute()
                 if cross_result.data:
                     raw_memories = "\n".join([
                         f"相關記憶: {m['user_message']} -> {m['assistant_message']}"
@@ -310,18 +375,29 @@ class MemorySystem:
             return ""
 
     async def save_emotional_state(self, user_id: str, emotion_analysis: dict, context: str = ""):
-        """儲存情緒狀態到 emotional_states 表格"""
+        """儲存情緒狀態到 emotional_states（Task006 新表正式欄位）"""
         try:
+            intensity = float(emotion_analysis.get("intensity", 0.5) or 0.5)
+            confidence = float(emotion_analysis.get("confidence", 0.0) or 0.0)
+            intensity = max(0.0, min(1.0, intensity))
+            confidence = max(0.0, min(1.0, confidence))
             data = {
                 "user_id": user_id,
-                "emotion_type": emotion_analysis["dominant_emotion"],
-                "intensity": emotion_analysis["intensity"],
-                "context": context,
-                "timestamp": datetime.now().isoformat()
+                "dominant_emotion": emotion_analysis.get("dominant_emotion") or "neutral",
+                "intensity": intensity,
+                "confidence": confidence,
+                "context": context or "",
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }
 
             self.supabase.table("emotional_states").insert(data).execute()
-            print(f"✅ 情緒狀態已儲存 - 用戶: {user_id[:8]}...")
+            print(f"✅ 情緒狀態已儲存 - 用戶: {(user_id or '')[:8]}...")
+            return {"permanent_store": "success", "contract_version": CONTRACT_VERSION}
 
         except Exception as e:
             print(f"❌ 儲存情緒狀態失敗：{e}")
+            return {
+                "permanent_store": "failed",
+                "contract_version": CONTRACT_VERSION,
+                "error_category": type(e).__name__,
+            }
