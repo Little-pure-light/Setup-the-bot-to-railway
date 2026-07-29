@@ -8,8 +8,9 @@ This repo copy is the source-of-truth summary for migrations.
 - Distance: cosine `<=>` → similarity `1 - distance`
 - **Fail-closed**: `filter_user_id` AND `filter_ai_id` are required (NULL/empty → zero rows). `default_user` is a real owner value, NOT a bypass.
 - Scope: long-term semantic memory is **same user_id + ai_id across conversations**; `filter_conversation_id` is optional narrowing only.
-- Legacy `match_memories(query_embedding, match_count, conversation_id)` is **RETIRED** — it raises an exception. App paths use `match_memories_v2` only; the app no longer calls the legacy RPC.
-- Grants: both RPCs are granted to `service_role` only; `anon`/`authenticated` are revoked (no unscoped public memory search).
+- App paths use `match_memories_v2` **only**; the app never calls any legacy `match_memories`.
+- **Gate C expand-only**: the current production baseline has **no** custom public RPC. The forward migration MUST NOT create, replace, revoke, grant, drop, or alter the legacy `public.match_memories(vector, integer, text)` — its body is unknown/unrestorable. Legacy retirement/cleanup is a **separate, deferred, environment-specific** task (C7), only after the new contract is verified stable (and may be "no action" if no legacy RPC exists).
+- Grants: only the **new** `match_memories_v2` is locked to `service_role`; `anon`/`authenticated`/`PUBLIC` are revoked from it (no unscoped public memory search, no public bypass introduced).
 - Env: `MEMORY_RPC_NAME` default `match_memories_v2`; `MEMORY_MIN_SIMILARITY` default **`0.55`** (conservative cosine floor; calibrate upward with real samples at Gate C); `MEMORY_SEMANTIC_SCOPE` default `user_ai_cross_conversation`.
 
 ## Emotion

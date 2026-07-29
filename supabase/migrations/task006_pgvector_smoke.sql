@@ -68,18 +68,34 @@ BEGIN
   RAISE NOTICE 'match_memories_v2 isolation smoke: PASSED';
 END $$;
 
--- Retired legacy match_memories must raise (no public bypass)
+-- EXPAND-ONLY (Gate C): the expand migration must NOT introduce a public bypass.
+-- We do NOT require a legacy raising stub (the expand phase leaves any unknown
+-- legacy match_memories untouched). Instead we prove the NEW v2 RPC is executable
+-- ONLY by service_role and NOT by anon/authenticated/PUBLIC.
 DO $$
-DECLARE ok boolean := false;
+DECLARE sig text := 'public.match_memories_v2(vector, integer, text, text, text, double precision)';
 BEGIN
-  BEGIN
-    PERFORM * FROM public.match_memories(
-      ('[' || array_to_string(array_fill(0.1::float8, ARRAY[1536]), ',') || ']')::vector, 3, 'c1');
-  EXCEPTION WHEN others THEN
-    ok := true;
-  END;
-  IF NOT ok THEN RAISE EXCEPTION 'legacy match_memories should be retired/raise'; END IF;
-  RAISE NOTICE 'legacy match_memories retired: PASSED';
+  IF has_function_privilege('anon', sig, 'EXECUTE') THEN
+    RAISE EXCEPTION 'anon must NOT execute match_memories_v2 (public bypass)'; END IF;
+  IF has_function_privilege('authenticated', sig, 'EXECUTE') THEN
+    RAISE EXCEPTION 'authenticated must NOT execute match_memories_v2 (public bypass)'; END IF;
+  IF NOT has_function_privilege('service_role', sig, 'EXECUTE') THEN
+    RAISE EXCEPTION 'service_role must be able to execute match_memories_v2'; END IF;
+  RAISE NOTICE 'no public bypass; match_memories_v2 executable only by service_role: PASSED';
+END $$;
+
+-- Also confirm the expand migration did NOT create a legacy match_memories.
+-- (Baseline has zero custom public RPCs; expand must not add an unscoped one.)
+DO $$
+DECLARE c int;
+BEGIN
+  SELECT count(*) INTO c FROM pg_proc p
+    JOIN pg_namespace n ON n.oid = p.pronamespace
+    WHERE n.nspname = 'public' AND p.proname = 'match_memories';
+  IF c <> 0 THEN
+    RAISE EXCEPTION 'expand must not create/alter legacy match_memories (found % definition(s))', c;
+  END IF;
+  RAISE NOTICE 'expand did not introduce legacy match_memories: PASSED';
 END $$;
 
 -- Reflection owner columns exist AND are NOT NULL after migration (guarded on empty table)

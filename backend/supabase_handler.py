@@ -25,30 +25,54 @@ def _resolve_supabase_credentials() -> Tuple[str, str, str]:
 
     金鑰優先序（資料平面）：
       1. SUPABASE_SERVICE_ROLE_KEY  → mode "service_role"（可呼叫記憶 RPC）
-      2. SUPABASE_ANON_KEY          → mode "anon"（記憶 RPC 會被拒；僅供相容）
-      3. SUPABASE_KEY               → mode "legacy_key"（舊環境）
+      2. SUPABASE_SECRET_KEY        → mode "secret"（現代後端金鑰，等同 elevated）
+      3. SUPABASE_ANON_KEY          → mode "anon"（記憶 RPC 會被拒；僅供相容）
+      4. SUPABASE_KEY               → mode "legacy"（舊環境）
     """
     url = (os.environ.get("SUPABASE_URL") or "").strip().strip('"').strip("'")
 
     def _clean(v: Optional[str]) -> str:
         return (v or "").strip().strip('"').strip("'")
 
+    # Precedence (elevated backend data-plane first):
+    #   1. SUPABASE_SERVICE_ROLE_KEY  → "service_role" (classic elevated)
+    #   2. SUPABASE_SECRET_KEY        → "secret"        (modern elevated, sb_secret_...)
+    #   3. SUPABASE_ANON_KEY          → "anon"
+    #   4. SUPABASE_KEY               → "legacy"
     service_key = _clean(os.environ.get("SUPABASE_SERVICE_ROLE_KEY"))
+    secret_key = _clean(os.environ.get("SUPABASE_SECRET_KEY"))
     anon_key = _clean(os.environ.get("SUPABASE_ANON_KEY"))
     legacy_key = _clean(os.environ.get("SUPABASE_KEY"))
 
     if service_key:
         return url, service_key, "service_role"
+    if secret_key:
+        return url, secret_key, "secret"
     if anon_key:
         return url, anon_key, "anon"
     if legacy_key:
-        return url, legacy_key, "legacy_key"
+        return url, legacy_key, "legacy"
     return url, "", "missing"
 
 
+# Elevated backend modes that can call service_role-granted RPCs (match_memories_v2).
+ELEVATED_KEY_MODES = ("service_role", "secret")
+
+
+def resolved_key_mode() -> str:
+    """Current data-plane key mode from the ENVIRONMENT (no client creation, no secret).
+    Values: service_role | secret | anon | legacy | missing. For health/readiness."""
+    return _resolve_supabase_credentials()[2]
+
+
+def is_backend_elevated() -> bool:
+    """True when the env provides an elevated backend key (service_role or secret)."""
+    return resolved_key_mode() in ELEVATED_KEY_MODES
+
+
 def get_supabase_key_mode() -> str:
-    """回傳目前資料平面金鑰模式（service_role | anon | legacy_key | missing | unknown）。
-    供健康檢查與誠實狀態回報使用；不外洩金鑰內容。"""
+    """回傳最近建立之 client 的資料平面金鑰模式（快取）；未建立前為 unknown。
+    若要以環境即時判斷請用 resolved_key_mode()。不外洩金鑰內容。"""
     return _supabase_key_mode
 
 
@@ -58,7 +82,7 @@ def get_supabase() -> Client:
     url, key, mode = _resolve_supabase_credentials()
     if not url or not key:
         raise ValueError(
-            "❌ 缺少 SUPABASE_URL，或 SUPABASE_SERVICE_ROLE_KEY / "
+            "❌ 缺少 SUPABASE_URL，或 SUPABASE_SERVICE_ROLE_KEY / SUPABASE_SECRET_KEY / "
             "SUPABASE_ANON_KEY / SUPABASE_KEY 環境變數。"
         )
 
@@ -70,11 +94,12 @@ def get_supabase() -> Client:
         logger.info(
             f"✅ Supabase client ready host={url.split('//')[-1][:40]} key_mode={mode}"
         )
-        if mode != "service_role":
+        if mode not in ELEVATED_KEY_MODES:
             logger.warning(
                 "⚠️ Supabase data plane running on key_mode=%s. Memory RPCs "
                 "(match_memories_v2) are granted to service_role only and will "
-                "be denied. Set SUPABASE_SERVICE_ROLE_KEY before Gate C. "
+                "be denied. Set an elevated backend key (SUPABASE_SERVICE_ROLE_KEY "
+                "or SUPABASE_SECRET_KEY) before Gate C. "
                 "Isolation is application-enforced; RLS/JWT policies deferred.",
                 mode,
             )

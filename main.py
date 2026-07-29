@@ -56,10 +56,18 @@ async def lifespan(app: FastAPI):
         import socket
         from urllib.parse import urlparse
 
-        sb_url, sb_key = _resolve_supabase_credentials()
+        # NOTE: _resolve_supabase_credentials() returns a 3-tuple (url, key, mode).
+        # (Gate C fix: the previous 2-value unpack raised ValueError that was
+        # swallowed below, so this startup check never actually ran.)
+        sb_url, sb_key, sb_mode = _resolve_supabase_credentials()
         if not sb_url or not sb_key:
-            logger.warning("⚠️ Supabase 未完整設定（SUPABASE_URL / ANON_KEY|KEY）— Auth 與記憶同步會失敗")
+            logger.warning(
+                "⚠️ Supabase 未完整設定（SUPABASE_URL / SERVICE_ROLE_KEY|SECRET_KEY|ANON_KEY|KEY）"
+                "— Auth 與記憶同步會失敗"
+            )
         else:
+            # Log only the safe key-mode label, never the key itself.
+            logger.info(f"🔑 Supabase key_mode={sb_mode}")
             host = urlparse(sb_url).hostname or ""
             try:
                 socket.getaddrinfo(host, 443)

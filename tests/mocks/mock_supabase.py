@@ -155,15 +155,18 @@ class MockSupabase:
 
         class _Rpc:
             def execute(self_inner):
-                # Task006 (PR18 review): faithfully simulate the forward.sql behavior.
-                # - match_memories is RETIRED and raises (no public bypass).
+                # Task006: faithfully simulate the forward.sql behavior.
+                # - Gate C expand-only: the app contract uses match_memories_v2 ONLY.
+                #   The legacy match_memories is NOT part of the app path and is not
+                #   created by the expand migration; calling it here is a test guard
+                #   (the app must never call the legacy RPC).
                 # - match_memories_v2 is FAIL-CLOSED: filter_user_id AND filter_ai_id
                 #   are required; 'default_user' is a real owner (NOT a bypass);
                 #   min_similarity excludes low-similarity rows.
                 if name == "match_memories":
                     raise Exception(
-                        "match_memories is retired (task006). Use match_memories_v2 "
-                        "with filter_user_id and filter_ai_id."
+                        "match_memories is not part of the Task006 app contract. "
+                        "Use match_memories_v2 with filter_user_id and filter_ai_id."
                     )
                 if name == "match_memories_v2":
                     table = parent.table("xiaochenguang_memories")

@@ -97,13 +97,30 @@ def readiness_payload(*, check_dns: Optional[bool] = None) -> Dict[str, Any]:
             "yes",
         )
 
+    # Gate C fix: a backend configured with ONLY an elevated key
+    # (SUPABASE_SERVICE_ROLE_KEY or modern SUPABASE_SECRET_KEY) must count as
+    # configured — the previous check only looked at anon/legacy keys and gave a
+    # false "missing" for service-role-only backends.
+    _supabase_any_key = (
+        _env_configured("SUPABASE_SERVICE_ROLE_KEY")
+        or _env_configured("SUPABASE_SECRET_KEY")
+        or _env_configured("SUPABASE_ANON_KEY")
+        or _env_configured("SUPABASE_KEY")
+    )
+    try:
+        from backend.supabase_handler import resolved_key_mode
+        _supabase_key_mode = resolved_key_mode()
+    except Exception:
+        _supabase_key_mode = "unknown"
+
     services: Dict[str, str] = {
         "app": "ok",
         "openai_config": "configured" if _env_configured("OPENAI_API_KEY") else "missing",
         "supabase_config": "configured"
-        if _env_configured("SUPABASE_URL")
-        and (_env_configured("SUPABASE_ANON_KEY") or _env_configured("SUPABASE_KEY"))
+        if _env_configured("SUPABASE_URL") and _supabase_any_key
         else "missing",
+        # Safe label only (service_role | secret | anon | legacy | missing | unknown); never a key fragment.
+        "supabase_key_mode": _supabase_key_mode,
         "redis": "not_configured",
         "supabase": "unknown",
     }

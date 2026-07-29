@@ -274,37 +274,23 @@ COMMENT ON FUNCTION public.match_memories_v2 IS
   'task006_v1: cosine match; requires filter_user_id+filter_ai_id; optional conversation; default min_sim 0.55';
 
 -- ---------------------------------------------------------------------------
--- 6) Retired legacy match_memories — hard block public bypass
+-- 6) EXPAND-ONLY grants for the NEW v2 RPC (Gate C)
+--
+-- IMPORTANT (Gate C, expand-only): this migration MUST NOT create, replace,
+-- revoke, grant, drop, or otherwise alter the legacy
+-- public.match_memories(vector, integer, text). The current production baseline
+-- has NO custom public RPC; if an UNKNOWN legacy match_memories exists on the
+-- real target, its body cannot be safely restored, so we never touch it here.
+-- Legacy retirement/cleanup is a SEPARATE, later, environment-specific task
+-- (see C7), performed only after the new contract is verified stable.
+--
+-- Only the NEW, additive match_memories_v2 is locked down to service_role so
+-- that anon/authenticated cannot run an unscoped memory search. This does not
+-- introduce any public bypass.
 -- ---------------------------------------------------------------------------
-CREATE OR REPLACE FUNCTION public.match_memories(
-  query_embedding vector,
-  match_count integer,
-  conversation_id text
-)
-RETURNS TABLE (
-  user_message text,
-  assistant_message text,
-  created_at timestamptz,
-  similarity double precision
-)
-LANGUAGE plpgsql
-STABLE
-AS $$
-BEGIN
-  RAISE EXCEPTION
-    'match_memories is retired (task006). Use match_memories_v2 with filter_user_id and filter_ai_id.';
-END;
-$$;
-
--- Grants: data RPCs only for service_role (backend data plane).
--- anon/authenticated must NOT call unscoped memory search.
 REVOKE ALL ON FUNCTION public.match_memories_v2(vector, integer, text, text, text, double precision)
   FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON FUNCTION public.match_memories(vector, integer, text)
-  FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.match_memories_v2(vector, integer, text, text, text, double precision)
-  TO service_role;
-GRANT EXECUTE ON FUNCTION public.match_memories(vector, integer, text)
   TO service_role;
 
 COMMIT;

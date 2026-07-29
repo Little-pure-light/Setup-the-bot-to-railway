@@ -1,19 +1,19 @@
--- Task 006 — Core data contracts (ROLLBACK) v1.1 (PR18 review fixes)
--- Reverses the Task006-added objects/constraints as far as additive changes allow.
--- Cannot restore dropped production data or the ORIGINAL legacy match_memories body
--- (forward replaced it with a retired stub that raises). This only removes
--- Task006-added objects and relaxes Task006-added constraints.
+-- Task 006 — Core data contracts (ROLLBACK) v1.2 (Gate C expand-only)
+-- Reverses ONLY the Task006-added, additive objects/constraints.
+-- EXPAND-ONLY invariant: this rollback MUST NEVER drop or alter the legacy
+-- public.match_memories(vector, integer, text). The forward migration no longer
+-- creates/replaces/retires it, and its original body cannot be restored, so we
+-- leave any existing legacy function completely untouched.
 -- DO NOT apply to production without explicit rollback authorization.
 -- contract_version: task006_v1
 
 BEGIN;
 
 -- ---------------------------------------------------------------------------
--- 1) Drop RPC functions (wrapper first, then v2)
---    NOTE: forward retired match_memories to a raising stub. Dropping it here
---    does NOT restore the original pre-Task006 implementation.
+-- 1) Drop ONLY the NEW additive RPC (match_memories_v2).
+--    Do NOT touch legacy public.match_memories — forward never created/altered
+--    it, so rollback must not drop it either.
 -- ---------------------------------------------------------------------------
-DROP FUNCTION IF EXISTS public.match_memories(vector, integer, text);
 DROP FUNCTION IF EXISTS public.match_memories_v2(vector, integer, text, text, text, double precision);
 
 -- ---------------------------------------------------------------------------

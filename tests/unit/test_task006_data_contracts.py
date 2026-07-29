@@ -651,6 +651,93 @@ def test_reflections_migration_backfills_user_and_ai_owner():
 
 
 @pytest.mark.unit
+@pytest.mark.asyncio
+async def test_memory_v2_unavailable_degrades_without_cross_owner_leak(mem_env):
+    """Gate C: when match_memories_v2 is unavailable (permission denied / missing),
+    the app must degrade to the fail-closed traditional path WITHOUT leaking another
+    owner's memory."""
+    ms, sb, *_ = mem_env
+    sb.table("xiaochenguang_memories").rows.extend(
+        [
+            {"conversation_id": "c", "user_id": "user-a", "ai_id": "xiaochenguang_v1",
+             "user_message": "A的秘密綠茶", "assistant_message": "ok", "memory_type": "conversation"},
+            {"conversation_id": "c", "user_id": "user-b", "ai_id": "xiaochenguang_v1",
+             "user_message": "B的秘密綠茶", "assistant_message": "ok", "memory_type": "conversation"},
+        ]
+    )
+
+    def _rpc_unavailable(*a, **k):
+        raise Exception("permission denied for function match_memories_v2")
+
+    ms.supabase.rpc = _rpc_unavailable  # simulate v2 unavailable
+
+    out = await ms.search_relevant_memories(
+        "c", "綠茶", limit=5, user_id="user-a", ai_id="xiaochenguang_v1"
+    )
+    assert "A的秘密綠茶" in out          # degraded path still recalls the owner's memory
+    assert "B的秘密綠茶" not in out       # no cross-owner leak even when v2 is down
+
+
+@pytest.mark.unit
+def test_startup_credentials_return_three_tuple(monkeypatch):
+    """Gate C blocker A: _resolve_supabase_credentials() must return (url, key, mode)
+    and unpack as three values (guards the former 2-value startup unpack bug)."""
+    import backend.supabase_handler as sh
+
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    for k in ("SUPABASE_SECRET_KEY", "SUPABASE_ANON_KEY", "SUPABASE_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+    t = sh._resolve_supabase_credentials()
+    assert len(t) == 3
+    url, key, mode = t  # must unpack cleanly as three values
+    assert url == "https://x.supabase.co" and mode == "service_role"
+    # modern secret key is elevated and ranks just below service_role
+    monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "sec")
+    assert sh.resolved_key_mode() == "secret"
+    assert sh.is_backend_elevated() is True
+
+
+@pytest.mark.unit
+def test_readiness_reports_service_role_only_as_configured(monkeypatch):
+    """Gate C blocker B: a backend with ONLY an elevated key must read as
+    configured, and readiness must expose a safe key-mode label (no key fragment)."""
+    from backend import health
+
+    for k in ("SUPABASE_SECRET_KEY", "SUPABASE_ANON_KEY", "SUPABASE_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-secret-value")
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    p = health.readiness_payload(check_dns=False)
+    assert p["services"]["supabase_config"] == "configured"
+    assert p["services"]["supabase_key_mode"] == "service_role"
+    # the raw key value must never appear anywhere in the payload
+    import json as _json
+    assert "svc-secret-value" not in _json.dumps(p)
+
+
+@pytest.mark.unit
+def test_migration_is_expand_only_leaves_legacy_untouched():
+    """Gate C: forward must NOT create/alter/grant legacy match_memories; rollback
+    must NOT drop it; smoke must not require a raising legacy stub."""
+    fwd = FWD.read_text(encoding="utf-8")
+    rb = RBACK.read_text(encoding="utf-8")
+    smoke = (ROOT / "supabase" / "migrations" / "task006_pgvector_smoke.sql").read_text(encoding="utf-8")
+    # forward: still creates v2, but never a legacy match_memories function/grant
+    assert "match_memories_v2" in fwd
+    assert not re.search(r"FUNCTION\s+public\.match_memories\s*\(", fwd)
+    assert not re.search(r"ON FUNCTION\s+public\.match_memories\s*\(vector", fwd)
+    # rollback: drops v2 only, never legacy
+    assert "DROP FUNCTION IF EXISTS public.match_memories_v2" in rb
+    assert not re.search(r"DROP FUNCTION[^\n]*public\.match_memories\s*\(vector, integer, text\)", rb)
+    # smoke: no raising-stub requirement; asserts no public bypass + no legacy created
+    assert "should be retired/raise" not in smoke
+    assert "has_function_privilege" in smoke
+
+
+@pytest.mark.unit
 def test_supabase_handler_prefers_service_role_key(monkeypatch):
     """P0-3: data-plane key selection prefers service_role; mode is observable."""
     import backend.supabase_handler as sh
