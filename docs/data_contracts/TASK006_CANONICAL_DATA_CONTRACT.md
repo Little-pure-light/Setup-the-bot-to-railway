@@ -23,6 +23,9 @@ This repo copy is the source-of-truth summary for migrations.
 
 ## User preferences
 - Table `user_preferences`: unique `user_id`, JSONB `personality_profile` / `voice_settings`, optional conversation_id, timestamps
-- **RLS is NOT enabled by this migration.** Enabling RLS without policies while the backend may run on an anon key would break `user_preferences` read/write. The forward migration intentionally leaves RLS off.
-- Data-plane identity: backend prefers `SUPABASE_SERVICE_ROLE_KEY` (see `supabase_handler.py`). Earlier claims that "the backend already uses service role" were **not** accurate — the handler previously preferred the anon key. It now prefers service_role and falls back to anon with a loud warning.
-- Least-privilege JWT/RLS policies for end-users are deferred to Gate C auth design and must be reviewed by Codex before any "secure multi-tenant isolation" claim.
+- **RLS is ENABLED with no permissive policy** (Gate C C4). The migration does NOT rely on Supabase default Data API grants (changing in 2026); it defines both layers explicitly:
+  - Table DML is **REVOKED** from `PUBLIC`/`anon`/`authenticated` and **GRANTED** only to `service_role`.
+  - The identity sequence (`pg_get_serial_sequence`) is **REVOKED** from `PUBLIC`/`anon`/`authenticated` and granted `USAGE, SELECT` to `service_role`.
+  - No `anon`/`authenticated` policy is created. The backend uses an elevated key (`service_role`/`secret`) which **bypasses RLS**, so it reads/writes normally; `anon`/`authenticated` are blocked by both RLS (no rows) and revoked grants (no privileges).
+- Data-plane identity: backend prefers `SUPABASE_SERVICE_ROLE_KEY` (or modern `SUPABASE_SECRET_KEY`); see `supabase_handler.py`. The handler previously preferred the anon key — it now prefers an elevated key and warns loudly otherwise.
+- Rollback keeps the table (data safety) but MUST NOT revert it to a public state (no re-grant to anon/authenticated, no RLS disable).

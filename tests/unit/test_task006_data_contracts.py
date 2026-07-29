@@ -738,6 +738,37 @@ def test_migration_is_expand_only_leaves_legacy_untouched():
 
 
 @pytest.mark.unit
+def test_user_preferences_rls_and_grants_locked_down():
+    """Gate C C4: user_preferences must have explicit RLS + table/sequence grants
+    (never rely on Supabase default Data API grants). anon/authenticated locked out;
+    service_role granted; no permissive anon/authenticated policy."""
+    fwd = FWD.read_text(encoding="utf-8")
+    rb = RBACK.read_text(encoding="utf-8")
+    smoke = (ROOT / "supabase" / "migrations" / "task006_pgvector_smoke.sql").read_text(encoding="utf-8")
+
+    # RLS enabled on the table
+    assert re.search(r"ALTER TABLE public\.user_preferences ENABLE ROW LEVEL SECURITY", fwd)
+    # table DML revoked from public roles, granted to service_role
+    assert re.search(r"REVOKE ALL ON TABLE public\.user_preferences FROM PUBLIC", fwd)
+    assert re.search(r"REVOKE ALL ON TABLE public\.user_preferences FROM anon", fwd)
+    assert re.search(r"REVOKE ALL ON TABLE public\.user_preferences FROM authenticated", fwd)
+    assert re.search(r"GRANT[^\n]*ON TABLE public\.user_preferences TO service_role", fwd)
+    # sequence locked down (resolved via pg_get_serial_sequence), granted to service_role
+    assert "pg_get_serial_sequence('public.user_preferences', 'id')" in fwd
+    assert re.search(r"REVOKE ALL ON SEQUENCE %s FROM anon", fwd)
+    assert re.search(r"GRANT USAGE, SELECT ON SEQUENCE %s TO service_role", fwd)
+    # NO permissive anon/authenticated policy is created
+    assert not re.search(r"CREATE POLICY", fwd)
+    # rollback must NOT re-open user_preferences (no re-grant to anon, no DISABLE RLS)
+    assert not re.search(r"GRANT[^\n]*public\.user_preferences[^\n]*TO (anon|authenticated|PUBLIC)", rb)
+    assert not re.search(r"DISABLE ROW LEVEL SECURITY", rb)
+    # smoke proves the privilege posture at runtime
+    assert "has_table_privilege('anon','public.user_preferences'" in smoke
+    assert "has_sequence_privilege('service_role'" in smoke
+    assert "relrowsecurity" in smoke
+
+
+@pytest.mark.unit
 def test_supabase_handler_prefers_service_role_key(monkeypatch):
     """P0-3: data-plane key selection prefers service_role; mode is observable."""
     import backend.supabase_handler as sh

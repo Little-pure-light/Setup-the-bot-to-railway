@@ -58,9 +58,12 @@ DROP INDEX IF EXISTS public.idx_user_preferences_conversation_id;
 
 -- ---------------------------------------------------------------------------
 -- 5) user_preferences: keep table by default to avoid destroying new
---    preference data. To fully remove (operator decision):
---    DROP TABLE IF EXISTS public.user_preferences;
---    Forward did NOT enable RLS, so there is no RLS state to revert.
+--    preference data. If kept, it MUST stay locked down — do NOT disable RLS and
+--    do NOT re-grant anon/authenticated/PUBLIC (never revert it to a public state).
+--    The forward migration enabled RLS and granted DML/sequence only to
+--    service_role; rollback intentionally leaves that security posture in place.
+--    To fully remove (operator decision only): DROP TABLE IF EXISTS public.user_preferences;
+--    (Dropping the table also drops its RLS + grants; do not GRANT anon back.)
 -- ---------------------------------------------------------------------------
 
 -- ---------------------------------------------------------------------------

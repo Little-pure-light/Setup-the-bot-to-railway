@@ -119,4 +119,43 @@ BEGIN
   RAISE NOTICE 'reflections owner constraint smoke: PASSED';
 END $$;
 
+-- user_preferences data-plane security (Gate C C4): RLS ON + grants locked to service_role.
+DO $$
+DECLARE seq text := pg_get_serial_sequence('public.user_preferences', 'id');
+BEGIN
+  -- RLS must be enabled
+  IF NOT (SELECT relrowsecurity FROM pg_class WHERE oid = 'public.user_preferences'::regclass) THEN
+    RAISE EXCEPTION 'RLS must be ENABLED on user_preferences'; END IF;
+
+  -- anon / authenticated must have NO table DML
+  IF has_table_privilege('anon','public.user_preferences','SELECT')
+     OR has_table_privilege('anon','public.user_preferences','INSERT')
+     OR has_table_privilege('anon','public.user_preferences','UPDATE')
+     OR has_table_privilege('anon','public.user_preferences','DELETE') THEN
+    RAISE EXCEPTION 'anon must NOT have user_preferences table privileges'; END IF;
+  IF has_table_privilege('authenticated','public.user_preferences','SELECT')
+     OR has_table_privilege('authenticated','public.user_preferences','INSERT')
+     OR has_table_privilege('authenticated','public.user_preferences','UPDATE')
+     OR has_table_privilege('authenticated','public.user_preferences','DELETE') THEN
+    RAISE EXCEPTION 'authenticated must NOT have user_preferences table privileges'; END IF;
+
+  -- service_role must have the backend DML it needs
+  IF NOT (has_table_privilege('service_role','public.user_preferences','SELECT')
+      AND has_table_privilege('service_role','public.user_preferences','INSERT')
+      AND has_table_privilege('service_role','public.user_preferences','UPDATE')
+      AND has_table_privilege('service_role','public.user_preferences','DELETE')) THEN
+    RAISE EXCEPTION 'service_role must have user_preferences DML'; END IF;
+
+  -- identity sequence: anon/authenticated no USAGE; service_role has USAGE
+  IF seq IS NOT NULL THEN
+    IF has_sequence_privilege('anon', seq, 'USAGE')
+       OR has_sequence_privilege('authenticated', seq, 'USAGE') THEN
+      RAISE EXCEPTION 'anon/authenticated must NOT have USAGE on user_preferences sequence'; END IF;
+    IF NOT has_sequence_privilege('service_role', seq, 'USAGE') THEN
+      RAISE EXCEPTION 'service_role must have USAGE on user_preferences sequence'; END IF;
+  END IF;
+
+  RAISE NOTICE 'user_preferences RLS on + grants locked to service_role: PASSED';
+END $$;
+
 SELECT 'TASK006_PGVECTOR_SMOKE_PASSED' AS result;

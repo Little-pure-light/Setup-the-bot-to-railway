@@ -130,10 +130,12 @@ CREATE INDEX IF NOT EXISTS idx_reflections_user_ai_created
   ON public.xiaochenguang_reflections (user_id, ai_id, created_at DESC);
 
 -- ---------------------------------------------------------------------------
--- 3) user_preferences
--- SECURITY: Do NOT enable RLS without policies while backend may use anon key.
--- Backend data plane must use service_role (see supabase_handler + ADR).
--- RLS / least-privilege JWT policies deferred to Gate C auth design.
+-- 3) user_preferences (Gate C C4: explicit two-layer data-plane security)
+-- The backend uses an elevated key (service_role/secret) which BYPASSES RLS.
+-- We do NOT rely on Supabase default Data API grants (changing in 2026): we
+-- define BOTH layers explicitly below — RLS ON (no permissive policy) AND
+-- table/sequence grants locked to service_role only. anon/authenticated get
+-- neither rows (RLS) nor privileges (grants). No JWT/anon policy is created here.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS public.user_preferences (
   id BIGSERIAL PRIMARY KEY,
@@ -154,8 +156,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_user_preferences_user_id
 CREATE INDEX IF NOT EXISTS idx_user_preferences_conversation_id
   ON public.user_preferences (conversation_id);
 
--- If a previous migration enabled RLS without policies, keep table usable for service_role.
--- Do not re-enable RLS here.
+-- --- user_preferences security: RLS ON + explicit table/sequence grants ------
+-- (1) RLS on, with NO permissive policy → PostgREST/anon/authenticated see 0 rows.
+ALTER TABLE public.user_preferences ENABLE ROW LEVEL SECURITY;
+
+-- (2) Table DML: revoke from public roles; grant only to service_role (backend).
+REVOKE ALL ON TABLE public.user_preferences FROM PUBLIC;
+REVOKE ALL ON TABLE public.user_preferences FROM anon;
+REVOKE ALL ON TABLE public.user_preferences FROM authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.user_preferences TO service_role;
+
+-- (3) Identity sequence (BIGSERIAL id): revoke from public roles; grant to service_role.
+--     Resolve the sequence name robustly (do not hard-code) and lock it down.
+DO $$
+DECLARE seq text := pg_get_serial_sequence('public.user_preferences', 'id');
+BEGIN
+  IF seq IS NOT NULL THEN
+    EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM PUBLIC', seq);
+    EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM anon', seq);
+    EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM authenticated', seq);
+    EXECUTE format('GRANT USAGE, SELECT ON SEQUENCE %s TO service_role', seq);
+  END IF;
+END $$;
+-- No anon/authenticated policy is created (intentionally). service_role bypasses RLS.
 
 -- ---------------------------------------------------------------------------
 -- 4) memories indexes
