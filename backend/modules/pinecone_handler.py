@@ -95,10 +95,11 @@ class PineconeHandler:
             return
         embedding = self.generate_embedding(content)
         clean_meta = self._sanitize_metadata(metadata)
-        self.index.upsert([{
+        # Pinecone SDK v3+ Index.upsert requires `vectors` as a KEYWORD arg.
+        self.index.upsert(vectors=[{
             "id": reflection_id,
             "values": embedding,
-            "metadata": clean_meta
+            "metadata": clean_meta,
         }])
 
     def query_similar(self, text: str, top_k: int = 5) -> List[Dict[str, Any]]:
@@ -123,7 +124,10 @@ class PineconeHandler:
         """確保 metadata 可被 Pinecone 接受（基本型別；其他轉 json 字串）"""
         clean = {}
         for k, v in meta.items():
-            if isinstance(v, (str, int, float, bool)) or v is None:
+            if v is None:
+                # Pinecone metadata does NOT accept null values — drop the key.
+                continue
+            if isinstance(v, (str, int, float, bool)):
                 clean[k] = v
             else:
                 try:
@@ -162,7 +166,12 @@ class PineconeHandler:
             self.insert_reflection(reflection_id, reflection_text or "", metadata or {})
             return True
         except Exception as e:
-            print(f"❌ [PineconeHandler] store_reflection_with_text failed: {type(e).__name__}")
+            # Safe log: stage + error type only. Never log embedding, metadata
+            # payload, API key, Authorization, or the full request.
+            print(
+                "❌ [PineconeHandler] store_reflection_with_text failed "
+                f"[stage=insert_reflection]: {type(e).__name__}"
+            )
             return False
 
     def query_similar_reflections(

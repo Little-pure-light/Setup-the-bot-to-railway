@@ -784,3 +784,54 @@ def test_supabase_handler_prefers_service_role_key(monkeypatch):
     url, key, mode = sh._resolve_supabase_credentials()
     assert mode == "anon"
     assert key == "anon-key-value"
+
+
+@pytest.mark.unit
+def test_pinecone_real_adapter_upsert_keyword_and_metadata_none_excluded():
+    """C6 fix: the REAL enabled=True adapter path — PineconeHandler.insert_reflection
+    must call index.upsert(vectors=...) (keyword-only in pinecone SDK v3+) and must
+    NOT send None metadata values to Pinecone. A keyword-only fake Index catches the
+    previous positional-arg regression (which raised TypeError in production)."""
+    from backend.modules.pinecone_handler import PineconeHandler
+
+    class _KwOnlyIndex:
+        def __init__(self):
+            self.captured = None
+
+        def upsert(self, *, vectors, namespace=None):  # keyword-only `vectors`
+            self.captured = vectors
+            return {"upserted_count": len(vectors)}
+
+    class _Emb:
+        def create(self, model=None, input=None):
+            class _D:
+                embedding = [0.1, 0.2, 0.3]
+            class _R:
+                data = [_D()]
+            return _R()
+
+    class _OpenAI:
+        def __init__(self):
+            self.embeddings = _Emb()
+
+    ph = PineconeHandler.__new__(PineconeHandler)
+    ph.enabled = True
+    ph.index = _KwOnlyIndex()
+    ph.openai = _OpenAI()
+
+    metadata = {
+        "user_id": "u1", "ai_id": "xiaochenguang_v1", "reflection_key": "k1",
+        "confidence": 0.9, "empty_field": None,  # None must be dropped, not sent
+    }
+    ok = ph.store_reflection_with_text("k1", "some reflection text", metadata)
+    assert ok is True  # regression guard: positional upsert would TypeError -> False
+
+    cap = ph.index.captured
+    assert isinstance(cap, list) and len(cap) == 1
+    item = cap[0]
+    assert item["id"] == "k1"
+    assert isinstance(item["values"], list) and item["values"] == [0.1, 0.2, 0.3]
+    assert isinstance(item["metadata"], dict)
+    assert "empty_field" not in item["metadata"]  # None excluded (Pinecone rejects null)
+    assert item["metadata"]["user_id"] == "u1"
+    assert item["metadata"]["confidence"] == 0.9
