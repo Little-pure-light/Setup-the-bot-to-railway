@@ -285,7 +285,8 @@ async def run_post_chat_tasks(
                         reflection_data=reflection_result,
                         conversation_id=request.conversation_id,
                         user_id=request.user_id,
-                        related_message_id=None
+                        related_message_id=None,
+                        ai_id=getattr(request, "ai_id", None),
                     )
                     if storage_result.get("overall_success"):
                         logger.info(f"💾 背景：反思已儲存到三層架構")
@@ -595,6 +596,7 @@ async def chat(
                     request.user_message,
                     request.conversation_id,
                     user_id=request.user_id,
+                    ai_id=getattr(request, "ai_id", None),
                 )
             with _req_timer.stage("supabase_history"):
                 conversation_history = memory_system.get_conversation_history(
@@ -606,6 +608,7 @@ async def chat(
                 request.user_message,
                 request.conversation_id,
                 user_id=request.user_id,
+                ai_id=getattr(request, "ai_id", None),
             )
             conversation_history = memory_system.get_conversation_history(
                 request.conversation_id,
@@ -1265,6 +1268,7 @@ async def chat(
                             latest = await storage.get_latest_reflection(
                                 conversation_id=request.conversation_id,
                                 user_id=getattr(request, "user_id", None),
+                                ai_id=getattr(request, "ai_id", None),
                             )
                             if latest:
                                 from backend.modules.reflection_contract import normalize_reflection

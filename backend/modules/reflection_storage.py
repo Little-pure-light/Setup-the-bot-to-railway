@@ -4,12 +4,40 @@
 1. Redis 快取層：最新 5 筆反思（24小時 TTL）
 2. Supabase 永久儲存層：完整反思記錄
 3. Pinecone 向量層：反思語義向量（用於相似度檢索）
+
+Task 006 contract_version: task006_v1
+- permanent_store success requires Supabase write (Redis alone is NOT durable success)
+- bigint table id is DB-generated; runtime uses reflection_key UUID across stores
 """
 import os
 import json
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
+
+CONTRACT_VERSION = "task006_v1"
+
+
+def _owner(value: Optional[str]) -> Optional[str]:
+    """Fail-closed owner: empty/whitespace → None. 'default_user' is a real owner key."""
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s if s else None
+
+
+def _reflection_redis_key(ai_id: Optional[str], user_id: Optional[str], conversation_id: str) -> Optional[str]:
+    """Owner-scoped Redis key. Returns None (fail-closed) when owner is missing.
+
+    Task 006 (PR18 review, P1-1): Redis reflection cache must be isolated by
+    ai_id + user_id, not conversation_id alone (conversation_id can collide
+    across users/AIs).
+    """
+    aid = _owner(ai_id)
+    uid = _owner(user_id)
+    if not aid or not uid:
+        return None
+    return f"reflections:{aid}:{uid}:{conversation_id}"
 
 
 class ReflectionStorage:
@@ -42,7 +70,8 @@ class ReflectionStorage:
         reflection_data: Dict[str, Any],
         conversation_id: str,
         user_id: str = "default_user",
-        related_message_id: Optional[str] = None
+        related_message_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         儲存反思到三層架構
@@ -51,13 +80,15 @@ class ReflectionStorage:
             reflection_data: 反思資料（來自 reflection_module）
             conversation_id: 對話 ID
             user_id: 使用者 ID
-            related_message_id: 關聯的訊息 ID
+            related_message_id: 關聯的訊息 ID（text；不強制 UUID）
+            ai_id: AI 產品識別
         
         返回:
-            儲存結果
+            儲存結果（含 permanent/cache/vector 狀態）
         """
-        reflection_id = str(uuid.uuid4())
-        timestamp = datetime.utcnow().isoformat()
+        reflection_key = str(uuid.uuid4())
+        timestamp = datetime.now(timezone.utc).isoformat()
+        ai_id = ai_id or os.getenv("AI_ID", "xiaochenguang_v1")
 
         # Unified contract (Infrastructure Phase)
         try:
@@ -78,12 +109,16 @@ class ReflectionStorage:
                 "timestamp": timestamp,
             }
 
+        conf = float(contract.get("confidence", 0.0) or 0.0)
+        conf = max(0.0, min(1.0, conf))
+
         storage_record = {
-            "id": reflection_id,
+            # Cross-store identity (UUID). DB bigint id is not set by runtime.
+            "reflection_key": reflection_key,
             "conversation_id": conversation_id,
             "user_id": user_id,
+            "ai_id": ai_id,
             "related_message_id": related_message_id,
-            # contract fields (canonical)
             "reflection": contract,
             "reflection_content": contract.get("summary", ""),
             "analysis_tags": {
@@ -100,31 +135,51 @@ class ReflectionStorage:
                 "causes": contract.get("causes") or [],
                 "improvements": contract.get("lessons") or [],
             },
-            "confidence_score": contract.get("confidence", 0.0),
+            "confidence_score": conf,
             "created_at": timestamp,
+            "contract_version": CONTRACT_VERSION,
         }
         
         results = {
-            "reflection_id": reflection_id,
+            "reflection_id": reflection_key,  # backward alias
+            "reflection_key": reflection_key,
             "timestamp": timestamp,
+            "contract_version": CONTRACT_VERSION,
             "redis_success": False,
             "supabase_success": False,
-            "pinecone_success": False
+            "pinecone_success": False,
+            "permanent_store": "skipped",
+            "cache_store": "disabled",
+            "vector_store": "disabled",
+            "error_category": None,
         }
         
         redis_success = await self._store_to_redis(storage_record, conversation_id)
         results["redis_success"] = redis_success
+        if not self.redis:
+            results["cache_store"] = "disabled"
+        else:
+            results["cache_store"] = "success" if redis_success else "failed"
         
         supabase_success = await self._store_to_supabase(storage_record)
         results["supabase_success"] = supabase_success
+        if not self.supabase:
+            results["permanent_store"] = "skipped"
+        else:
+            results["permanent_store"] = "success" if supabase_success else "failed"
         
-        pinecone_success = await self._store_to_pinecone(storage_record)
+        pinecone_success, vector_status = await self._store_to_pinecone(storage_record)
         results["pinecone_success"] = pinecone_success
+        results["vector_store"] = vector_status
         
-        success_count = sum([redis_success, supabase_success, pinecone_success])
-        results["overall_success"] = success_count >= 2
+        # Durable success == permanent Supabase write only (Task 006 honesty rule)
+        results["overall_success"] = bool(supabase_success)
+        results["durable_success"] = bool(supabase_success)
         
-        print(f"📊 反思儲存結果: Redis={redis_success}, Supabase={supabase_success}, Pinecone={pinecone_success}")
+        print(
+            f"📊 反思儲存結果: permanent={results['permanent_store']} "
+            f"cache={results['cache_store']} vector={results['vector_store']}"
+        )
         
         return results
     
@@ -132,16 +187,21 @@ class ReflectionStorage:
         """儲存到 Redis 快取（僅保留最新 5 筆）"""
         if not self.redis:
             return False
-        
+
         try:
-            redis_key = f"reflections:{conversation_id}"
-            
-            existing = self.redis.redis.lrange(redis_key, 0, -1) if hasattr(self.redis.redis, 'lrange') else []
-            
+            redis_key = _reflection_redis_key(
+                record.get("ai_id"), record.get("user_id"), conversation_id
+            )
+            if not redis_key:
+                # fail-closed: no owner → do not write an unscoped cache record
+                print("⚠️ 反思 Redis 快取略過：缺少 user_id 或 ai_id（fail-closed）")
+                return False
+
             # Prefer unified contract if present
             contract = record.get("reflection") if isinstance(record.get("reflection"), dict) else {}
             simplified_record = {
-                "id": record["id"],
+                "reflection_key": record.get("reflection_key"),
+                "id": record.get("reflection_key"),  # legacy alias
                 "summary": contract.get("summary") or record.get("reflection_content") or "",
                 "causes": contract.get("causes") or [],
                 "lessons": contract.get("lessons") or [],
@@ -149,18 +209,18 @@ class ReflectionStorage:
                 if contract.get("confidence") is not None
                 else record.get("confidence_score", 0.0),
                 "timestamp": contract.get("timestamp") or record.get("created_at") or "",
-                # legacy aliases
                 "reflection_content": contract.get("summary") or record.get("reflection_content") or "",
                 "confidence_score": contract.get("confidence")
                 if contract.get("confidence") is not None
                 else record.get("confidence_score", 0.0),
-
+                "user_id": record.get("user_id"),
+                "ai_id": record.get("ai_id"),
             }
             
+            if not hasattr(self.redis, "redis") or self.redis.redis is None:
+                return False
             self.redis.redis.lpush(redis_key, json.dumps(simplified_record, ensure_ascii=False))
-            
             self.redis.redis.ltrim(redis_key, 0, self.redis_max_items - 1)
-            
             self.redis.redis.expire(redis_key, self.redis_ttl)
             
             print(f"✅ 反思已儲存到 Redis: {redis_key}")
@@ -171,27 +231,30 @@ class ReflectionStorage:
             return False
     
     async def _store_to_supabase(self, record: Dict[str, Any]) -> bool:
-        """儲存到 Supabase 永久儲存"""
+        """儲存到 Supabase 永久儲存（omit bigint id; use reflection_key）"""
         if not self.supabase:
             return False
         
         try:
             supabase_record = {
-                "id": record["id"],
+                # Do NOT set bigint "id" — serial default
+                "reflection_key": record["reflection_key"],
                 "created_at": record["created_at"],
                 "conversation_id": record["conversation_id"],
                 "user_id": record["user_id"],
+                "ai_id": record.get("ai_id"),
                 "related_message_id": record.get("related_message_id"),
                 "reflection_content": record["reflection_content"],
                 "analysis_tags": record["analysis_tags"],
                 "reflection_level": record["reflection_level"],
-                "confidence_score": record["confidence_score"]
+                "confidence_score": record["confidence_score"],
+                "contract_version": record.get("contract_version", CONTRACT_VERSION),
             }
             
             response = self.supabase.table(self.reflections_table).insert(supabase_record).execute()
             
             if response.data:
-                print(f"✅ 反思已儲存到 Supabase: {record['id']}")
+                print(f"✅ 反思已儲存到 Supabase: {record['reflection_key']}")
                 return True
             else:
                 print(f"⚠️ Supabase 返回空數據")
@@ -201,10 +264,12 @@ class ReflectionStorage:
             print(f"❌ Supabase 儲存失敗: {type(e).__name__}: {e}")
             return False
     
-    async def _store_to_pinecone(self, record: Dict[str, Any]) -> bool:
-        """儲存到 Pinecone 向量資料庫"""
+    async def _store_to_pinecone(self, record: Dict[str, Any]):
+        """儲存到 Pinecone 向量資料庫。回傳 (success: bool, status: str)。"""
         if not self.pinecone:
-            return False
+            return False, "disabled"
+        if not getattr(self.pinecone, "enabled", True):
+            return False, "disabled"
         
         try:
             reflection_text = record["reflection_content"]
@@ -212,92 +277,148 @@ class ReflectionStorage:
             metadata = {
                 "conversation_id": record["conversation_id"],
                 "user_id": record["user_id"],
+                "ai_id": record.get("ai_id") or "",
+                "reflection_key": record["reflection_key"],
                 "timestamp": record["created_at"],
                 "confidence": record["confidence_score"],
-                "summary": reflection_text[:500]
+                "summary": (reflection_text or "")[:500],
             }
             
             success = self.pinecone.store_reflection_with_text(
-                reflection_id=record["id"],
+                reflection_id=record["reflection_key"],
                 reflection_text=reflection_text,
-                metadata=metadata
+                metadata=metadata,
             )
-            
-            return success
+            return bool(success), ("success" if success else "failed")
             
         except Exception as e:
             print(f"❌ Pinecone 儲存失敗: {type(e).__name__}: {e}")
-            return False
+            return False, "failed"
     
     async def get_latest_reflections(
         self,
         conversation_id: str,
         limit: int = 5,
-        use_cache: bool = True
+        use_cache: bool = True,
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        獲取最新反思（優先從 Redis 讀取，降級到 Supabase）
-        
-        參數:
-            conversation_id: 對話 ID
-            limit: 最大返回數量
-            use_cache: 是否使用 Redis 快取
-        
-        返回:
-            反思列表
+        獲取最新反思（優先從 Redis 讀取，降級到 Supabase）。
+
+        Task 006 (PR18 review, P1-1): fail-closed。需同時具備 user_id 與 ai_id；
+        缺任一者一律回傳空清單。default_user 視為真實 owner（非繞過）。
+        cache record 缺 owner 時，不得在有 owner filter 的情況下通過。
         """
+        uid = _owner(user_id)
+        aid = _owner(ai_id) or _owner(os.getenv("AI_ID", "xiaochenguang_v1"))
+        if not uid or not aid:
+            return []
+
         if use_cache and self.redis:
-            redis_reflections = await self._get_from_redis(conversation_id, limit)
+            redis_reflections = await self._get_from_redis(
+                conversation_id, limit, user_id=uid, ai_id=aid
+            )
             if redis_reflections:
-                print(f"✅ 從 Redis 獲取 {len(redis_reflections)} 筆反思")
-                return redis_reflections
-        
+                # Strict owner match (PR18 review round 2): BOTH user_id and ai_id
+                # must be present AND equal. A cache record missing ai_id is NOT
+                # auto-filled with the requested ai_id — it is rejected. (Redis is
+                # a 24h cache, so stale legacy records simply age out.)
+                redis_reflections = [
+                    r for r in redis_reflections
+                    if r.get("user_id") == uid and r.get("ai_id") == aid
+                ]
+                if redis_reflections:
+                    print(f"✅ 從 Redis 獲取 {len(redis_reflections)} 筆反思")
+                    return redis_reflections
+
         if self.supabase:
-            supabase_reflections = await self._get_from_supabase(conversation_id, limit)
+            supabase_reflections = await self._get_from_supabase(
+                conversation_id, limit, user_id=uid, ai_id=aid
+            )
             if supabase_reflections:
                 print(f"✅ 從 Supabase 獲取 {len(supabase_reflections)} 筆反思")
                 return supabase_reflections
-        
+
         return []
-    
-    async def _get_from_redis(self, conversation_id: str, limit: int) -> List[Dict[str, Any]]:
-        """從 Redis 獲取反思"""
+
+    async def get_latest_reflection(
+        self,
+        conversation_id: str,
+        user_id: Optional[str] = None,
+        use_cache: bool = True,
+        ai_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Singular helper used by chat_router include_reflection wait path."""
+        items = await self.get_latest_reflections(
+            conversation_id=conversation_id,
+            limit=1,
+            use_cache=use_cache,
+            user_id=user_id,
+            ai_id=ai_id,
+        )
+        return items[0] if items else None
+
+    async def _get_from_redis(
+        self,
+        conversation_id: str,
+        limit: int,
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """從 Redis 獲取反思（owner-scoped key；fail-closed）"""
         if not self.redis:
             return []
-        
+
+        redis_key = _reflection_redis_key(ai_id, user_id, conversation_id)
+        if not redis_key:
+            return []
+
         try:
-            redis_key = f"reflections:{conversation_id}"
             items = self.redis.redis.lrange(redis_key, 0, limit - 1)
-            
+
             reflections = []
             for item in items:
                 if isinstance(item, bytes):
                     item = item.decode('utf-8')
                 reflections.append(json.loads(item))
-            
+
             return reflections
-            
+
         except Exception as e:
             print(f"❌ Redis 讀取失敗: {e}")
             return []
-    
-    async def _get_from_supabase(self, conversation_id: str, limit: int) -> List[Dict[str, Any]]:
-        """從 Supabase 獲取反思"""
+
+    async def _get_from_supabase(
+        self,
+        conversation_id: str,
+        limit: int,
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """從 Supabase 獲取反思（fail-closed user_id + ai_id）"""
         if not self.supabase:
             return []
-        
+
+        uid = _owner(user_id)
+        aid = _owner(ai_id)
+        if not uid or not aid:
+            return []
+
         try:
-            response = self.supabase.table(self.reflections_table)\
-                .select("*")\
-                .eq("conversation_id", conversation_id)\
-                .order("created_at", desc=True)\
-                .limit(limit)\
-                .execute()
-            
+            q = (
+                self.supabase.table(self.reflections_table)
+                .select("*")
+                .eq("conversation_id", conversation_id)
+                .eq("user_id", uid)
+                .eq("ai_id", aid)
+            )
+            response = q.order("created_at", desc=True).limit(limit).execute()
+
             if response.data:
                 return response.data
             return []
-            
+
         except Exception as e:
             print(f"❌ Supabase 讀取失敗: {e}")
             return []
@@ -306,37 +427,48 @@ class ReflectionStorage:
         self,
         query_text: str,
         top_k: int = 5,
-        user_id: Optional[str] = None
+        user_id: Optional[str] = None,
+        ai_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         搜尋相似的反思（使用 Pinecone 向量檢索）
-        
+
+        Task 006 (PR18 review, P1-1): 向量檢索須同時以 user_id + ai_id 過濾，
+        fail-closed（缺任一者回傳空清單），避免跨使用者／跨 AI 的反思污染。
+
         參數:
             query_text: 查詢文本
             top_k: 返回前 K 個結果
-            user_id: 可選的使用者 ID 過濾
-        
+            user_id: 使用者 ID（必填，fail-closed）
+            ai_id: AI 產品識別（必填，fail-closed；預設取 AI_ID）
+
         返回:
             相似反思列表
         """
         if not self.pinecone:
             print("⚠️ Pinecone 未啟用，無法執行向量搜尋")
             return []
-        
+
+        uid = _owner(user_id)
+        aid = _owner(ai_id) or _owner(os.getenv("AI_ID", "xiaochenguang_v1"))
+        if not uid or not aid:
+            print("⚠️ 反思向量搜尋略過：缺少 user_id 或 ai_id（fail-closed）")
+            return []
+
         try:
             query_embedding = self.pinecone.generate_embedding(query_text)
-            
+
             if not query_embedding:
                 return []
-            
-            filter_metadata = {"user_id": user_id} if user_id else None
-            
+
+            filter_metadata = {"user_id": uid, "ai_id": aid}
+
             similar = self.pinecone.query_similar_reflections(
                 query_embedding=query_embedding,
                 top_k=top_k,
                 filter_metadata=filter_metadata
             )
-            
+
             return similar
             
         except Exception as e:
