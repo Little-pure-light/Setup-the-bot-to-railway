@@ -56,6 +56,9 @@ RANK_MMR_LAMBDA = 0.7
 # (which is clamped to 3..50); kept constant so a normal RPC with poor top
 # candidates still admits older owner+AI-scoped memories into the candidate set.
 FALLBACK_SCAN_BOUND = 50
+# C7: the only supported app-path memory RPC. MEMORY_RPC_NAME is hardened to this;
+# any other value is ignored and falls back here (prevents misconfig to legacy/arbitrary RPC).
+SUPPORTED_MEMORY_RPC = "match_memories_v2"
 
 # --- Opt-in de-identified recall diagnostics (default OFF) --------------------
 # When MEMORY_RECALL_DIAGNOSTICS is truthy, recall emits ONE extra de-identified
@@ -148,10 +151,17 @@ class MemorySystem:
         self.memories_table = memories_table
         self.emotion_detector = EnhancedEmotionDetector()
         self.redis = redis_interface
-        # Only match_memories_v2 is supported for app paths (legacy RPC raises).
-        self.memory_rpc_name = (
-            os.getenv("MEMORY_RPC_NAME", "match_memories_v2").strip() or "match_memories_v2"
-        )
+        # C7 hardening: only match_memories_v2 is a supported app path. If
+        # MEMORY_RPC_NAME is unset or exactly v2, behavior is unchanged; any other
+        # value (legacy/arbitrary) is IGNORED and falls back to v2, with a safe
+        # warning that never logs the configured value or any secret.
+        _rpc_env = (os.getenv("MEMORY_RPC_NAME", SUPPORTED_MEMORY_RPC) or "").strip()
+        if _rpc_env and _rpc_env != SUPPORTED_MEMORY_RPC:
+            print(
+                "\u26a0\ufe0f 忽略非支援的 MEMORY_RPC_NAME 設定，回退為 match_memories_v2"
+                "（僅支援 v2；未記錄設定值）"
+            )
+        self.memory_rpc_name = SUPPORTED_MEMORY_RPC
         # user_ai_cross_conversation (default) | conversation_only
         self.semantic_scope = (
             os.getenv("MEMORY_SEMANTIC_SCOPE", "user_ai_cross_conversation").strip()

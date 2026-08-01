@@ -35,7 +35,7 @@ git clone https://github.com/Little-pure-light/Setup-the-bot-to-railway.git
 ### 2.2 向量與 RPC
 
 - 擴展：`pgvector`，欄位 `embedding VECTOR(1536)`
-- RPC：`match_memories(query_embedding, match_count, conversation_id)`
+- RPC：`match_memories_v2(query_embedding vector(1536), match_count, filter_conversation_id, filter_user_id, filter_ai_id, min_similarity)`（現行契約；app 僅用 v2，legacy `match_memories` 非現行 RPC）
 - 見 README 資料庫章節
 
 ### 2.3 Storage
