@@ -84,6 +84,10 @@ class ChatRequest(BaseModel):
     ai_id: str = os.getenv("AI_ID", "xiaochenguang_v1")
     # 前端入口路由提示（可偽造；僅 Silence 實驗分流，非授權）
     client_id: str = ""
+    # Task007: True => ephemeral (Open WebUI auxiliary task / untrusted identity):
+    # no persistent recall/history read, no save_memory/emotion/reflection. Default
+    # False preserves ALL existing callers (Cloudflare, normal OpenAI clients).
+    suppress_memory: bool = False
     # 🎙️ 語音 / 車載
     voice_mode: bool = False  # 語音友善回覆（簡短口語）
     car_mode: bool = False  # 車載：更短、重點前置
@@ -515,11 +519,18 @@ async def chat(
             _req_timer = None
 
         # --- AI Kernel (Strangler)：flag 開啟時走新核心，失敗可回退 Legacy ---
-        kernel_response = await _try_kernel_chat(
-            request, background_tasks, stream=stream, use_tools=use_tools
-        )
-        if kernel_response is not None:
-            return kernel_response
+        # Task007: ephemeral (aux task / untrusted identity) must NOT enter the Kernel.
+        # The Kernel runs its own memory recall + post-process save regardless of
+        # use_tools, so use_tools=False alone does not stop persistent side effects.
+        # Skip Kernel entirely and use the Legacy path, which has full suppress_memory
+        # gating (no recall/history/save/emotion/reflection). suppress_memory=False keeps
+        # Kernel enabled/shadow behaviour completely unchanged.
+        if not getattr(request, "suppress_memory", False):
+            kernel_response = await _try_kernel_chat(
+                request, background_tasks, stream=stream, use_tools=use_tools
+            )
+            if kernel_response is not None:
+                return kernel_response
 
         openai_client = get_openai_client()
         memories_table = os.getenv("SUPABASE_MEMORIES_TABLE", "xiaochenguang_memories")
@@ -590,7 +601,11 @@ async def chat(
         )
 
         # 1. 執行所有「讀取」任務（必須在串流前完成）
-        if _req_timer:
+        # Task007: ephemeral (aux task / untrusted identity) => no persistent recall/history read
+        if getattr(request, "suppress_memory", False):
+            recalled_memories = ""
+            conversation_history = ""
+        elif _req_timer:
             with _req_timer.stage("memory_recall"):
                 recalled_memories = await memory_system.recall_memories(
                     request.user_message,
@@ -725,6 +740,8 @@ async def chat(
                 """串流結束後：記憶儲存 + 反思等背景任務"""
                 if not full_response or full_response.startswith("[ERROR]"):
                     return
+                if getattr(request, "suppress_memory", False):
+                    return  # Task007: ephemeral -> no persistent save/emotion/reflection
                 try:
                     await memory_system.save_memory(
                         request.conversation_id,
@@ -1205,7 +1222,10 @@ async def chat(
             logger.warning("token ledger skipped: %s", e)
 
         # 3. [重要] 保持核心記憶立即儲存 (確保主訊息不會丟失)
-        if _req_timer:
+        #    Task007: skip persistent save for ephemeral (aux task / untrusted identity)
+        if getattr(request, "suppress_memory", False):
+            pass
+        elif _req_timer:
             with _req_timer.stage("memory_save"):
                 await memory_system.save_memory(
                     request.conversation_id,
@@ -1227,12 +1247,13 @@ async def chat(
                 user_id=request.user_id,
             )
 
-        background_tasks.add_task(
-            run_post_chat_tasks,
-            request, 
-            assistant_message, 
-            emotion_analysis
-        )
+        if not getattr(request, "suppress_memory", False):
+            background_tasks.add_task(
+                run_post_chat_tasks,
+                request,
+                assistant_message,
+                emotion_analysis,
+            )
 
         speech_text = None
         if request.voice_mode or request.car_mode or request.speak_response:
