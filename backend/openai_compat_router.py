@@ -40,6 +40,48 @@ _USER_HEADERS = (
     "x-openwebui-user-id",
 )
 
+# Task007: Open WebUI task marker (present when ENABLE_FORWARD_USER_INFO_HEADERS +
+# {{TASK}} placeholder are configured). Auxiliary tasks must NOT touch persistent
+# recall/tools/memory/emotion/reflection.
+_TASK_HEADER = "x-openwebui-task"
+_NORMAL_TASKS = ("", "default", "chat", "user_response")
+_AUX_TASKS = (
+    "title_generation", "tags_generation", "tag_generation", "tags", "title",
+    "query_generation", "autocomplete_generation", "emoji_generation",
+    "follow_up_generation", "follow_up", "query", "emoji", "function_calling",
+    "moa_response_generation",
+)
+
+
+def resolve_task(http_request: "Request", body: "OpenAIChatCompletionRequest") -> str:
+    """Open WebUI task type (lowercased). Header first, then body extras. '' if none."""
+    val = (http_request.headers.get(_TASK_HEADER) or "").strip().lower()
+    if val:
+        return val
+    extra = getattr(body, "model_extra", None) or {}
+    for k in ("task", "chat_type", "type"):
+        v = extra.get(k) if isinstance(extra, dict) else None
+        if v and str(v).strip():
+            return str(v).strip().lower()
+    return ""
+
+
+def is_auxiliary_task(task: str) -> bool:
+    """True for Open WebUI internal helper tasks (title/tag/follow-up/query/emoji...).
+    Fail-closed: any non-empty task not explicitly a normal user turn is auxiliary."""
+    t = (task or "").strip().lower()
+    if not t or t in _NORMAL_TASKS:
+        return False
+    return True
+
+
+def has_trustworthy_user(http_request: "Request", body: "OpenAIChatCompletionRequest") -> bool:
+    """A per-user identity was actually supplied (header or body.user) — not the fallback."""
+    for h in _USER_HEADERS:
+        if (http_request.headers.get(h) or "").strip():
+            return True
+    return bool(body.user and str(body.user).strip())
+
 
 # ---------------------------------------------------------------------------
 # Request models (OpenAI Chat Completions subset)
@@ -401,10 +443,24 @@ async def chat_completions(
             },
         )
 
-    user_id = resolve_user_id(http_request, body)
-    conversation_id = resolve_conversation_id(http_request, body, user_id)
     model_name = (body.model or MODEL_ID).strip() or MODEL_ID
     stream = bool(body.stream)
+
+    # Task007: decide ephemeral (no persistent memory) when this is an Open WebUI
+    # auxiliary task OR when no trustworthy per-user identity was supplied.
+    task = resolve_task(http_request, body)
+    aux = is_auxiliary_task(task)
+    trustworthy = has_trustworthy_user(http_request, body)
+    ephemeral = aux or not trustworthy
+
+    if trustworthy:
+        user_id = resolve_user_id(http_request, body)
+        conversation_id = resolve_conversation_id(http_request, body, user_id)
+    else:
+        # Fail-closed: never derive owner from api key / Authorization / message / email,
+        # and never reuse a shared persistent bucket. Use a per-request ephemeral id.
+        user_id = f"owui_ephemeral_{uuid.uuid4().hex[:16]}"
+        conversation_id = f"owui_ephemeral_{uuid.uuid4().hex[:16]}"
 
     chat_req = ChatRequest(
         user_message=user_message,
@@ -415,13 +471,12 @@ async def chat_completions(
         car_mode=False,
         input_method="text",
         speak_response=False,
+        suppress_memory=ephemeral,
     )
 
     logger.info(
-        "OpenAI-compat chat stream=%s user=%s conv=%s",
-        stream,
-        user_id[:12],
-        conversation_id[:16],
+        "OpenAI-compat chat stream=%s aux=%s trusted=%s ephemeral=%s",
+        stream, aux, trustworthy, ephemeral,
     )
 
     try:
@@ -429,7 +484,7 @@ async def chat_completions(
             request=chat_req,
             background_tasks=background_tasks,
             stream=stream,
-            use_tools=True,
+            use_tools=not ephemeral,
         )
     except HTTPException as exc:
         # Map to OpenAI-ish error body while keeping status
