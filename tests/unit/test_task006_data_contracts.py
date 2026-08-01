@@ -835,3 +835,423 @@ def test_pinecone_real_adapter_upsert_keyword_and_metadata_none_excluded():
     assert "empty_field" not in item["metadata"]  # None excluded (Pinecone rejects null)
     assert item["metadata"]["user_id"] == "u1"
     assert item["metadata"]["confidence"] == 0.9
+
+
+# ---------------------------------------------------------------------------
+# Task 006 C6-F — hybrid recall reliability (real MemorySystem adapter).
+# Mechanism under test (consistent with the observed R02/Open-WebUI recall miss;
+# the exact production top-3 occupants were not captured, so these tests
+# reproduce the RISK rather than asserting a specific production state):
+# after accumulation, higher-cosine distractor turns crowd out an older
+# relevant memory in a top-3 view. Fix = bounded candidate pool (separate from
+# inject count) + merge scopes + exact-dedupe + MMR diversify over FULL content
+# + hybrid (cosine + Chinese char-ngram overlap) rerank. No threshold lowering,
+# no hardcoded markers; owner+AI isolation and the 0.55 floor stay intact.
+# ---------------------------------------------------------------------------
+
+_AI = "xiaochenguang_v1"
+
+# Ten DISTINCT distractor questions (not exact duplicates -> exact-dedupe cannot
+# collapse them; several pairs fall below the near-dup threshold so they are truly
+# separate candidates). They share only the topic phrase and a common long
+# "not found" answer, so MMR clusters them without any hardcoded marker.
+_DISTRACTOR_QUESTIONS = [
+    "我的驗收暗號到底是什麼呢",
+    "可以再說一次當時的驗收暗號嗎",
+    "驗收暗號我忘記了可以提示我嗎",
+    "幫我確認一下我的驗收暗號好嗎",
+    "現在我的驗收暗號是哪一個呀",
+    "請重複一次我設定過的驗收暗號",
+    "驗收暗號你還有記得嗎拜託",
+    "告訴我我當初講的那個驗收暗號",
+    "驗收暗號是不是後來有被改掉了",
+    "我真的很想知道驗收暗號的內容",
+    "到底哪一個才是我的驗收暗號啦",
+]
+_DISTRACTOR_ANSWER = "抱歉，我目前在你的記憶裡沒有找到你要的那個內容喔。"
+
+
+def _seed_target_and_distractors(sb, n_distractors=10, target_sim=0.70, distractor_sim=0.95):
+    """Older target fact (carries the answer, LOWER cosine) + >=10 DISTINCT
+    higher-cosine distractor questions. No markers baked into product logic."""
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "c_seed", "user_id": "u1", "ai_id": _AI,
+        "user_message": "請記住，我的驗收暗號是「銀河玻璃杯」。",
+        "assistant_message": "好的，我把你的驗收暗號「銀河玻璃杯」記起來了。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-01T00:00:00Z", "_sim": target_sim,
+    })
+    for i in range(n_distractors):
+        q = _DISTRACTOR_QUESTIONS[i % len(_DISTRACTOR_QUESTIONS)]
+        tbl.rows.append({
+            "conversation_id": f"c_d{i}", "user_id": "u1", "ai_id": _AI,
+            "user_message": q, "assistant_message": _DISTRACTOR_ANSWER,
+            "memory_type": "conversation", "embedding": EMB,
+            "created_at": f"2026-07-2{i%10}T00:00:00Z", "_sim": distractor_sim,
+        })
+
+
+def _count_injected(out):
+    return out.count("相關記憶:")
+
+
+@pytest.mark.unit
+def test_distractor_fixtures_are_genuinely_distinct():
+    """Guard: the distractors must NOT be exact-dedupe bait, and several pairs
+    must fall below the near-dup threshold (they are real, separate candidates)."""
+    from modules.memory_system import _char_ngrams, _ngram_jaccard
+    qs = _DISTRACTOR_QUESTIONS[:10]
+    assert len(set(qs)) == 10  # all user_messages distinct
+    full = [_char_ngrams(f"{q} {_DISTRACTOR_ANSWER}") for q in qs]
+    below = 0
+    for i in range(len(full)):
+        for j in range(i + 1, len(full)):
+            if _ngram_jaccard(full[i], full[j]) < 0.9:
+                below += 1
+    assert below >= 5  # several distinct (below near-dup) candidate pairs
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_surfaces_older_target_among_many_distractors(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    _seed_target_and_distractors(sb, n_distractors=10)
+    out = await ms.search_relevant_memories(
+        "c_new", "請問我當初設定的驗收暗號是哪一個？",
+        limit=3, user_id="u1", ai_id=_AI,
+    )
+    # older target surfaced despite 10 distinct higher-cosine distractors
+    assert "銀河玻璃杯" in out
+    # candidate pool != injected count: still capped at limit
+    assert _count_injected(out) <= 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_distinct_distractors_do_not_take_all_slots(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    _seed_target_and_distractors(sb, n_distractors=11)
+    out = await ms.search_relevant_memories(
+        "c_new", "我的驗收暗號是哪一個？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    # target present AND distractors do not occupy every slot
+    assert "銀河玻璃杯" in out
+    assert out.count(_DISTRACTOR_ANSWER) <= 2
+    assert _count_injected(out) <= 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_distractors_plus_cross_owner_ai_no_leak(mem_env):
+    """Distractor pressure must not surface another owner's / AI's memory."""
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    _seed_target_and_distractors(sb, n_distractors=10)
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({  # other owner, very high sim
+        "conversation_id": "c_other", "user_id": "u2", "ai_id": _AI,
+        "user_message": "我的驗收暗號是紅色機密。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-30T00:00:00Z", "_sim": 0.99,
+    })
+    tbl.rows.append({  # same owner, other AI, very high sim
+        "conversation_id": "c_other2", "user_id": "u1", "ai_id": "story_master_v1",
+        "user_message": "我的驗收暗號是故事機密。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-30T00:00:00Z", "_sim": 0.99,
+    })
+    out = await ms.search_relevant_memories(
+        "c_new", "我的驗收暗號是哪一個？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "銀河玻璃杯" in out
+    assert "紅色機密" not in out
+    assert "故事機密" not in out
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_near_dup_question_keeps_answer_bearing_candidate(mem_env):
+    """Same question, two answers: one contains the fact, one is a 'not found'.
+    Near-dup diversify keys on FULL content, so the answer-bearing candidate is
+    NOT dropped just because the user_message matches a higher-cosine no-answer row."""
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({  # no-answer row, HIGHER cosine, identical question text
+        "conversation_id": "cq1", "user_id": "u1", "ai_id": _AI,
+        "user_message": "我的通關密語是什麼？",
+        "assistant_message": "抱歉，我目前沒有找到相關記憶。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-20T00:00:00Z", "_sim": 0.97,
+    })
+    tbl.rows.append({  # answer-bearing row, slightly lower cosine, same question text
+        "conversation_id": "cq2", "user_id": "u1", "ai_id": _AI,
+        "user_message": "我的通關密語是什麼？",
+        "assistant_message": "你的通關密語是月光森林。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-10T00:00:00Z", "_sim": 0.90,
+    })
+    out = await ms.search_relevant_memories(
+        "cq_new", "我的通關密語是什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "月光森林" in out  # answer candidate not dropped as a user_message near-dup
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_pool_larger_than_inject_but_capped(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    tbl = sb.table("xiaochenguang_memories")
+    for i in range(8):
+        tbl.rows.append({
+            "conversation_id": f"cx{i}", "user_id": "u1", "ai_id": _AI,
+            "user_message": f"我喜歡的第{i}件事是散步{i}。",
+            "assistant_message": f"了解，你喜歡散步{i}。",
+            "memory_type": "conversation", "embedding": EMB,
+            "created_at": f"2026-07-1{i}T00:00:00Z", "_sim": 0.9 - i * 0.01,
+        })
+    out = await ms.search_relevant_memories(
+        "cx_new", "我喜歡做什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert 1 <= _count_injected(out) <= 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_cross_owner_high_sim_not_leaked(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "shared", "user_id": "u1", "ai_id": _AI,
+        "user_message": "我的暗號是綠色。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-01T00:00:00Z", "_sim": 0.6,
+    })
+    tbl.rows.append({  # other owner, HIGHER sim — must never leak
+        "conversation_id": "shared", "user_id": "u2", "ai_id": _AI,
+        "user_message": "我的暗號是紅色機密。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-02T00:00:00Z", "_sim": 0.99,
+    })
+    out = await ms.search_relevant_memories(
+        "shared", "我的暗號是什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "綠色" in out
+    assert "紅色機密" not in out
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_cross_ai_high_sim_not_leaked(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "c1", "user_id": "u1", "ai_id": _AI,
+        "user_message": "光光專屬記憶。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-01T00:00:00Z", "_sim": 0.6,
+    })
+    tbl.rows.append({  # same owner, other AI, HIGHER sim — must never leak
+        "conversation_id": "c1", "user_id": "u1", "ai_id": "story_master_v1",
+        "user_message": "故事大師機密記憶。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-02T00:00:00Z", "_sim": 0.99,
+    })
+    out = await ms.search_relevant_memories(
+        "c1", "記憶", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "光光專屬記憶" in out
+    assert "故事大師機密記憶" not in out
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_missing_owner_fail_closed(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    _seed_target_and_distractors(sb, n_distractors=3)
+    assert await ms.search_relevant_memories(
+        "c_new", "暗號", limit=3, user_id="", ai_id=_AI) == ""
+    assert await ms.search_relevant_memories(
+        "c_new", "暗號", limit=3, user_id="u1", ai_id="") == ""
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_rpc_exception_chinese_fallback(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "c1", "user_id": "u1", "ai_id": _AI,
+        "user_message": "我的生日是十月十日。", "assistant_message": "記住了。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-01T00:00:00Z",
+    })
+
+    def _boom(*a, **k):
+        raise RuntimeError("rpc down")
+
+    sb.rpc = _boom
+    out = await ms.search_relevant_memories(
+        "c1", "我的生日是什麼時候？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "十月十日" in out
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_legacy_null_ai_still_compatible(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    os.environ["AI_ID"] = _AI  # default AI inherits legacy NULL rows
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "c_legacy", "user_id": "u1", "ai_id": None,
+        "user_message": "舊資料：我養了一隻貓叫咪咪。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-06-01T00:00:00Z",
+    })
+    out = await ms.search_relevant_memories(
+        "c_legacy", "我養的貓叫什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "咪咪" in out
+
+
+# --- MEMORY_SEMANTIC_SCOPE regression (conversation_only vs cross-conversation) ---
+
+def _seed_two_conversations(sb):
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "conv_here", "user_id": "u1", "ai_id": _AI,
+        "user_message": "在這個對話我說我喜歡藍色。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-05T00:00:00Z", "_sim": 0.8,
+    })
+    tbl.rows.append({
+        "conversation_id": "conv_other", "user_id": "u1", "ai_id": _AI,
+        "user_message": "在別的對話我說我喜歡青椒披薩。", "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-06T00:00:00Z", "_sim": 0.95,
+    })
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_scope_conversation_only_does_not_cross_conversations(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    ms.semantic_scope = "conversation_only"
+    _seed_two_conversations(sb)
+    out = await ms.search_relevant_memories(
+        "conv_here", "我喜歡什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "藍色" in out
+    assert "青椒披薩" not in out  # other conversation must NOT be pulled in
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_scope_conversation_only_fallback_also_scoped(mem_env):
+    """Even when the RPC raises (traditional fallback), conversation_only must
+    not cross conversations."""
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    ms.semantic_scope = "conversation_only"
+    _seed_two_conversations(sb)
+
+    def _boom(*a, **k):
+        raise RuntimeError("rpc down")
+
+    sb.rpc = _boom
+    out = await ms.search_relevant_memories(
+        "conv_here", "我喜歡什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "青椒披薩" not in out  # traditional fallback stays in-conversation
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_scope_cross_conversation_default_can_recall_other_conversation(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    ms.semantic_scope = "user_ai_cross_conversation"  # default
+    _seed_two_conversations(sb)
+    out = await ms.search_relevant_memories(
+        "conv_here", "我喜歡的食物是什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "青椒披薩" in out  # cross-conversation recall works in default mode
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_scope_conversation_only_still_owner_ai_fail_closed(mem_env):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    ms.semantic_scope = "conversation_only"
+    _seed_two_conversations(sb)
+    assert await ms.search_relevant_memories(
+        "conv_here", "我喜歡什麼？", limit=3, user_id="", ai_id=_AI) == ""
+    assert await ms.search_relevant_memories(
+        "conv_here", "我喜歡什麼？", limit=3, user_id="u1", ai_id="") == ""
+
+
+# --- Public entry recall_memories() scope regression (not just search_*) ---
+
+def _seed_public_entry(sb):
+    """Current conversation empty; a same-owner+AI OTHER conversation holds a
+    relevant memory; plus a different-owner memory that must never leak."""
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "conv_far", "user_id": "u1", "ai_id": _AI,
+        "user_message": "在很久以前的對話我說我的幸運數字是七七七。",
+        "assistant_message": "好，我記得你的幸運數字。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-06-01T00:00:00Z",
+    })
+    tbl.rows.append({  # different owner — must never leak through the public entry
+        "conversation_id": "conv_u2", "user_id": "u2", "ai_id": _AI,
+        "user_message": "u2機密：我的幸運數字是九九九。",
+        "assistant_message": "好。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-06-02T00:00:00Z",
+    })
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_public_recall_conversation_only_does_not_cross(mem_env):
+    """recall_memories() public entry: conversation_only + empty current
+    conversation must NOT fall back across conversations."""
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    ms.semantic_scope = "conversation_only"
+    _seed_public_entry(sb)
+    out = await ms.recall_memories(
+        "我的幸運數字是多少？", "conv_now", user_id="u1", ai_id=_AI,
+    )
+    assert "七七七" not in out          # no cross-conversation content
+    assert "u2機密" not in out          # no cross-owner leak
+    assert out == ""                    # nothing recalled at all
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_public_recall_cross_mode_recalls_other_conversation(mem_env):
+    """recall_memories() public entry: default cross-conversation mode with the
+    same data can recall the other conversation; owner + AI isolation holds."""
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    ms.semantic_scope = "user_ai_cross_conversation"
+    _seed_public_entry(sb)
+    out = await ms.recall_memories(
+        "我的幸運數字是多少？", "conv_now", user_id="u1", ai_id=_AI,
+    )
+    assert "七七七" in out              # cross-conversation recall works
+    assert "u2機密" not in out          # still no cross-owner leak

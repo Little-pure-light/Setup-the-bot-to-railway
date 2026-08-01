@@ -10,6 +10,7 @@ Task 006 contract_version: task006_v1
 - Emotion writes use new-schema canonical fields
 """
 import os
+import re
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict
 from modules.emotion_detector import EnhancedEmotionDetector
@@ -41,6 +42,62 @@ def _ai_match_legacy(row_ai: Any, requested_ai: Optional[str]) -> bool:
         legacy_default = (os.getenv("AI_ID", "xiaochenguang_v1") or "xiaochenguang_v1").strip()
         return bool(req) and req == legacy_default
     return ra == req
+
+
+DEFAULT_CANDIDATE_POOL = 12
+RANK_W_SIM = 0.6
+RANK_W_OVERLAP = 0.4
+# MMR relevance/diversity trade-off (0..1): higher favors relevance, lower favors
+# diversity. Used so many distinct-but-topically-clustered distractors cannot take
+# every slot even when each individually out-scores an older relevant memory.
+RANK_MMR_LAMBDA = 0.7
+# Fixed, bounded owner-scoped fallback scan. Independent of the candidate pool
+# (which is clamped to 3..50); kept constant so a normal RPC with poor top
+# candidates still admits older owner+AI-scoped memories into the candidate set.
+FALLBACK_SCAN_BOUND = 50
+
+
+def _candidate_pool() -> int:
+    """Bounded semantic candidate pool size (separate from final injected count)."""
+    try:
+        v = int(os.getenv("MEMORY_CANDIDATE_POOL", str(DEFAULT_CANDIDATE_POOL)))
+    except (TypeError, ValueError):
+        v = DEFAULT_CANDIDATE_POOL
+    return max(3, min(v, 50))
+
+
+def _norm_for_match(text) -> str:
+    """Normalize for Chinese-aware matching: lowercase, drop whitespace/punctuation.
+    Char n-grams (not whitespace tokenization) are used so CJK rephrasings match."""
+    s = str(text or "").lower()
+    return re.sub(r"[\s\W_]+", "", s, flags=re.UNICODE)
+
+
+def _char_ngrams(text, n: int = 2) -> set:
+    s = _norm_for_match(text)
+    if not s:
+        return set()
+    if len(s) < n:
+        return {s}
+    return {s[i:i + n] for i in range(len(s) - n + 1)}
+
+
+def _overlap_score(query, text) -> float:
+    """Fraction of query char-n-grams present in text (0..1). Chinese-friendly."""
+    q = _char_ngrams(query)
+    if not q:
+        return 0.0
+    t = _char_ngrams(text)
+    if not t:
+        return 0.0
+    return len(q & t) / float(len(q))
+
+
+def _ngram_jaccard(a: set, b: set) -> float:
+    if not a or not b:
+        return 0.0
+    union = len(a | b)
+    return (len(a & b) / float(union)) if union else 0.0
 
 
 class MemorySystem:
@@ -274,6 +331,93 @@ class MemorySystem:
             memories.append(f"相關記憶: {um} -> {am}")
         return "\n".join(memories)
 
+    def _owner_scoped_conversation_rows(self, uid, aid, conversation_id, bound):
+        """Bounded owner+AI-filtered conversation rows (recent). Legacy-null aware.
+        A safe fallback candidate set merged into recall and reused by traditional_search."""
+        legacy_default = (os.getenv("AI_ID", "xiaochenguang_v1") or "xiaochenguang_v1").strip()
+        cols = "user_message, assistant_message, user_id, ai_id, conversation_id"
+        # Respect MEMORY_SEMANTIC_SCOPE: in conversation_only mode the fallback (and
+        # the traditional_search that reuses it) must NOT cross conversations.
+        scope_to_conversation = (
+            self.semantic_scope == "conversation_only" and bool(conversation_id)
+        )
+
+        def _fetch(legacy_null: bool):
+            qq = (
+                self.supabase.table(self.memories_table)
+                .select(cols)
+                .eq("memory_type", "conversation")
+                .eq("user_id", uid)
+            )
+            qq = qq.is_("ai_id", "null") if legacy_null else qq.eq("ai_id", aid)
+            if scope_to_conversation:
+                qq = qq.eq("conversation_id", conversation_id)
+            try:
+                return qq.order("created_at", desc=True).limit(bound).execute().data or []
+            except Exception:
+                return []
+
+        rows = list(_fetch(False))
+        if aid == legacy_default:
+            rows.extend(_fetch(True))
+        # user strict + ai legacy-aware double-check (defense in depth)
+        return [r for r in rows if r.get("user_id") == uid and _ai_match_legacy(r.get("ai_id"), aid)]
+
+    def _rank_candidates(self, query, candidates, uid, aid, limit):
+        """Hybrid re-rank + MMR diversify. Relevance = RPC cosine similarity + Chinese
+        char-ngram overlap. Diversity is measured over the FULL memory content
+        (user_message + assistant_message), not user_message alone, so that:
+          - many distinct-but-topically-clustered distractors cannot occupy every slot
+            even when each individually out-scores an older relevant memory, and
+          - two memories that share a question but differ in answer are treated as
+            distinct candidates (the answer-bearing one is never dropped as a near-dup).
+        Exact-content duplicates are removed; owner+AI isolation is re-enforced.
+        Returns up to `limit` rows. Recency is NOT a primary/dominant factor."""
+        scored = []
+        seen_exact = set()
+        for cand in candidates:
+            r = cand.get("row") or {}
+            if r.get("user_id") != uid:                      # cross-owner guard
+                continue
+            if not _ai_match_legacy(r.get("ai_id"), aid):    # cross-AI guard (legacy-aware)
+                continue
+            um = r.get("user_message")
+            am = r.get("assistant_message")
+            if um is None and am is None:
+                continue
+            key = (_norm_for_match(um), _norm_for_match(am))
+            if key in seen_exact:                            # exact-content dedupe
+                continue
+            seen_exact.add(key)
+            content = f"{um or ''} {am or ''}"
+            overlap = _overlap_score(query, content)
+            sim = float(cand.get("sim") or 0.0)
+            score = RANK_W_SIM * sim + RANK_W_OVERLAP * overlap
+            # diversity signature over FULL content (never answer-blind)
+            scored.append({"row": r, "score": score, "cg": _char_ngrams(content)})
+        # Greedy MMR: each pick maximizes lambda*relevance - (1-lambda)*max_sim_to_chosen.
+        remaining = list(scored)
+        selected = []
+        while remaining and len(selected) < limit:
+            best = None
+            best_mmr = None
+            for cand in remaining:
+                penalty = max(
+                    (_ngram_jaccard(cand["cg"], sel["cg"]) for sel in selected),
+                    default=0.0,
+                )
+                mmr = RANK_MMR_LAMBDA * cand["score"] - (1.0 - RANK_MMR_LAMBDA) * penalty
+                if best_mmr is None or mmr > best_mmr:
+                    best_mmr = mmr
+                    best = cand
+            selected.append(best)
+            remaining.remove(best)
+        try:
+            print(f"\U0001f50e recall pool={len(candidates)} distinct={len(scored)} injected={len(selected)}")
+        except Exception:
+            pass
+        return [sel["row"] for sel in selected]
+
     async def search_relevant_memories(
         self,
         conversation_id: str,
@@ -283,57 +427,85 @@ class MemorySystem:
         ai_id: Optional[str] = None,
     ):
         """
-        向量相似度搜尋。
-        Scope: same user_id + ai_id (cross-conversation by default).
-        Prefer current conversation first, then expand across conversations.
-        Fail-closed when user_id/ai_id missing.
+        混合召回（Task 006 C6-F）：
+        - 取較大的**有界候選池**（match_count = candidate pool，預設 12，上限 50），
+          與最後注入 prompt 的筆數（limit，預設 3）分離。
+        - 合併 current-conversation 與 same-user+same-AI 跨對話語意候選，**不短路**；
+          並額外併入有界的 owner-scoped 候選（RPC 正常但候選品質不足時的安全 fallback，
+          不因「有資料」而阻斷）。
+        - 去重＋近似多樣化＋（cosine similarity + 中文字元 n-gram overlap）混合排序，
+          最後只注入最多 `limit` 筆。
+        - fail-closed：缺 user_id/ai_id 一律零結果；owner+AI 隔離與 0.55 安全底線不變。
         """
         uid = _owner_id(user_id)
-        aid = _owner_id(ai_id) or _owner_id(os.getenv("AI_ID", "xiaochenguang_v1"))
+        # strict fail-closed: the caller (recall_memories) already resolves the
+        # default AI; an empty/None owner or ai_id here yields zero results.
+        aid = _owner_id(ai_id)
         if not uid or not aid:
-            print("⚠️ 搜尋記憶略過：缺少 user_id 或 ai_id（fail-closed）")
+            print("\u26a0\ufe0f 搜尋記憶略過：缺少 user_id 或 ai_id（fail-closed）")
             return ""
 
         try:
             embedding_response = self.openai_client.embeddings.create(
                 model="text-embedding-3-small",
-                input=query
+                input=query,
             )
             query_embedding = embedding_response.data[0].embedding
 
-            # 1) conversation-scoped (if provided)
+            pool = _candidate_pool()
             scopes: list[Optional[str]] = []
             if conversation_id:
                 scopes.append(conversation_id)
             if self.semantic_scope != "conversation_only":
-                scopes.append(None)  # cross-conversation long-term
-            # dedupe while preserving order
-            seen = set()
+                scopes.append(None)  # same user+ai cross-conversation
+            seen_s = set()
             ordered_scopes = []
-            for s in scopes:
-                key = s if s is not None else ""
-                if key in seen:
+            for sc in scopes:
+                kk = sc if sc is not None else ""
+                if kk in seen_s:
                     continue
-                seen.add(key)
-                ordered_scopes.append(s)
+                seen_s.add(kk)
+                ordered_scopes.append(sc)
 
+            candidates = []
+            # (1) semantic candidates from RPC — larger bounded pool, MERGE all scopes.
             for scope_conv in ordered_scopes:
                 params = self._build_match_rpc_params(
                     query_embedding,
-                    limit,
+                    pool,
                     conversation_id=scope_conv,
                     user_id=uid,
                     ai_id=aid,
                 )
                 if not params:
-                    return ""
-                result = self.supabase.rpc("match_memories_v2", params).execute()
-                if result.data:
-                    return self._format_memory_rows(result.data)
-            return ""
+                    return ""  # fail-closed
+                try:
+                    result = self.supabase.rpc(self.memory_rpc_name, params).execute()
+                except Exception as rpc_err:
+                    print(f"\u26a0\ufe0f 語意 RPC 失敗，改用 owner-scoped 傳統召回：{type(rpc_err).__name__}")
+                    return await self.traditional_search(
+                        conversation_id, query, limit, user_id=uid, ai_id=aid
+                    )
+                for r in (result.data or []):
+                    candidates.append({"row": r, "sim": float(r.get("similarity") or 0.0)})
+
+            # (2) owner-scoped fallback candidates (bounded) — always merged so a normal RPC
+            #     with poor top candidates is not blocked from safe owner+AI-filtered recall.
+            #     Uses a larger bounded scan so an older target still enters the candidate
+            #     set even when higher-cosine near-duplicate distractors fill the RPC pool.
+            for r in self._owner_scoped_conversation_rows(
+                uid, aid, conversation_id, FALLBACK_SCAN_BOUND
+            ):
+                candidates.append({"row": r, "sim": 0.0})
+
+            if not candidates:
+                return ""
+
+            ranked = self._rank_candidates(query, candidates, uid, aid, limit)
+            return self._format_memory_rows(ranked)
 
         except Exception as e:
-            print(f"❌ 搜尋記憶失敗：{e}")
+            print(f"\u274c 搜尋記憶失敗：{e}")
             return await self.traditional_search(
                 conversation_id, query, limit, user_id=uid, ai_id=aid
             )
@@ -346,62 +518,34 @@ class MemorySystem:
         user_id: Optional[str] = None,
         ai_id: Optional[str] = None,
     ):
-        """傳統文字搜尋：fail-closed owner；可跨 conversation（同 user+ai）"""
+        """傳統文字降級（RPC 例外時）：owner+AI fail-closed；中文以字元 n-gram overlap
+        比對（不依賴空白分詞）；有界 owner-scoped 查詢；去重後取最相關 limit 筆。"""
         uid = _owner_id(user_id)
         aid = _owner_id(ai_id)
         if not uid or not aid:
             return ""
         try:
-            # DB-level ai filtering to avoid cross-AI query-limit starvation
-            # (PR18 review round 3): explicit ai in SQL; legacy NULL fetched via a
-            # SECOND bounded query only for the legacy default AI. user_id strict.
-            select_cols = "user_message, assistant_message, user_id, ai_id, conversation_id"
-            legacy_default = (os.getenv("AI_ID", "xiaochenguang_v1") or "xiaochenguang_v1").strip()
-
-            def _fetch(legacy_null: bool):
-                qq = (
-                    self.supabase.table(self.memories_table)
-                    .select(select_cols)
-                    .eq("memory_type", "conversation")
-                    .eq("user_id", uid)
-                )
-                if legacy_null:
-                    qq = qq.is_("ai_id", "null")
-                else:
-                    qq = qq.eq("ai_id", aid)
-                if self.semantic_scope == "conversation_only" and conversation_id:
-                    qq = qq.eq("conversation_id", conversation_id)
-                return qq.limit(limit * 4).execute().data or []
-
-            rows = list(_fetch(False))
-            if aid == legacy_default:
-                rows.extend(_fetch(True))
-
-            if rows:
-                relevant = []
-                query_words = query.lower().split()
-                # Prefer same-conversation hits first
-                if conversation_id:
-                    rows.sort(
-                        key=lambda r: 0 if r.get("conversation_id") == conversation_id else 1
-                    )
-                for memory in rows:
-                    # user strict; ai legacy-aware double-check
-                    if memory.get("user_id") != uid:
-                        continue
-                    if not _ai_match_legacy(memory.get("ai_id"), aid):
-                        continue
-                    user_msg = (memory.get("user_message") or "").lower()
-                    if any(word in user_msg for word in query_words):
-                        relevant.append(
-                            f"相關記憶: {memory['user_message']} -> {memory['assistant_message']}"
-                        )
-                        if len(relevant) >= limit:
-                            break
-                return "\n".join(relevant)
-            return ""
+            rows = self._owner_scoped_conversation_rows(uid, aid, conversation_id, max(limit * 4, 20))
+            if not rows:
+                return ""
+            scored = []
+            seen = set()
+            for r in rows:
+                if r.get("user_id") != uid or not _ai_match_legacy(r.get("ai_id"), aid):
+                    continue
+                um = r.get("user_message")
+                am = r.get("assistant_message")
+                key = (_norm_for_match(um), _norm_for_match(am))
+                if key in seen:
+                    continue
+                seen.add(key)
+                ov = _overlap_score(query, f"{um or ''} {am or ''}")
+                if ov > 0:
+                    scored.append((ov, r))
+            scored.sort(key=lambda x: x[0], reverse=True)
+            return self._format_memory_rows([r for _, r in scored[:limit]])
         except Exception as e:
-            print(f"❌ 傳統搜尋失敗：{e}")
+            print(f"\u274c 傳統搜尋失敗：{e}")
             return ""
 
     async def recall_memories(
@@ -442,7 +586,10 @@ class MemorySystem:
                         for m in recent_result.data
                     ])
 
-            if not raw_memories:
+            # Final cross-conversation recent fallback: only in cross-conversation
+            # mode. In conversation_only mode this public entry must NOT pull memories
+            # from other conversations (owner + AI isolation still applies either way).
+            if not raw_memories and self.semantic_scope != "conversation_only":
                 q = (
                     self.supabase.table(self.memories_table)
                     .select("user_message, assistant_message")
