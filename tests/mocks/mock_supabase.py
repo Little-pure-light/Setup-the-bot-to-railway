@@ -193,14 +193,23 @@ class MockSupabase:
                     if f_conv:
                         rows = [r for r in rows if r.get("conversation_id") == f_conv]
 
-                    # fixed simulated similarity; excluded when below min_similarity
-                    sim = 0.9
-                    if sim < float(min_sim):
-                        rows = []
-
+                    # Per-row cosine similarity: a test-only "_sim" models ranking;
+                    # real rows default to 0.9. Order by similarity DESC, apply the
+                    # min_similarity floor, then return the top match_count — matching the
+                    # real match_memories_v2 (ORDER BY cosine distance, LIMIT match_count).
+                    scored = []
+                    for r in rows:
+                        try:
+                            sim = float(r.get("_sim", 0.9))
+                        except (TypeError, ValueError):
+                            sim = 0.9
+                        if sim < float(min_sim):
+                            continue
+                        scored.append((sim, r))
+                    scored.sort(key=lambda x: x[0], reverse=True)
                     limit = int(params.get("match_count") or 3)
                     out = []
-                    for r in rows[:limit]:
+                    for sim, r in scored[:limit]:
                         out.append({
                             "user_message": r.get("user_message"),
                             "assistant_message": r.get("assistant_message"),
