@@ -8,9 +8,11 @@ _supabase_fingerprint: Optional[str] = None
 _supabase_key_mode: str = "unknown"
 logger = logging.getLogger("supabase_handler")
 
-# Task 006 (PR18 review, P0-3):
-# The data-plane RPCs (match_memories_v2 / match_memories) are GRANTED to
-# service_role ONLY in the forward migration. Backend must therefore prefer
+# Task 006 (PR18 review, P0-3; C7 comment cleanup):
+# The forward migration is EXPAND-ONLY: it creates and GRANTs ONLY the new
+# match_memories_v2 to service_role. It does NOT create, grant or alter the
+# legacy match_memories (which is not part of the current contract). Backend
+# must therefore prefer
 # SUPABASE_SERVICE_ROLE_KEY for its data plane. If only an anon/legacy key is
 # available, those RPCs will fail-closed (permission denied) — which is the
 # honest, safe outcome. Row isolation is additionally enforced in application

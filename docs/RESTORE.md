@@ -9,7 +9,7 @@
 2. [ ] 連接 GitHub Repository，選定穩定 Tag / Commit
 3. [ ] 建立 / 還原 Supabase 專案
 4. [ ] 啟用 `vector` extension
-5. [ ] 匯入 Schema + RPC `match_memories`
+5. [ ] 匯入 Schema + RPC `match_memories_v2`（現行契約；不需還原 legacy `match_memories`）
 6. [ ] 還原表資料（memories / emotional_states / preferences）
 7. [ ] 還原 Storage（若有）
 8. [ ] 設定環境變數（見 `docs/ENVIRONMENT_VARIABLES.md`）
@@ -56,13 +56,13 @@ CREATE TABLE IF NOT EXISTS xiaochenguang_memories (
 CREATE TABLE IF NOT EXISTS emotional_states (
   id BIGSERIAL PRIMARY KEY,
   user_id TEXT,
-  emotion_type TEXT,
+  dominant_emotion TEXT,
   intensity FLOAT,
   context TEXT,
-  timestamp TIMESTAMPTZ DEFAULT NOW()
+  created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- match_memories RPC：見 README
+-- match_memories_v2 RPC（現行契約，service_role-only）：見 README / docs/data_contracts/TASK006_CANONICAL_DATA_CONTRACT.md
 ```
 
 ### C. 資料還原
