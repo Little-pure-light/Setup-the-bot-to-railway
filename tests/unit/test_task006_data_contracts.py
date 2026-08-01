@@ -1255,3 +1255,152 @@ async def test_public_recall_cross_mode_recalls_other_conversation(mem_env):
     )
     assert "七七七" in out              # cross-conversation recall works
     assert "u2機密" not in out          # still no cross-owner leak
+
+
+# ---------------------------------------------------------------------------
+# Task 006 C6-F — opt-in de-identified recall diagnostics (default OFF).
+# Observation-only: must never change candidate set, ranking, MMR, dedupe,
+# tie-break, injected rows or their order; never log raw content/identifiers.
+# ---------------------------------------------------------------------------
+
+import io as _io
+import contextlib as _contextlib
+from modules.memory_system import (
+    _recall_diagnostics_enabled as _diag_enabled,
+    _candidate_fingerprint as _diag_fp,
+)
+
+_DIAG_ENV = "MEMORY_RECALL_DIAGNOSTICS"
+
+
+def _seed_diag_rows(sb):
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({
+        "conversation_id": "c_seed", "user_id": "u1", "ai_id": _AI,
+        "user_message": "請記住我的驗收暗號是銀河玻璃杯。",
+        "assistant_message": "好的，我記住了你的驗收暗號。",
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-01T00:00:00Z", "_sim": 0.70,
+    })
+    for i in range(5):
+        tbl.rows.append({
+            "conversation_id": f"cd{i}", "user_id": "u1", "ai_id": _AI,
+            "user_message": f"今天想聊點別的第{i}件事", "assistant_message": f"好啊聊聊{i}",
+            "memory_type": "conversation", "embedding": EMB,
+            "created_at": f"2026-07-1{i}T00:00:00Z", "_sim": 0.9 - i * 0.02,
+        })
+
+
+async def _run_recall(ms):
+    return await ms.search_relevant_memories(
+        "c_new", "我的驗收暗號是什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+
+
+@pytest.mark.unit
+def test_recall_diag_truthy_parse(monkeypatch):
+    for v in ("1", "true", "TRUE", "yes", "On"):
+        monkeypatch.setenv(_DIAG_ENV, v)
+        assert _diag_enabled() is True
+    for v in ("0", "false", "", "no", "xyz", "2"):
+        monkeypatch.setenv(_DIAG_ENV, v)
+        assert _diag_enabled() is False
+    monkeypatch.delenv(_DIAG_ENV, raising=False)
+    assert _diag_enabled() is False  # missing -> False
+
+
+@pytest.mark.unit
+def test_recall_diag_fingerprint_is_12_hex_and_nonreversible():
+    fp = _diag_fp("使用者訊息", "助理回覆")
+    assert re.fullmatch(r"[0-9a-f]{12}", fp)
+    # does not contain the raw text; different content -> different fp
+    assert "使用者訊息" not in fp
+    assert _diag_fp("a", "b") != _diag_fp("a", "c")
+    # None-safe
+    assert re.fullmatch(r"[0-9a-f]{12}", _diag_fp(None, None))
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_diag_off_emits_no_detail(mem_env, capsys, monkeypatch):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    monkeypatch.delenv(_DIAG_ENV, raising=False)  # default off
+    _seed_diag_rows(sb)
+    await _run_recall(ms)
+    out = capsys.readouterr().out
+    assert "recall_diag" not in out          # no de-identified detail line
+    assert "recall pool=" in out             # existing counts line preserved
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_diag_on_emits_selected_only(mem_env, capsys, monkeypatch):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    monkeypatch.setenv(_DIAG_ENV, "true")
+    _seed_diag_rows(sb)
+    await _run_recall(ms)
+    out = capsys.readouterr().out
+    assert "recall_diag" in out
+    line = [ln for ln in out.splitlines() if "recall_diag" in ln][0]
+    slots = re.findall(
+        r"slot=(\d+) fp=([0-9a-f]+) src=(\S+) cos=([-\d.]+) overlap=([-\d.]+) rel=([-\d.]+) mmr=([-\d.]+)",
+        line,
+    )
+    assert 1 <= len(slots) <= 3               # only final selected, capped
+    for slot, fp, src, cos, ov, rel, mmr in slots:
+        assert len(fp) == 12 and re.fullmatch(r"[0-9a-f]{12}", fp)
+        assert src in ("semantic", "owner_fallback", "unknown")
+        for val in (cos, ov, rel, mmr):       # rounded to <= 3 decimals
+            if "." in val:
+                assert len(val.split(".")[-1]) <= 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_diag_never_logs_raw_content_or_identifiers(mem_env, capsys, monkeypatch):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    monkeypatch.setenv(_DIAG_ENV, "true")
+    _seed_diag_rows(sb)
+    await _run_recall(ms)
+    out = capsys.readouterr().out
+    for secret in (
+        "銀河玻璃杯", "請記住", "好的，我記住了", "今天想聊",   # raw messages
+        "u1", "xiaochenguang_v1", "c_seed", "c_new",           # owner/ai/conversation ids
+        "Authorization", "Bearer", "sk-",                       # secret samples
+    ):
+        assert secret not in out
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_diag_does_not_change_selection(mem_env, monkeypatch):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    _seed_diag_rows(sb)
+    monkeypatch.delenv(_DIAG_ENV, raising=False)
+    out_off = await _run_recall(ms)
+    monkeypatch.setenv(_DIAG_ENV, "true")
+    out_on = await _run_recall(ms)
+    assert out_off == out_on                  # identical rows, order and count
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_recall_diag_failsafe_does_not_break_recall(mem_env, monkeypatch):
+    ms, sb, *_ = mem_env
+    ms.memory_rpc_name = "match_memories_v2"
+    monkeypatch.setenv(_DIAG_ENV, "true")
+    tbl = sb.table("xiaochenguang_memories")
+    tbl.rows.append({  # None assistant_message must not break diagnostics
+        "conversation_id": "cx", "user_id": "u1", "ai_id": _AI,
+        "user_message": "我養的貓叫咪咪。", "assistant_message": None,
+        "memory_type": "conversation", "embedding": EMB,
+        "created_at": "2026-07-01T00:00:00Z", "_sim": 0.8,
+    })
+    out = await ms.search_relevant_memories(
+        "cx", "我的貓叫什麼？", limit=3, user_id="u1", ai_id=_AI,
+    )
+    assert "咪咪" in out                       # recall still succeeds
