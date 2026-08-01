@@ -11,6 +11,7 @@ Task 006 contract_version: task006_v1
 """
 import os
 import re
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional, Any, Dict
 from modules.emotion_detector import EnhancedEmotionDetector
@@ -55,6 +56,40 @@ RANK_MMR_LAMBDA = 0.7
 # (which is clamped to 3..50); kept constant so a normal RPC with poor top
 # candidates still admits older owner+AI-scoped memories into the candidate set.
 FALLBACK_SCAN_BOUND = 50
+
+# --- Opt-in de-identified recall diagnostics (default OFF) --------------------
+# When MEMORY_RECALL_DIAGNOSTICS is truthy, recall emits ONE extra de-identified
+# line listing the FINAL selected candidates (<= inject limit): a non-reversible
+# 12-hex fingerprint + candidate source + rounded scores. It NEVER changes the
+# candidate set, ranking, MMR, dedupe, tie-break, injected rows or their order,
+# and NEVER logs raw messages, owner/ai/conversation ids, embeddings or secrets.
+_DIAG_TRUTHY = {"1", "true", "yes", "on"}
+_DIAG_UNIT_SEP = "\x1f"  # unit separator between user/assistant for the fingerprint
+
+
+def _recall_diagnostics_enabled() -> bool:
+    """Strict truthy parse; any error or missing value -> False (never raises)."""
+    try:
+        return str(os.getenv("MEMORY_RECALL_DIAGNOSTICS", "false")).strip().lower() in _DIAG_TRUTHY
+    except Exception:
+        return False
+
+
+def _candidate_fingerprint(user_message, assistant_message) -> str:
+    """Non-reversible short id for one-shot cross-referencing only.
+    SHA-256(user + US + assistant)[:12] lowercase hex; not an identity/owner key."""
+    try:
+        raw = f"{user_message or ''}{_DIAG_UNIT_SEP}{assistant_message or ''}".encode("utf-8")
+        return hashlib.sha256(raw).hexdigest()[:12]
+    except Exception:
+        return "000000000000"
+
+
+def _diag_round(value) -> float:
+    try:
+        return round(float(value), 3)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _candidate_pool() -> int:
@@ -394,7 +429,11 @@ class MemorySystem:
             sim = float(cand.get("sim") or 0.0)
             score = RANK_W_SIM * sim + RANK_W_OVERLAP * overlap
             # diversity signature over FULL content (never answer-blind)
-            scored.append({"row": r, "score": score, "cg": _char_ngrams(content)})
+            scored.append({
+                "row": r, "score": score, "cg": _char_ngrams(content),
+                "sim": sim, "overlap": overlap,
+                "source": cand.get("source") or "unknown",
+            })
         # Greedy MMR: each pick maximizes lambda*relevance - (1-lambda)*max_sim_to_chosen.
         remaining = list(scored)
         selected = []
@@ -410,12 +449,29 @@ class MemorySystem:
                 if best_mmr is None or mmr > best_mmr:
                     best_mmr = mmr
                     best = cand
+            best["mmr"] = best_mmr  # observability only; selection already decided
             selected.append(best)
             remaining.remove(best)
         try:
             print(f"\U0001f50e recall pool={len(candidates)} distinct={len(scored)} injected={len(selected)}")
         except Exception:
             pass
+        # Opt-in de-identified diagnostics (default OFF). Never alters selection,
+        # order or returned rows; failure here must not break recall/chat.
+        if _recall_diagnostics_enabled():
+            try:
+                parts = []
+                for i, sel in enumerate(selected, 1):
+                    row = sel.get("row") or {}
+                    fp = _candidate_fingerprint(row.get("user_message"), row.get("assistant_message"))
+                    parts.append(
+                        f"slot={i} fp={fp} src={sel.get('source', 'unknown')} "
+                        f"cos={_diag_round(sel.get('sim'))} overlap={_diag_round(sel.get('overlap'))} "
+                        f"rel={_diag_round(sel.get('score'))} mmr={_diag_round(sel.get('mmr'))}"
+                    )
+                print(f"\U0001f52c recall_diag injected={len(selected)} " + " | ".join(parts))
+            except Exception:
+                pass
         return [sel["row"] for sel in selected]
 
     async def search_relevant_memories(
@@ -487,7 +543,7 @@ class MemorySystem:
                         conversation_id, query, limit, user_id=uid, ai_id=aid
                     )
                 for r in (result.data or []):
-                    candidates.append({"row": r, "sim": float(r.get("similarity") or 0.0)})
+                    candidates.append({"row": r, "sim": float(r.get("similarity") or 0.0), "source": "semantic"})
 
             # (2) owner-scoped fallback candidates (bounded) — always merged so a normal RPC
             #     with poor top candidates is not blocked from safe owner+AI-filtered recall.
@@ -496,7 +552,7 @@ class MemorySystem:
             for r in self._owner_scoped_conversation_rows(
                 uid, aid, conversation_id, FALLBACK_SCAN_BOUND
             ):
-                candidates.append({"row": r, "sim": 0.0})
+                candidates.append({"row": r, "sim": 0.0, "source": "owner_fallback"})
 
             if not candidates:
                 return ""

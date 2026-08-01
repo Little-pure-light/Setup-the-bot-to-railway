@@ -43,6 +43,7 @@
 | `RAILWAY_GIT_COMMIT_SHA` / `GIT_COMMIT` / `GITHUB_SHA` | 可選，健康檢查回傳 `git_commit`（截短） | 空 |
 | `READY_CHECK_SUPABASE_DNS` | `/ready` 是否做 Supabase DNS（非 DB 探測；預設 false） | `false` |
 | `LOG_VERBOSE_EXCEPTIONS` | 外部錯誤日誌是否附脫敏短訊息 | `false` |
+| `MEMORY_RECALL_DIAGNOSTICS` | 記憶召回去敏診斷：開啟時每次召回多輸出一行「最後注入的 ≤3 筆候選」之去敏明細（12-hex fingerprint + 來源 + 四捨五入分數），用於分辨「答案記憶未被選入」與「已注入仍查無」。**後端限定、預設關閉**；不改變召回/排序/回應/效能 | `false` |
 | `AI_KERNEL_ENABLED` | 啟用 AI Kernel 取代 Legacy 主路徑 | `false` |
 | `AI_KERNEL_SHADOW_MODE` | Shadow：背景跑 Kernel，無副作用、不改回應 | `false` |
 | `KERNEL_DEBUG_ENABLED` | Debug Trace API | `false` |
@@ -76,6 +77,24 @@
 | `SILENCE_ENGINE_MIN_CONFIDENCE` | 路由最低信心（0–1） | `0.75` |
 | `SILENCE_ENGINE_MAX_HYPOTHESES` | C1n 最多假設數（原型 ≤2） | `2` |
 | `SILENCE_ENGINE_LOGGING_ENABLED` | 是否打 silence_engine 結構化 log | `true` |
+
+## MEMORY_RECALL_DIAGNOSTICS（去敏召回診斷）
+
+- **用途**：診斷跨對話召回為何漏掉某筆記憶。開啟時，`_rank_candidates()` 在既有
+  `recall pool/distinct/injected` 計數行之外，額外輸出一行 `recall_diag`，只列出
+  **最後真正注入 prompt 的 ≤3 筆**候選：`slot`、不可逆 `fp`（`SHA-256(user + 分隔 + assistant)` 前 12 個小寫 hex）、
+  `src`（`semantic` / `owner_fallback`）、四捨五入的 `cos`／`overlap`／`rel`／`mmr`。
+- **預設值**：`false`。只接受明確 truthy（`1`/`true`/`yes`/`on`，大小寫忽略）；其餘一律關閉。
+  缺值、錯值或診斷輸出本身發生例外時 **fail-safe**，不影響召回與聊天。
+- **後端限定**：不得放入 `VITE_*` 或前端。
+- **隱私邊界**：只輸出 fingerprint 與分數；**不輸出**原始訊息、`user_id`、`ai_id`、
+  `conversation_id`、row id、embedding、JWT、Authorization 或任何 secret。fingerprint 僅供
+  一次性對照，不作身分驗證、資料 owner 或長期追蹤。
+- **不改變行為**：候選集、排序、MMR、去重、tie-break、注入筆數與回傳 rows／順序，
+  在開關 `true`／`false` 下完全一致；僅多印一行日誌。
+- **正式環境使用**：只可短時開啟、擷取需要的 `recall_diag` 後**立即關閉**，並核對部署健康
+  （`/ready`、`/health`）。不建議長期開啟。
+- **回滾**：revert 本 PR 的單一 commit 即可完全移除本能力。
 
 ## 前端（Vite）
 
