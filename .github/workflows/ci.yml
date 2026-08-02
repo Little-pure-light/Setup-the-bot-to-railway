@@ -81,6 +81,15 @@ jobs:
           CI: "true"
           VITE_API_URL: http://127.0.0.1:5173
 
+  task009-powershell-safety:
+    name: Task009 PowerShell safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Task009 PowerShell safety tests
+        shell: pwsh
+        run: ./tests/powershell/task009_safety_tests.ps1
+
   security:
     name: Secret scan
     runs-on: ubuntu-latest
