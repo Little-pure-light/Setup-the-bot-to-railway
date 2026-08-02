@@ -1290,19 +1290,15 @@ export default {
         console.warn('[voice] 同步設定到後端失敗:', e?.message || e)
       }
     },
-    async reportVoiceEvent(eventType, detail = {}) {
+    async reportVoiceEvent(eventType, _detail = {}) {
+      // Task008-002（Round2）：DB telemetry 已停用；只送 event_type（保留 Authorization）。
+      // 不送 transcript/detail/user_id/conversation_id。網路失敗不影響語音主流程。
       try {
         const headers = await this.buildRequestHeaders()
         await fetch(VOICE_EVENTS_API, {
           method: 'POST',
           headers,
-          body: JSON.stringify({
-            user_id: this.userId,
-            conversation_id: this.conversationId,
-            event_type: eventType,
-            detail,
-            transcript: detail.transcript || null,
-          }),
+          body: JSON.stringify({ event_type: eventType }),
         })
       } catch (_) {
         /* 非關鍵 */

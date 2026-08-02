@@ -2,7 +2,9 @@
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Request, Response, HTTPException
+from fastapi.exceptions import RequestValidationError
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
@@ -83,6 +85,106 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+# ── Task008-003：統一錯誤回應 envelope（最小、附加、去敏）───────────────────────
+try:
+    from backend.logging_utils import ErrorCode as _EC, log_external_failure as _log_ext
+except Exception:  # pragma: no cover
+    class _EC:
+        AUTH_ERROR = "AUTH_ERROR"
+        UNKNOWN = "UNKNOWN"
+
+    def _log_ext(_logger, _exc, code="UNKNOWN", event="error"):
+        return code
+
+_STATUS_ERROR_CODE = {
+    400: "BAD_REQUEST", 401: "AUTH_ERROR", 403: "FORBIDDEN", 404: "NOT_FOUND",
+    405: "METHOD_NOT_ALLOWED", 409: "CONFLICT", 422: "VALIDATION_ERROR",
+    429: "RATE_LIMITED", 500: "INTERNAL_ERROR", 502: "UPSTREAM_ERROR",
+    503: "SERVICE_UNAVAILABLE",
+}
+_STATUS_SAFE_MESSAGE = {
+    400: "請求格式或參數有誤",
+    401: "需要有效的登入或授權",
+    403: "沒有權限執行此操作",
+    404: "找不到資源或無權存取",
+    405: "不支援的請求方法",
+    409: "資源狀態衝突",
+    422: "請求參數驗證失敗",
+    429: "請求過於頻繁，請稍後再試",
+    500: "伺服器發生未預期錯誤",
+    502: "上游服務暫時無法使用",
+    503: "服務暫時無法使用",
+}
+
+
+def _error_code_for(status_code: int) -> str:
+    return _STATUS_ERROR_CODE.get(status_code, f"HTTP_{status_code}")
+
+
+def _safe_message_for(status_code: int) -> str:
+    return _STATUS_SAFE_MESSAGE.get(status_code, "請求無法完成")
+
+
+def _error_envelope(status_code, *, error_code=None, message=None, detail=None, trace_id=None):
+    """統一錯誤 envelope：success/error_code/message/trace_id；保留 detail 與 request_id 向後相容。"""
+    rid = trace_id or get_request_id() or new_request_id()
+    body = {
+        "success": False,
+        "error_code": error_code or _error_code_for(status_code),
+        "message": message or _safe_message_for(status_code),
+        "trace_id": rid,
+        "request_id": rid,
+    }
+    if detail is not None:
+        body["detail"] = detail
+    return body, rid
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    # 去敏：一律使用中央安全訊息，絕不回傳原 exc.detail（可能含內部路徑/秘密/使用者輸入）。
+    safe_msg = _safe_message_for(exc.status_code)
+    # 5xx 省略 detail；4xx 保留 detail 但僅放中央安全訊息（向後相容，不含原始例外）。
+    detail = None if exc.status_code >= 500 else safe_msg
+    body, rid = _error_envelope(exc.status_code, message=safe_msg, detail=detail)
+    headers = dict(getattr(exc, "headers", None) or {})
+    headers["X-Request-ID"] = rid
+    return JSONResponse(status_code=exc.status_code, content=body, headers=headers)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    # 去敏：只保留 loc/type/msg，不回傳使用者輸入值(input)
+    safe_errors = None
+    try:
+        safe_errors = [
+            {"loc": e.get("loc"), "type": e.get("type"), "msg": e.get("msg")}
+            for e in exc.errors()
+        ]
+    except Exception:
+        safe_errors = None
+    body, rid = _error_envelope(422, detail=safe_errors)
+    return JSONResponse(status_code=422, content=body, headers={"X-Request-ID": rid})
+
+
+@app.exception_handler(Exception)
+async def _unhandled_exception_handler(request: Request, exc: Exception):
+    rid = get_request_id() or new_request_id()
+    # 去敏：永遠只記 error_code / 例外型別 / request_id / event；
+    # 絕不把 exception object 或 str(exc) 交給可能 verbose 的 logger（避免私人文字/內部路徑洩漏）。
+    try:
+        logger.error(
+            "unhandled_exception error_code=%s type=%s request_id=%s event=%s",
+            getattr(_EC, "UNKNOWN", "UNKNOWN"),
+            type(exc).__name__,
+            rid,
+            "unhandled_exception",
+        )
+    except Exception:
+        pass
+    body, _rid = _error_envelope(500, trace_id=rid)
+    return JSONResponse(status_code=500, content=body, headers={"X-Request-ID": rid})
+
 # ✅ 選擇性 API Secret 保護中介軟體
 # 若 Railway 設定了 API_SECRET 環境變數，/api/* 與 /v1/* 需帶 Authorization: Bearer <token>
 # 同時接受有效的 Supabase Auth JWT（使用者登入後跨裝置同步）
@@ -139,8 +241,12 @@ async def api_auth_middleware(request: Request, call_next):
             return JSONResponse(
                 status_code=401,
                 content={
-                    "detail": "Unauthorized",
+                    "success": False,
+                    "error_code": "AUTH_ERROR",
+                    "message": "需要有效的登入或授權",
+                    "trace_id": rid,
                     "request_id": rid,
+                    "detail": "Unauthorized",
                 },
                 headers={"X-Request-ID": rid},
             )

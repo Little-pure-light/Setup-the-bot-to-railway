@@ -27,7 +27,7 @@ git clone https://github.com/Little-pure-light/Setup-the-bot-to-railway.git
 | `xiaochenguang_memories` | 對話記憶 + embedding + personality 文件 | `modules/memory_system.py` |
 | `emotional_states` | 情緒狀態 | `memory_system.save_emotional_state` |
 | `user_preferences` | 人格 / voice_settings | `personality_engine`, `voice_router` |
-| `voice_events`（可選） | 語音事件 | `voice_router` |
+| `voice_events`（Task008-002：目前停用，未寫入） | 語音事件 | `voice_router` |
 | `users`（若存在） | 舊 healthcheck 探測 | `healthcheck_router` |
 
 環境變數：`SUPABASE_MEMORIES_TABLE`（預設 `xiaochenguang_memories`）
