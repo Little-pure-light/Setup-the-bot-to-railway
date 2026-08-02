@@ -406,6 +406,7 @@ import {
   syncUserProfile,
   isAuthConfigured,
 } from '../lib/auth.js'
+import { sanitizeError } from '../lib/errorSanitize.js'
 import {
   isSpeechRecognitionSupported,
   isSpeechSynthesisSupported,
@@ -1668,55 +1669,73 @@ export default {
         return
       }
 
-      try {
-        // 嘗試封存到 IPFS（失敗不影響開新對話）
-        this.messages.push({
-          type: 'system',
-          content: '⏳ 正在封存對話...',
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
-        this.scrollToBottom()
+      this.messages.push({
+        type: 'system',
+        content: '⏳ 正在私人保留此對話...',
+        timestamp: new Date().toLocaleTimeString('zh-TW')
+      })
+      this.scrollToBottom()
 
-        try {
-          const response = await axios.post(`${API_URL}/api/archive_conversation`, {
+      // 私有 owner-scoped 封存：必須帶登入 JWT；失敗不得靜默清除舊對話
+      let archived = false
+      try {
+        const headers = await this.buildRequestHeaders()
+        const response = await axios.post(
+          `${API_URL}/api/archive_conversation`,
+          {
             conversation_id: this.conversationId,
             user_id: this.userId,
             include_attachments: true
-          })
-          const cid = response.data.ipfs_cid
-          if (cid) {
-            this.messages.push({
-              type: 'system',
-              content: `✅ 對話已封存\n🔗 CID: ${cid}`,
-              timestamp: new Date().toLocaleTimeString('zh-TW')
-            })
-          }
-        } catch (archiveErr) {
-          console.warn('⚠️ 封存失敗，但仍開始新對話:', archiveErr.message)
+          },
+          { headers }
+        )
+        archived = response?.data?.success === true
+        const msg = response?.data?.message || '此對話已安全保留在你的私人記憶中。'
+        this.messages.push({
+          type: 'system',
+          content: `✅ ${msg}`,
+          timestamp: new Date().toLocaleTimeString('zh-TW')
+        })
+      } catch (archiveErr) {
+        const status = archiveErr?.response?.status
+        let content
+        if (status === 401) {
+          content = '⚠️ 需要登入才能私人保留對話。請先登入後再試；目前的對話仍保留在畫面上。'
+        } else if (status === 403) {
+          content = '⚠️ 這個對話不屬於目前登入的帳號，無法保留；目前的對話仍保留在畫面上。'
+        } else if (status === 404) {
+          content = '⚠️ 找不到可保留的對話；目前的對話仍保留在畫面上。'
+        } else {
+          const safe = sanitizeError(archiveErr, { info: 'archive' })
+          content = `⚠️ 保留對話時發生問題，暫時無法完成（${safe.errorType}）；目前的對話仍保留在畫面上。`
         }
-
-        // 清除 localStorage，開始新對話
-        localStorage.removeItem('xiaochenguang_messages')
-        localStorage.removeItem('xiaochenguang_conversation_id')
-
-        // 重置對話狀態
-        this.messages = []
-        this.conversationId = this.getOrCreateConversationId()
         this.messages.push({
           type: 'system',
-          content: '✨ 已開始新對話，小宸光在這裡陪你～',
+          content,
           timestamp: new Date().toLocaleTimeString('zh-TW')
         })
         this.scrollToBottom()
-
-      } catch (error) {
-        this.messages.push({
-          type: 'system',
-          content: `❌ 操作失敗: ${error.message}`,
-          timestamp: new Date().toLocaleTimeString('zh-TW')
-        })
-        this.scrollToBottom()
+        // 失敗：不清除 localStorage、不開始新對話，交由使用者決定
+        return
       }
+
+      if (!archived) {
+        // 後端未回報成功：同樣不清除舊對話
+        this.scrollToBottom()
+        return
+      }
+
+      // 只有成功才清除 localStorage 並開始新對話
+      localStorage.removeItem('xiaochenguang_messages')
+      localStorage.removeItem('xiaochenguang_conversation_id')
+      this.messages = []
+      this.conversationId = this.getOrCreateConversationId()
+      this.messages.push({
+        type: 'system',
+        content: '✨ 已開始新對話，小宸光在這裡陪你～',
+        timestamp: new Date().toLocaleTimeString('zh-TW')
+      })
+      this.scrollToBottom()
     },
     handleBeforeUnload(event) {
       if (this.messages.length > 2) {
