@@ -10,7 +10,6 @@
 """
 from __future__ import annotations
 
-import os
 import re
 import logging
 from datetime import datetime, timezone
@@ -204,31 +203,12 @@ async def voice_events(body: VoiceEventRequest):
     if body.event_type not in allowed:
         raise HTTPException(status_code=400, detail=f"未知 event_type: {body.event_type}")
 
-    payload = {
-        "user_id": body.user_id,
-        "conversation_id": body.conversation_id,
-        "event_type": body.event_type,
-        "detail": body.detail or {},
-        "transcript": (body.transcript or "")[:500],
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    logger.info(
-        "🎙️ voice_event type=%s user=%s conv=%s",
-        body.event_type,
-        (body.user_id or "")[:12],
-        (body.conversation_id or "")[:12],
-    )
-    # 盡力寫入 Supabase（表不存在則略過）
-    try:
-        from backend.supabase_handler import get_supabase
-
-        sb = get_supabase()
-        table = os.getenv("SUPABASE_VOICE_EVENTS_TABLE", "voice_events")
-        sb.table(table).insert(payload).execute()
-    except Exception as e:
-        logger.debug("voice_events 未寫入 DB（可略過）: %s", e)
-
-    return {"ok": True, "recorded": True}
+    # Task008-002（Round2 決策）：voice event DB telemetry 明確停用。
+    # 保留相容端點：合法 event 一律回 disabled；不讀 env、不載入/呼叫 Supabase、不寫任何 DB、
+    # 不持久化 transcript/detail/user_id/conversation_id。
+    # 未來若需事件分析，另立具 schema/RLS/隱私契約的 opt-in Task。
+    logger.info("🎙️ voice_event type=%s (telemetry disabled)", body.event_type)
+    return {"ok": True, "recorded": False, "storage_status": "disabled"}
 
 
 @router.get("/voice/prompt-hint")

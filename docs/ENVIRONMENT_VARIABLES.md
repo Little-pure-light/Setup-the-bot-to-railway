@@ -38,7 +38,7 @@
 | `MAX_TOOLS_PER_TURN` | 每回合工具上限 | `3` |
 | `MAX_TOOL_OUTPUT_CHARS` | 工具輸出截斷 | `6000` |
 | `REMINDERS_FILE` | 提醒 JSON | `data/reminders.json` |
-| `SUPABASE_VOICE_EVENTS_TABLE` | 語音事件表 | `voice_events` |
+| `SUPABASE_VOICE_EVENTS_TABLE` | 語音事件表（Task008-002：**目前保留但停用**，端點不讀此變數、不寫 DB；**請勿設定**。未來如需事件分析須另立具 schema/RLS/隱私契約的 opt-in Task） | 停用（勿設） |
 | `APP_VERSION` | 健康檢查版本 | `1.0.1` |
 | `RAILWAY_GIT_COMMIT_SHA` / `GIT_COMMIT` / `GITHUB_SHA` | 可選，健康檢查回傳 `git_commit`（截短） | 空 |
 | `READY_CHECK_SUPABASE_DNS` | `/ready` 是否做 Supabase DNS（非 DB 探測；預設 false） | `false` |
