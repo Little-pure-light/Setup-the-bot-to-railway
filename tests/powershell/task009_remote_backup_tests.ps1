@@ -246,6 +246,39 @@ try {
     Assert-True ($rc -ne 0) 'real checker must FAIL on corrupted dump bytes'
     Write-Host 'OK real-checker FAIL on dump corruption'
 
+    # 12) PG_DUMP_HOST / PG_DUMP_PORT direct-connection override (Supabase pooler bypass)
+    # Verify that the full pipeline succeeds when PG_DUMP_HOST is set, and that psql row-count
+    # queries still run using the original PGHOST (i.e. the override is scoped to pg_dump only).
+    Reset
+    $pgDumpHostLog = Join-Path $tmp 'pgdumphost.txt'
+    # Extend fake_pg_dump to record the PGHOST it sees at call time.
+    Set-Content -LiteralPath $fakes.pg -Encoding UTF8 -Value @'
+$file = $args | Where-Object { $_ -like '--file=*' } | Select-Object -First 1
+if ($file) { ($file -replace '^--file=','') | ForEach-Object { Set-Content -LiteralPath $_ -Value ("FAKEDUMP " + [guid]::NewGuid()) -Encoding ASCII } }
+if ($env:FAKE_PGDUMP_HOSTLOG) { $env:PGHOST | Set-Content -LiteralPath $env:FAKE_PGDUMP_HOSTLOG }
+if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }
+exit 0
+'@
+    $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+    $e.PG_DUMP_HOST = 'direct-host.supabase.co'
+    $e.PG_DUMP_PORT = '5432'
+    $e.PGHOST = 'pooler-host.supabase.co'
+    $e.FAKE_PGDUMP_HOSTLOG = $pgDumpHostLog
+    $rc = Run-Backup $e $args0
+    Assert-True ($rc -eq 0) "PG_DUMP_HOST override: full pipeline should succeed (exit $rc)"
+    $seenHost = if (Test-Path -LiteralPath $pgDumpHostLog) { (Get-Content -LiteralPath $pgDumpHostLog -Raw).Trim() } else { '' }
+    Assert-True ($seenHost -eq 'direct-host.supabase.co') ("pg_dump must see PG_DUMP_HOST as PGHOST; got '$seenHost'")
+    $q = Get-Content -LiteralPath $qlog -Raw
+    Assert-True ($q -ne $null -and $q.Length -gt 0) 'psql row-count queries must still execute'
+    Write-Host 'OK PG_DUMP_HOST override: pg_dump uses direct host, psql row-count unaffected'
+    # Restore fake_pg_dump to original (no hostlog) so subsequent tests are unaffected.
+    Set-Content -LiteralPath $fakes.pg -Encoding UTF8 -Value @'
+$file = $args | Where-Object { $_ -like '--file=*' } | Select-Object -First 1
+if ($file) { ($file -replace '^--file=','') | ForEach-Object { Set-Content -LiteralPath $_ -Value ("FAKEDUMP " + [guid]::NewGuid()) -Encoding ASCII } }
+if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }
+exit 0
+'@
+
     Write-Host ''
     Write-Host 'TASK009_REMOTE_BACKUP_TESTS_PASS'
 }
