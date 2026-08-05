@@ -106,9 +106,26 @@ pwsh scripts/backup/task009_restore_drill.ps1 -BackupDir <備份目錄> -Confirm
 - **CI 狀態：尚未實跑（NOT_RUN）**。本輪沙箱無 pwsh/pg_dump/pg_restore/psql/age/aws，完整 PowerShell 測試由 CI 於 Push 後執行；本地僅做靜態檢查（YAML 解析、`git diff --check`、secret scan、括號/結構核對）。**不得將靜態檢查當作 CI PASS。**
 
 ## 目前為 INERT（未啟用）
-workflow 只在 **default branch** 的 schedule/手動、且 repo variable **`TASK009_BACKUP_ENABLED=true`** 時才執行；在 Task009-007 設定變數與下列 secrets/variables 前，排程不會執行、不會失敗、不碰正式服務。**PR 不觸發此 workflow。**
+workflow 只在 **default branch** 的 schedule/手動觸發；正式 backup 需 repo variable **`TASK009_BACKUP_ENABLED=true`**（見下方啟用矩陣）。在 Task009-007B 設定 Environment secrets/variables 前，排程不會執行正式備份、不會失敗、不碰正式服務。**PR 不觸發此 workflow。**
 
-## Task009-007 啟用前需逐項批准建立（本批不建立）
+## 007A 啟用安全模型（activation gate）
+本 workflow 綁定專用 **GitHub Environment `task009-backup`**（Environment secrets 由操作者於 007B 直接於平台輸入，**不進 repo/log/聊天**）。run/skip 與 dry-run/live 判定由 `scripts/backup/task009_workflow_gate.sh` 決定（fail-closed），矩陣如下：
+
+| 觸發 | `dry_run` 輸入 | `TASK009_BACKUP_ENABLED` | 結果 |
+|---|---|---|---|
+| 手動 workflow_dispatch | `true`（預設） | 任意（含未設/false） | **RUN dry-run**：不讀 secrets、不連 DB/R2、不查詢、不加密、不上傳 |
+| 手動 workflow_dispatch | `false` | 未設 / `false` | **SKIP** |
+| 手動 workflow_dispatch | `false` | `true` | **RUN live**（正式備份） |
+| schedule | —（排程無輸入） | 未設 / `false` | **SKIP** |
+| schedule | —（永不 dry-run） | `true` | **RUN live**（正式備份） |
+
+要點：**schedule 永遠不會 dry-run**，只會在 enabled=true 時跑正式備份；**手動 dry-run 即使 disabled 也能安全執行**（零連線、零上傳），供 007B 啟用前驗證。gate 的四種必測矩陣由 CI job `task009-workflow-gate`（`tests/workflow/task009_gate_matrix_tests.sh`）驗證。
+
+## 安全操作順序（007A → 007B）
+1. **007A（本 PR，repository only）**：加入 Environment 綁定、`dry_run` 輸入、gate 與測試；建立未合併 Draft PR＋CI。**不建立** Environment/secrets/variables/R2/age 私鑰，**不連正式**。
+2. **007B（另批，經 Codex 驗收 + 一竅哥批准合併 007A 後才做）**：見「Task009-007B 啟用前需逐項批准建立」。啟用前務必先 **手動 dry-run（enabled 尚未 true）** 驗證零連線/零上傳，再設 `TASK009_BACKUP_ENABLED=true`，於避開 03:17 的受控時間手動 `dry_run=false` 執行**一次**正式備份，驗證 job SUCCESS、R2 僅有 `.age`＋去敏 manifest/checksum、HEAD size/metadata checksum 一致；不下載、不解密、不 restore（隔離還原屬 Task009-008）。
+
+## Task009-007B 啟用前需逐項批准建立（007A 本批不建立）
 - GitHub secrets：`TASK009_PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`（Supabase shared pooler session mode）、`TASK009_R2_ACCESS_KEY_ID/TASK009_R2_SECRET_ACCESS_KEY`（**僅限該 bucket 的 R/W token**）。
 - GitHub variables：`TASK009_AGE_RECIPIENT`（age **公鑰**，非秘密）、`TASK009_R2_BUCKET`、`TASK009_R2_ENDPOINT`、`TASK009_BACKUP_ENABLED=true`。
 - Cloudflare R2：私有專用 bucket（不綁 public domain）、30 天 lifecycle 保留。

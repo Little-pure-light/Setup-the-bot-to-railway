@@ -99,6 +99,14 @@ jobs:
         shell: pwsh
         run: ./tests/powershell/task009_remote_backup_tests.ps1
 
+  task009-workflow-gate:
+    name: Task009 workflow activation gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Task009 activation gate matrix tests
+        run: bash ./tests/workflow/task009_gate_matrix_tests.sh
+
   security:
     name: Secret scan
     runs-on: ubuntu-latest
