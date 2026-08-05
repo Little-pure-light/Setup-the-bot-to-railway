@@ -142,9 +142,10 @@ function Assert-PostRestoreContracts([object] $manifest) {
 
   if ($sourceCounts) {
     $rowCountQueryAllowlist = [ordered]@{
-      'public.xiaochenguang_memories' = "SELECT COUNT(*)::text FROM public.xiaochenguang_memories;"
-      'public.emotional_states'       = "SELECT COUNT(*)::text FROM public.emotional_states;"
-      'public.user_preferences'       = "SELECT COUNT(*)::text FROM public.user_preferences;"
+      'public.xiaochenguang_memories'    = "SELECT COUNT(*)::text FROM public.xiaochenguang_memories;"
+      'public.xiaochenguang_reflections' = "SELECT COUNT(*)::text FROM public.xiaochenguang_reflections;"
+      'public.emotional_states'          = "SELECT COUNT(*)::text FROM public.emotional_states;"
+      'public.user_preferences'          = "SELECT COUNT(*)::text FROM public.user_preferences;"
     }
 
     $expectedMap = @{}
