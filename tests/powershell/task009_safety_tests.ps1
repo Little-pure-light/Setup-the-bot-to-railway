@@ -142,6 +142,7 @@ if ($q -match "extname='vector'") { Write-Output 't'; exit 0 }
 if ($q -match 'COUNT\(\*\)::text FROM public\.xiaochenguang_memories') { Write-Output '1'; exit 0 }
 if ($q -match 'COUNT\(\*\)::text FROM public\.emotional_states') { Write-Output '0'; exit 0 }
 if ($q -match 'COUNT\(\*\)::text FROM public\.user_preferences') { Write-Output '0'; exit 0 }
+if ($q -match 'COUNT\(\*\)::text FROM public\.xiaochenguang_reflections') { Write-Output '0'; exit 0 }
 Write-Output 't'
 exit 0
 '@
@@ -312,6 +313,7 @@ try {
     }
     $manifestRaw.source_contract.source_row_counts = [ordered]@{
         'public.xiaochenguang_memories' = 1
+        'public.xiaochenguang_reflections' = 0
         'public.emotional_states' = 0
         'public.user_preferences' = 0
     }
@@ -337,6 +339,7 @@ try {
     $manifestUnknown = Get-Content -LiteralPath (Join-Path $validDirPath 'manifest.json') -Raw | ConvertFrom-Json
     $manifestUnknown.source_contract.source_row_counts = [ordered]@{
         'public.xiaochenguang_memories' = 1
+        'public.xiaochenguang_reflections' = 0
         'public.emotional_states' = 0
         'public.user_preferences' = 0
         'public.unknown_table' = 123
@@ -349,6 +352,7 @@ try {
     $manifestMal = Get-Content -LiteralPath (Join-Path $validDirPath 'manifest.json') -Raw | ConvertFrom-Json
     $manifestMal.source_contract.source_row_counts = [ordered]@{
         'public.xiaochenguang_memories' = 1
+        'public.xiaochenguang_reflections' = 0
         'public.emotional_states' = 0
         'public.user_preferences' = 0
         'public.xiaochenguang_memories;DROP TABLE public.user_preferences;--' = 1

@@ -86,3 +86,43 @@ pwsh scripts/backup/task009_restore_drill.ps1 -BackupDir <備份目錄> -Confirm
 
 ## 10. 去敏規範
 紀錄與輸出不得含密碼、token、完整連線字串、完整 user/chat/conversation id；只留遮罩或計數。
+
+---
+
+# Task009-006 — 加密遠端備份 workflow（scaffolding；正式啟用＝Task009-007）
+
+## 什麼被建立
+- `.github/workflows/task009-backup.yml`：排程 **每日 03:17 Asia/Taipei（19:17 UTC）** + 手動 `workflow_dispatch`。
+- `scripts/backup/task009_remote_backup.ps1`：row-count(**固定四表、不可縮減**)→pg_dump→manifest+SHA-256→驗證→打包→**age 公鑰加密**→上傳**私有 Cloudflare R2**(含 sha256 object metadata)→**HEAD size+checksum 驗證**→精確清理。fail-closed；**絕不上傳明文**；不刪遠端物件（30 天保留＝R2 lifecycle，於 007 設定）。
+- CI job `task009-remote-backup-safety`：以假工具真跑正負向測試（含真實 manifest 竄改 / dump 破壞由正式 checker 攔截、外部工具輸出去敏、cleanup 越界安全）。
+
+## 第二輪 Push 前補修（對應 CODEX_009_006_ROUND2）
+- **固定四表、不可縮減**：row-count 集合為程式常數 `public.xiaochenguang_memories / public.xiaochenguang_reflections / public.emotional_states / public.user_preferences`；已移除呼叫端可縮減的 `-RowCountTables` production 輸入；subset/unknown/duplicate 皆於**任何 SQL 查詢前** fail-closed。
+- **restore_drill 契約同步**：`task009_restore_drill.ps1` 的 `source_row_counts` allowlist 同步為上述四表（新增 `public.xiaochenguang_reflections`），確保注入的 `source_contract.source_row_counts` 與還原驗證契約完全一致（Phase A safety 測試同步更新）。
+- **真實負向驗證**：測試以真實 `task009_backup.ps1` 產物 + 真實 `task009_manifest_check.ps1`，實際竄改 manifest sha256、實際破壞 dump bytes，兩者都必須失敗（非僅替代 checker / 環境變數模擬）。
+- **外部工具輸出去敏**：Phase A / psql / age / S3 client 的 stdout/stderr 一律捕捉不外流；失敗只回報**階段名 + exit code + 去敏錯誤類別**，不原樣印出 endpoint/bucket/DB host/name/user/secret/project ref；測試以假敏感字串驗證 log 不含。
+- **決定性 S3 client**：workflow 以官方 installer **固定版本**（`AWSCLI_VERSION`，pinned）安裝並驗證 AWS CLI v2，不依賴 runner 映像預裝。
+- **cleanup 越界安全**：抽出 `Remove-RunDirSafe`（越界一律拒刪）；測試證明 sibling 與 runner temp 外部檔案不會被刪除、僅移除本 run 目錄。
+- **CI 狀態：尚未實跑（NOT_RUN）**。本輪沙箱無 pwsh/pg_dump/pg_restore/psql/age/aws，完整 PowerShell 測試由 CI 於 Push 後執行；本地僅做靜態檢查（YAML 解析、`git diff --check`、secret scan、括號/結構核對）。**不得將靜態檢查當作 CI PASS。**
+
+## 目前為 INERT（未啟用）
+workflow 只在 **default branch** 的 schedule/手動、且 repo variable **`TASK009_BACKUP_ENABLED=true`** 時才執行；在 Task009-007 設定變數與下列 secrets/variables 前，排程不會執行、不會失敗、不碰正式服務。**PR 不觸發此 workflow。**
+
+## Task009-007 啟用前需逐項批准建立（本批不建立）
+- GitHub secrets：`TASK009_PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`（Supabase shared pooler session mode）、`TASK009_R2_ACCESS_KEY_ID/TASK009_R2_SECRET_ACCESS_KEY`（**僅限該 bucket 的 R/W token**）。
+- GitHub variables：`TASK009_AGE_RECIPIENT`（age **公鑰**，非秘密）、`TASK009_R2_BUCKET`、`TASK009_R2_ENDPOINT`、`TASK009_BACKUP_ENABLED=true`。
+- Cloudflare R2：私有專用 bucket（不綁 public domain）、30 天 lifecycle 保留。
+- age **私鑰**：一竅哥離線保存兩份，**絕不**進 GitHub/Railway/repo/協作資料夾。
+- GitHub Actions **失敗 email 通知**已開啟。
+
+## Public repo 排程注意
+Public repository 於 repo **60 天無活動**可能停用 scheduled workflow。請保留手動「Run workflow」按鈕，並**每月**檢查排程是否仍啟用；停用時以 `workflow_dispatch` 手動執行並重新啟用排程。
+
+## 本 workflow **未涵蓋**的 DR 資產（不得冒充完整 DR）
+- Supabase **Auth（10 使用者）**：未涵蓋（不在 public dump）。
+- Supabase **Storage**（目前 0 bucket/0 物件）：目前無資料；未來啟用需另納管。
+- **Pinecone**（1 index、`__default__` namespace、209 records、1536-d cosine）：與 Supabase reflections(36) 數量不一致，**重建性未證**（`PINECONE_REBUILDABILITY_NOT_PROVEN`）→ 需獨立 export/rebuild policy。
+- Railway backend **reminders / identity / token ledger**：backend 無 volume＝ephemeral，重部署遺失；reminders/identity 為唯一真相且無重建來源。
+- **Redis volume**：AOF/RDB、snapshot/實際還原能力未證。
+
+> 以上皆為後續 DR 工作；Task009-006 僅涵蓋 Supabase `public` PostgreSQL 的加密遠端備份 scaffolding，**非**完整 DR、**非**正式啟用。

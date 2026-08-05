@@ -1,0 +1,94 @@
+# Task009-006 — encrypted remote backup (repository scaffolding).
+# NOT enabled in production: this workflow stays INERT until Task009-007 sets the
+# repository variable TASK009_BACKUP_ENABLED=true AND provisions the secrets/variables below.
+# It NEVER runs on pull_request and NEVER touches production on PR. It uploads only an
+# age-encrypted archive + desensitized manifest/checksum to a private Cloudflare R2 bucket.
+# It performs NO remote deletion (30-day retention = R2 lifecycle, configured in Task009-007).
+#
+# NOTE: a Public repository may have scheduled workflows disabled after 60 days of repo
+# inactivity. Keep the manual "Run workflow" button (workflow_dispatch) and do the monthly
+# check described in docs/TASK009_RESTORE_RUNBOOK.md to re-enable if needed.
+name: Task009 Encrypted Remote Backup
+
+on:
+  schedule:
+    # 03:17 Asia/Taipei == 19:17 UTC (avoids top-of-hour peaks)
+    - cron: "17 19 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: task009-encrypted-remote-backup
+  cancel-in-progress: false
+
+jobs:
+  encrypted-remote-backup:
+    name: Encrypted remote backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Only on the default branch, only for schedule/manual, and only once explicitly enabled (Task009-007).
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
+      vars.TASK009_BACKUP_ENABLED == 'true'
+    env:
+      # DB connection (Task009-007 provisions these GitHub secrets; values never printed)
+      PGHOST: ${{ secrets.TASK009_PGHOST }}
+      PGPORT: ${{ secrets.TASK009_PGPORT }}
+      PGDATABASE: ${{ secrets.TASK009_PGDATABASE }}
+      PGUSER: ${{ secrets.TASK009_PGUSER }}
+      PGPASSWORD: ${{ secrets.TASK009_PGPASSWORD }}
+      PGSSLMODE: require
+      # age recipient PUBLIC key (non-secret variable). Private identity is NEVER in GitHub.
+      AGE_RECIPIENT: ${{ vars.TASK009_AGE_RECIPIENT }}
+      # Private R2 bucket + endpoint (variables) and bucket-scoped R/W token (secrets)
+      R2_BUCKET: ${{ vars.TASK009_R2_BUCKET }}
+      R2_ENDPOINT: ${{ vars.TASK009_R2_ENDPOINT }}
+      R2_ACCESS_KEY_ID: ${{ secrets.TASK009_R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.TASK009_R2_SECRET_ACCESS_KEY }}
+    steps:
+      - name: Checkout (read-only)
+        uses: actions/checkout@v4
+
+      - name: Install and verify required tools (no secrets printed)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client age tar
+          # verify each required tool is present and version-identifiable (values only, no secrets)
+          pg_dump --version
+          pg_restore --version
+          psql --version
+          age --version
+          tar --version | head -n1
+
+      - name: Install pinned AWS CLI v2 (deterministic S3 client, not runner-image dependent)
+        env:
+          # Pinned, traceable AWS CLI v2 version installed from the official installer.
+          # Bump deliberately in a reviewed change; do NOT rely on whatever the runner image ships.
+          AWSCLI_VERSION: "2.15.30"
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" -o "$tmp/awscliv2.zip"
+          unzip -q "$tmp/awscliv2.zip" -d "$tmp"
+          sudo "$tmp/aws/install" --update
+          rm -rf "$tmp"
+          # Verify the pinned version is what actually got installed (fail closed on mismatch).
+          installed="$(aws --version 2>&1 || true)"
+          echo "$installed"
+          case "$installed" in
+            *"aws-cli/${AWSCLI_VERSION}"*) echo "AWS CLI pinned version ${AWSCLI_VERSION} verified" ;;
+            *) echo "ERROR: AWS CLI version mismatch (expected aws-cli/${AWSCLI_VERSION})"; exit 1 ;;
+          esac
+
+      - name: Run encrypted remote backup
+        shell: pwsh
+        run: >-
+          ./scripts/backup/task009_remote_backup.ps1
+          -WorkRoot "$env:RUNNER_TEMP"
+          -RunId "${{ github.run_id }}"
+        # The orchestrator cleans up its own precise run-specific directory (with runner-temp
+        # containment check) in a finally block on success or failure. No wildcard cleanup here.

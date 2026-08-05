@@ -90,6 +90,15 @@ jobs:
         shell: pwsh
         run: ./tests/powershell/task009_safety_tests.ps1
 
+  task009-remote-backup-safety:
+    name: Task009 remote backup safety
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Task009 remote backup safety tests
+        shell: pwsh
+        run: ./tests/powershell/task009_remote_backup_tests.ps1
+
   security:
     name: Secret scan
     runs-on: ubuntu-latest
