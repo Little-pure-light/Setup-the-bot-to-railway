@@ -215,11 +215,32 @@ try {
   $schemaOnlyArgs = @('--schema-only') + $schemaArgs + @('--no-owner', '--no-privileges', '--format=custom', "--file=$schemaDump")
   $dataOnlyArgs = @('--data-only') + $schemaArgs + @('--no-owner', '--no-privileges', '--format=custom', "--file=$dataDump")
 
-  Invoke-ExternalTool -toolPath $PgDump -toolArgs $schemaOnlyArgs
-  if ($LASTEXITCODE -ne 0) { throw "schema 匯出失敗，代碼：$LASTEXITCODE" }
+  # PG_DUMP_HOST / PG_DUMP_PORT: optional direct-connection override for pg_dump.
+  # Use these to bypass a pgBouncer/pooler endpoint (e.g. Supabase shared pooler) when pg_dump
+  # requires a direct DB connection.  psql row-count queries continue using PGHOST/PGPORT.
+  $pgDumpHostOrig = $env:PGHOST
+  $pgDumpPortOrig = $env:PGPORT
+  $pgDumpHostOverrideApplied = $false
+  if ($env:PG_DUMP_HOST) {
+    $env:PGHOST = $env:PG_DUMP_HOST
+    if ($env:PG_DUMP_PORT) { $env:PGPORT = $env:PG_DUMP_PORT } else { $env:PGPORT = '5432' }
+    $pgDumpHostOverrideApplied = $true
+    Write-Info 'pg_dump 使用直連主機（PG_DUMP_HOST 覆蓋 PGHOST，繞過連接池）'
+  }
 
-  Invoke-ExternalTool -toolPath $PgDump -toolArgs $dataOnlyArgs
-  if ($LASTEXITCODE -ne 0) { throw "data 匯出失敗，代碼：$LASTEXITCODE" }
+  try {
+    Invoke-ExternalTool -toolPath $PgDump -toolArgs $schemaOnlyArgs
+    if ($LASTEXITCODE -ne 0) { throw "schema 匯出失敗，代碼：$LASTEXITCODE" }
+
+    Invoke-ExternalTool -toolPath $PgDump -toolArgs $dataOnlyArgs
+    if ($LASTEXITCODE -ne 0) { throw "data 匯出失敗，代碼：$LASTEXITCODE" }
+  }
+  finally {
+    if ($pgDumpHostOverrideApplied) {
+      $env:PGHOST = $pgDumpHostOrig
+      $env:PGPORT = $pgDumpPortOrig
+    }
+  }
 
   $files = @()
   foreach ($f in @($schemaDump, $dataDump)) {

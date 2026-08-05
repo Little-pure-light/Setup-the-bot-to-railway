@@ -120,6 +120,12 @@ jobs:
           PGUSER: ${{ secrets.TASK009_PGUSER }}
           PGPASSWORD: ${{ secrets.TASK009_PGPASSWORD }}
           PGSSLMODE: require
+          # pg_dump direct-connection override: bypasses the Supabase shared pooler (pgBouncer) which
+          # does not support pg_dump's binary protocol.  Set TASK009_PG_DIRECT_HOST to the Supabase
+          # direct-connection host (db.<project-ref>.supabase.co, port 5432).  If unset, pg_dump
+          # falls back to PGHOST/PGPORT (backward-compatible with non-pooled deployments).
+          PG_DUMP_HOST: ${{ secrets.TASK009_PG_DIRECT_HOST }}
+          PG_DUMP_PORT: ${{ vars.TASK009_PG_DIRECT_PORT }}
           # age recipient PUBLIC key (non-secret variable). Private identity is NEVER in GitHub.
           AGE_RECIPIENT: ${{ vars.TASK009_AGE_RECIPIENT }}
           # Private R2 bucket + endpoint (variables) and bucket-scoped R/W token (Environment secrets)

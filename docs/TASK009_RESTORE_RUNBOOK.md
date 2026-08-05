@@ -126,8 +126,9 @@ workflow 只在 **default branch** 的 schedule/手動觸發；正式 backup 需
 2. **007B（另批，經 Codex 驗收 + 一竅哥批准合併 007A 後才做）**：見「Task009-007B 啟用前需逐項批准建立」。啟用前務必先 **手動 dry-run（enabled 尚未 true）** 驗證零連線/零上傳，再設 `TASK009_BACKUP_ENABLED=true`，於避開 03:17 的受控時間手動 `dry_run=false` 執行**一次**正式備份，驗證 job SUCCESS、R2 僅有 `.age`＋去敏 manifest/checksum、HEAD size/metadata checksum 一致；不下載、不解密、不 restore（隔離還原屬 Task009-008）。
 
 ## Task009-007B 啟用前需逐項批准建立（007A 本批不建立）
-- GitHub secrets：`TASK009_PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`（Supabase shared pooler session mode）、`TASK009_R2_ACCESS_KEY_ID/TASK009_R2_SECRET_ACCESS_KEY`（**僅限該 bucket 的 R/W token**）。
-- GitHub variables：`TASK009_AGE_RECIPIENT`（age **公鑰**，非秘密）、`TASK009_R2_BUCKET`、`TASK009_R2_ENDPOINT`、`TASK009_BACKUP_ENABLED=true`。
+- GitHub secrets：`TASK009_PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`（Supabase shared pooler session mode，供 psql row-count）、`TASK009_PG_DIRECT_HOST`（Supabase 直連主機 `db.<project-ref>.supabase.co`，供 pg_dump 繞過 pgBouncer）、`TASK009_R2_ACCESS_KEY_ID/TASK009_R2_SECRET_ACCESS_KEY`（**僅限該 bucket 的 R/W token**）。
+- GitHub variables：`TASK009_AGE_RECIPIENT`（age **公鑰**，非秘密）、`TASK009_R2_BUCKET`、`TASK009_R2_ENDPOINT`、`TASK009_PG_DIRECT_PORT`（Supabase 直連埠，通常 `5432`）、`TASK009_BACKUP_ENABLED=true`。
+- **pg_dump 直連說明**：Supabase shared pooler（pgBouncer session mode）不支援 pg_dump 所需的 binary protocol（`--format=custom`）。`TASK009_PG_DIRECT_HOST`（secret）＋`TASK009_PG_DIRECT_PORT`（variable，預設 5432）會被注入為 `PG_DUMP_HOST`/`PG_DUMP_PORT`，task009_backup.ps1 在呼叫 pg_dump 時使用直連，psql row-count 仍使用 pooler。若未設定 `PG_DUMP_HOST`，pg_dump 退回 `PGHOST/PGPORT`（向後相容）。
 - Cloudflare R2：私有專用 bucket（不綁 public domain）、30 天 lifecycle 保留。
 - age **私鑰**：一竅哥離線保存兩份，**絕不**進 GitHub/Railway/repo/協作資料夾。
 - GitHub Actions **失敗 email 通知**已開啟。
