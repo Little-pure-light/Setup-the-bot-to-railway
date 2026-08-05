@@ -134,10 +134,10 @@ try {
     $rc = Run-Backup $e $args0
     Assert-True ($rc -eq 0) "positive should exit 0 (got $rc)"
     $k = Get-Content -LiteralPath $keys -ErrorAction SilentlyContinue
-    Assert-True (($k | Where-Object { $_ -like '*backup.tar.age' }).Count -ge 1) 'must upload .age (upload executed)'
-    Assert-True (($k | Where-Object { $_ -like '*/manifest.json' }).Count -ge 1) 'must upload manifest'
-    Assert-True (($k | Where-Object { $_ -like '*.dump' -or $_ -like '*backup.tar' }).Count -eq 0) 'must NOT upload plaintext'
-    Assert-True ((Test-Path -LiteralPath $headlog) -and ((Get-Content -LiteralPath $headlog).Count -ge 1)) 'HEAD must be executed'
+    Assert-True (@($k | Where-Object { $_ -like '*backup.tar.age' }).Count -ge 1) 'must upload .age (upload executed)'
+    Assert-True (@($k | Where-Object { $_ -like '*/manifest.json' }).Count -ge 1) 'must upload manifest'
+    Assert-True (@($k | Where-Object { $_ -like '*.dump' -or $_ -like '*backup.tar' }).Count -eq 0) 'must NOT upload plaintext'
+    Assert-True ((Test-Path -LiteralPath $headlog) -and (@(Get-Content -LiteralPath $headlog).Count -ge 1)) 'HEAD must be executed'
     $q = Get-Content -LiteralPath $qlog -Raw
     foreach ($a in $RequiredTables) { Assert-True ($q -like "*$a*") "row-count must query $a" }
     Assert-True (Test-Path -LiteralPath $sibling) 'precise cleanup must NOT delete sibling dir'
