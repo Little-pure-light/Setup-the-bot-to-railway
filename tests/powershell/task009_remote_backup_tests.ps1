@@ -18,6 +18,11 @@ if (-not $pwsh) { throw 'No PowerShell executable found.' }
 function Write-Fakes([string] $dir) {
     New-Item -ItemType Directory -Force -Path $dir | Out-Null
     Set-Content -LiteralPath (Join-Path $dir 'fake_pg_dump.ps1') -Encoding UTF8 -Value @'
+if ($args | Where-Object { $_ -eq '--version' }) {
+  $v = if ($env:FAKE_PGDUMP_VERSION) { $env:FAKE_PGDUMP_VERSION } else { '16.14' }
+  Write-Output ("pg_dump (PostgreSQL) " + $v)
+  exit 0
+}
 $file = $args | Where-Object { $_ -like '--file=*' } | Select-Object -First 1
 if ($file) { ($file -replace '^--file=','') | ForEach-Object { Set-Content -LiteralPath $_ -Value ("FAKEDUMP " + [guid]::NewGuid()) -Encoding ASCII } }
 if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }
@@ -29,7 +34,17 @@ Write-Output "; Archive created"; Write-Output "1; 0 0 TABLE public foo owner"
 exit 0
 '@
     Set-Content -LiteralPath (Join-Path $dir 'fake_psql.ps1') -Encoding UTF8 -Value @'
-if ($env:FAKE_QUERY_LOG) { ($args -join ' ') | Add-Content -LiteralPath $env:FAKE_QUERY_LOG }
+$joined = ($args -join ' ')
+if ($env:FAKE_QUERY_LOG) { $joined | Add-Content -LiteralPath $env:FAKE_QUERY_LOG }
+# version preflight query: return server_version_num (not the row count)
+if ($joined -match 'server_version_num') {
+  if ($env:FAKE_SVQ_STDERR) { [Console]::Error.WriteLine($env:FAKE_SVQ_STDERR) }
+  $sv = if ($env:FAKE_SVQ_EXIT) { [int]$env:FAKE_SVQ_EXIT } else { 0 }
+  if ($sv -ne 0) { exit $sv }
+  $num = if ($null -ne $env:FAKE_SERVER_VERSION_NUM) { $env:FAKE_SERVER_VERSION_NUM } else { '160014' }
+  Write-Output $num
+  exit 0
+}
 if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }
 if ($env:FAKE_PSQL_STDERR) { [Console]::Error.WriteLine($env:FAKE_PSQL_STDERR) }
 $exit = if ($env:FAKE_PSQL_EXIT) { [int]$env:FAKE_PSQL_EXIT } else { 0 }
@@ -121,6 +136,8 @@ function Base-Env() {
         FAKE_S3_KEYS=$keys; FAKE_S3_STATE=(Join-Path $tmp 'size.txt'); FAKE_S3_META=(Join-Path $tmp 'meta.txt'); FAKE_S3_HEADLOG=$headlog
         FAKE_QUERY_LOG=$qlog; MANIFEST_CHECK_PATH=''; TASK009_ROWCOUNT_SET_OVERRIDE=''; FAKE_SENSITIVE=''
         FAKE_PSQL_STDERR=''; FAKE_PSQL_EXIT=''
+        FAKE_SERVER_VERSION_NUM='160014'; FAKE_PGDUMP_VERSION='16.14'; FAKE_SVQ_EXIT=''; FAKE_SVQ_STDERR=''
+        TASK009_PHASEA_BACKUP_PATH=''
     }
 }
 $args0 = @('-WorkRoot',$runnerTemp,'-RunId','test')
@@ -250,6 +267,69 @@ try {
     Assert-True ($r.Output -like '*category=DB_DNS_FAILED*') 'DNS case must classify as DB_DNS_FAILED'
     Assert-True (-not ($r.Output -like '*DB_AUTH_FAILED*')) 'DNS case must NOT be misclassified as auth'
     Write-Host 'OK classification mutual-exclusivity spot-check'
+
+    # 10d) PHASE A error CLASSIFICATION: a fake Phase A backup (via TASK009_PHASEA_BACKUP_PATH seam) fails
+    #      with a representative stderr embedding a sensitive marker. Orchestrator output must contain ONLY
+    #      the safe category and NEVER the raw stderr / marker / raw prefixes (pg_dump:/pg_restore:/TASK009_BACKUP_FAILED:).
+    $pmarker = 'SENSITIVE_pgident_7b1e4d2a'
+    $fakePhaseA = Join-Path $tmp 'fake_phasea.ps1'
+    Set-Content -LiteralPath $fakePhaseA -Encoding UTF8 -Value @'
+if ($env:FAKE_PHASEA_STDERR) { [Console]::Error.WriteLine($env:FAKE_PHASEA_STDERR) }
+exit 1
+'@
+    $phaseaCases = @(
+        @{ cat='PG_DUMP_VERSION_MISMATCH'; err=('pg_dump: error: aborting because of server version mismatch; pg_dump: server version: 17.4 (host {0}); pg_dump version: 16.14' -f $pmarker) },
+        @{ cat='PG_SCHEMA_DUMP_FAILED';    err=('pg_dump: error: connection to database "{0}" failed; TASK009_BACKUP_FAILED: schema 匯出失敗，代碼：1' -f $pmarker) },
+        @{ cat='PG_DATA_DUMP_FAILED';      err=('pg_dump: error: relation dump failed for {0}; TASK009_BACKUP_FAILED: data 匯出失敗，代碼：1' -f $pmarker) },
+        @{ cat='PG_RESTORE_VERIFY_FAILED'; err=('pg_restore: error: could not read from file {0}; TASK009_BACKUP_FAILED: schema 備份檔無法讀取' -f $pmarker) },
+        @{ cat='PHASEA_INPUT_OR_PATH_FAILED'; err=('TASK009_BACKUP_FAILED: 缺少必要連線環境變數：PGPASSWORD（來源 {0}）' -f $pmarker) },
+        @{ cat='PHASEA_UNKNOWN';           err=('TASK009_BACKUP_FAILED: 未預期的內部錯誤，附近 {0}' -f $pmarker) }
+    )
+    foreach ($case in $phaseaCases) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+        $e.TASK009_PHASEA_BACKUP_PATH=$fakePhaseA; $e.FAKE_PHASEA_STDERR=$case.err
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) ("phaseA classification {0}: run must fail" -f $case.cat)
+        Assert-True ($r.Output -like ("*stage=phaseA_backup*category={0}*" -f $case.cat)) ("phaseA classification: expected category={0}" -f $case.cat)
+        Assert-True (-not ($r.Output -like "*$pmarker*")) ("phaseA classification {0}: marker must be absent" -f $case.cat)
+        foreach ($raw in @('pg_dump:','pg_restore:','TASK009_BACKUP_FAILED:')) {
+            Assert-True (-not ($r.Output -like "*$raw*")) ("phaseA classification {0}: raw prefix '$raw' must be absent" -f $case.cat)
+        }
+        Write-Host ("OK phaseA classification {0}: only safe category, no raw stderr/marker" -f $case.cat)
+    }
+
+    # 10e) SAFE VERSION PREFLIGHT (client pg_dump major vs server major), fail-closed:
+    #      client<server FAIL, client=server PASS, client>server PASS, unparsable server/client FAIL closed.
+    #      Only numeric majors may appear; never a connection string or command line.
+    # client < server -> fail closed PG_DUMP_VERSION_MISMATCH
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.FAKE_PGDUMP_VERSION='16.14'; $e.FAKE_SERVER_VERSION_NUM='170004'
+    $r = Run-Capture $Script $e $args0
+    Assert-True ($r.ExitCode -ne 0) 'version preflight client<server must fail'
+    Assert-True ($r.Output -like '*stage=version_preflight*category=PG_DUMP_VERSION_MISMATCH*') 'client<server must be PG_DUMP_VERSION_MISMATCH'
+    Assert-True (-not ($r.Output -like '*/manifest.json*')) 'client<server must fail BEFORE any upload'
+    Write-Host 'OK version preflight client<server fail-closed'
+    # client = server -> pass (full pipeline succeeds)
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.FAKE_PGDUMP_VERSION='16.14'; $e.FAKE_SERVER_VERSION_NUM='160014'
+    $rc = Run-Backup $e $args0
+    Assert-True ($rc -eq 0) 'version preflight client=server must pass'
+    Write-Host 'OK version preflight client=server pass'
+    # client > server -> pass
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.FAKE_PGDUMP_VERSION='17.2'; $e.FAKE_SERVER_VERSION_NUM='160014'
+    $rc = Run-Backup $e $args0
+    Assert-True ($rc -eq 0) 'version preflight client>server must pass'
+    Write-Host 'OK version preflight client>server pass'
+    # unparsable server version -> fail closed
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.FAKE_SERVER_VERSION_NUM='not-a-number'
+    $r = Run-Capture $Script $e $args0
+    Assert-True ($r.ExitCode -ne 0) 'unparsable server version must fail closed'
+    Assert-True ($r.Output -like '*stage=version_preflight*category=PG_DUMP_VERSION_MISMATCH*') 'unparsable server version -> PG_DUMP_VERSION_MISMATCH'
+    Write-Host 'OK version preflight unparsable-server fail-closed'
+    # unparsable client version -> fail closed
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.FAKE_PGDUMP_VERSION='not-a-version'
+    $r = Run-Capture $Script $e $args0
+    Assert-True ($r.ExitCode -ne 0) 'unparsable client version must fail closed'
+    Assert-True ($r.Output -like '*stage=version_preflight*category=PG_DUMP_VERSION_MISMATCH*') 'unparsable client version -> PG_DUMP_VERSION_MISMATCH'
+    Write-Host 'OK version preflight unparsable-client fail-closed'
 
     # 11) REAL Phase A artifacts + REAL manifest_check: untouched PASS, manifest tamper FAIL, dump corruption FAIL
     $realEnv = @{ PG_DUMP_PATH=$fakes.pg; PG_RESTORE_PATH=$fakes.pgr; PGHOST='h'; PGDATABASE='d'; PGUSER='u'; PGPASSWORD='p' }
