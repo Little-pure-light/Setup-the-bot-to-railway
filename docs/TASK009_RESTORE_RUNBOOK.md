@@ -126,8 +126,8 @@ workflow 只在 **default branch** 的 schedule/手動觸發；正式 backup 需
 2. **007B（另批，經 Codex 驗收 + 一竅哥批准合併 007A 後才做）**：見「Task009-007B 啟用前需逐項批准建立」。啟用前務必先 **手動 dry-run（enabled 尚未 true）** 驗證零連線/零上傳，再設 `TASK009_BACKUP_ENABLED=true`，於避開 03:17 的受控時間手動 `dry_run=false` 執行**一次**正式備份，驗證 job SUCCESS、R2 僅有 `.age`＋去敏 manifest/checksum、HEAD size/metadata checksum 一致；不下載、不解密、不 restore（隔離還原屬 Task009-008）。
 
 ## Task009-007B 啟用前需逐項批准建立（007A 本批不建立）
-- GitHub secrets：`TASK009_PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`（Supabase shared pooler session mode）、`TASK009_R2_ACCESS_KEY_ID/TASK009_R2_SECRET_ACCESS_KEY`（**僅限該 bucket 的 R/W token**）。
-- GitHub variables：`TASK009_AGE_RECIPIENT`（age **公鑰**，非秘密）、`TASK009_R2_BUCKET`、`TASK009_R2_ENDPOINT`、`TASK009_BACKUP_ENABLED=true`。
+- Environment `task009-backup` **secrets**：`TASK009_PGHOST/PGPORT/PGDATABASE/PGUSER/PGPASSWORD`（Supabase shared pooler session mode）、`TASK009_R2_ACCESS_KEY_ID/TASK009_R2_SECRET_ACCESS_KEY`（**僅限該 bucket 的 R/W token**）、`TASK009_AGE_RECIPIENT`（age **公鑰**，非登入密碼但改存 secret 以遮蔽 log）、`TASK009_R2_BUCKET`、`TASK009_R2_ENDPOINT`（bucket 名稱與含 account id 的完整 endpoint 改存 secret，避免寫入 Actions log）。
+- **Repository variable**：`TASK009_BACKUP_ENABLED=true`（僅此一項為 repository variable 布林開關；語意不變，供 gate 判定 run/skip）。
 - Cloudflare R2：私有專用 bucket（不綁 public domain）、30 天 lifecycle 保留。
 - age **私鑰**：一竅哥離線保存兩份，**絕不**進 GitHub/Railway/repo/協作資料夾。
 - GitHub Actions **失敗 email 通知**已開啟。
