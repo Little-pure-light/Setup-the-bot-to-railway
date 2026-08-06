@@ -57,6 +57,46 @@ function Get-DbErrorCategory([string] $stderr) {
     return 'DB_UNKNOWN'
 }
 
+# 去敏 Phase A backup 錯誤分類：輸入 Phase A（task009_backup.ps1 + 其呼叫的 pg_dump/pg_restore）captured stderr，
+# 只回傳固定 allowlist 類別，絕不回傳 raw stderr、host、user、database、project/account id、endpoint、password 或連線字串。
+# 折行不影響比對（移除所有空白後再比對；PowerShell 折行只插空白、不加連字號）。順序由最具體到最一般。
+function Get-PhaseAErrorCategory([string] $stderr) {
+    $s = ''
+    if ($null -ne $stderr) { $s = ([string]$stderr).ToLowerInvariant() }
+    if ([string]::IsNullOrWhiteSpace($s)) { return 'PHASEA_UNKNOWN' }
+    $c = [regex]::Replace($s, '\s', '')
+    # pg_dump/pg_restore client 與 server 版本不相容（先於一般 dump 失敗判別）
+    if ($c -match 'serverversionmismatch' -or $c -match 'abortingbecauseofserverversion' -or $c -match 'aborting.*serverversion' -or $c -match 'unsupportedversion') { return 'PG_DUMP_VERSION_MISMATCH' }
+    # schema 匯出失敗
+    if ($c -match 'schema匯出失敗' -or $c -match 'schemadumpfailed') { return 'PG_SCHEMA_DUMP_FAILED' }
+    # data 匯出失敗
+    if ($c -match 'data匯出失敗' -or $c -match 'datadumpfailed') { return 'PG_DATA_DUMP_FAILED' }
+    # pg_restore --list 驗證失敗（備份檔無法讀取）
+    if ($c -match '備份檔無法讀取' -or $c -match 'restoreverifyfailed') { return 'PG_RESTORE_VERIFY_FAILED' }
+    # 輸入/路徑/環境類（查詢或 dump 前的安全阻擋）
+    if ($c -match '格式不安全' -or $c -match '格式錯誤' -or $c -match '名稱不安全' -or $c -match '不存在或非目錄' -or $c -match '缺少必要連線環境變數' -or $c -match '拒絕使用' -or $c -match '僅允許' -or $c -match '必須' -or $c -match '無法建立唯一備份目錄' -or $c -match '預期備份檔不存在' -or $c -match '備份檔是空的' -or $c -match '不可為空') { return 'PHASEA_INPUT_OR_PATH_FAILED' }
+    return 'PHASEA_UNKNOWN'
+}
+
+# 解析 server major：server_version_num 為整數（如 170004 => 17、160014 => 16）；只回傳純數字 major 或 $null。
+function Get-MajorFromServerVersionNum([string] $raw) {
+    $v = ("$raw").Trim()
+    if ($v -notmatch '^\d+$') { return $null }
+    $n = [int64] $v
+    if ($n -le 0) { return $null }
+    return [int]([math]::Floor($n / 10000))
+}
+# 解析 pg_dump client major：如 "pg_dump (PostgreSQL) 16.14" => 16；只回傳純數字 major 或 $null。
+function Get-MajorFromPgDumpVersion([string] $raw) {
+    $v = ("$raw")
+    $m = [regex]::Match($v, '(?im)pg_dump.*?(\d+)(?:\.\d+)?\s*$')
+    if (-not $m.Success) { $m = [regex]::Match($v, '(\d+)\.\d+') }
+    if (-not $m.Success) { return $null }
+    $maj = [int] $m.Groups[1].Value
+    if ($maj -le 0) { return $null }
+    return $maj
+}
+
 # 固定 schema（強制恰為 public）
 $Schemas = @('public')
 
@@ -112,8 +152,10 @@ function Assert-CompleteRowCountSet([string[]] $Declared, $Allowlist) {
 }
 
 # 外部工具去敏執行：捕捉 stdout/stderr 至暫存檔，永不外流原始輸出；
-# 失敗只 throw「external_tool_error stage=<階段> exit=<碼>」。需要 stdout 者（psql/HEAD）由回傳值取得，但不記錄。
-function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [bool] $DbStage = $false) {
+# 失敗只 throw「external_tool_error stage=<階段> exit=<碼>[ category=<類別>]」。需要 stdout 者（psql/HEAD）由回傳值取得，但不記錄。
+# $Classify：'none'（預設，一律不讀 stderr）｜'db'（psql，套 Get-DbErrorCategory）｜'phasea'（Phase A backup，套 Get-PhaseAErrorCategory）。
+# 讀 stderr「僅供分類」，原文從不進入例外訊息或任何輸出。
+function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [string] $Classify = 'none') {
     $capBase = if ($script:runDir -and (Test-Path -LiteralPath $script:runDir)) { $script:runDir } else { [IO.Path]::GetTempPath() }
     $o = Join-Path $capBase ('.cap_o_' + [guid]::NewGuid().ToString('N'))
     $e = Join-Path $capBase ('.cap_e_' + [guid]::NewGuid().ToString('N'))
@@ -134,16 +176,18 @@ function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [b
     finally { $ErrorActionPreference = $prev }
     $out = ''
     if (Test-Path -LiteralPath $o) { $out = Get-Content -LiteralPath $o -Raw }
-    # DB 外部工具（psql）失敗時，讀取 stderr「僅供分類」，永不外流原文；非 DB 階段一律不讀 stderr。
+    # 僅在需要分類的階段讀取 stderr「僅供分類」，永不外流原文；'none' 階段一律不讀 stderr。
     $errText = ''
-    if ($DbStage -and (Test-Path -LiteralPath $e)) { $errText = Get-Content -LiteralPath $e -Raw }
+    if ($Classify -ne 'none' -and (Test-Path -LiteralPath $e)) { $errText = Get-Content -LiteralPath $e -Raw }
     Remove-Item -LiteralPath $o, $e -Force -ErrorAction SilentlyContinue
     if ($null -eq $code) { $code = 0 }
     if ($code -ne 0) {
-        if ($DbStage) {
+        if ($Classify -eq 'db') {
             # 只附加固定去敏類別；$errText 從不進入例外訊息或任何輸出。
-            $category = Get-DbErrorCategory $errText
-            throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, $category)
+            throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, (Get-DbErrorCategory $errText))
+        }
+        if ($Classify -eq 'phasea') {
+            throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, (Get-PhaseAErrorCategory $errText))
         }
         throw ("external_tool_error stage={0} exit={1}" -f $stage, $code)
     }
@@ -199,16 +243,32 @@ try {
     # 1) 固定四表 row counts（去敏：psql 輸出僅供整數解析，不記錄原始輸出）
     $rowCounts = [ordered]@{}
     foreach ($t in $RowCountAllowlist.Keys) {
-        $raw = Invoke-Captured $psql @('-t', '-A', '-v', 'ON_ERROR_STOP=1', '-c', $RowCountAllowlist[$t]) 'rowcount' $true
+        $raw = Invoke-Captured $psql @('-t', '-A', '-v', 'ON_ERROR_STOP=1', '-c', $RowCountAllowlist[$t]) 'rowcount' 'db'
         $val = ("$raw").Trim()
         if ($val -notmatch '^\d+$') { throw "row-count 非整數（去敏，不含原始輸出）：$t" }
         $rowCounts[$t] = [int64] $val
     }
     Log ("row-count 完成（{0} 表，去敏）" -f $rowCounts.Count)
 
+    # 1b) 安全版本前檢（fail-closed）：pg_dump(client) major 不得小於 server major，否則 pg_dump 會在 dump 時失敗。
+    #     以既有 DB session 查 server_version_num、以 pg_dump --version 取 client major；只解析/記錄純數字 major，
+    #     不輸出任何其他 DB 資訊、連線字串或命令列。任一 major 無法解析 => fail-closed（不猜測、不硬編版本）。
+    $srvRaw = Invoke-Captured $psql @('-t', '-A', '-v', 'ON_ERROR_STOP=1', '-c', 'show server_version_num;') 'version_preflight' 'db'
+    $serverMajor = Get-MajorFromServerVersionNum $srvRaw
+    $dumpVerRaw = Invoke-Captured $pgDump @('--version') 'version_preflight' 'phasea'
+    $clientMajor = Get-MajorFromPgDumpVersion $dumpVerRaw
+    if ($null -eq $serverMajor -or $null -eq $clientMajor) {
+        throw ("external_tool_error stage=version_preflight exit=1 category=PG_DUMP_VERSION_MISMATCH reason=version_unparsable")
+    }
+    if ($clientMajor -lt $serverMajor) {
+        throw ("external_tool_error stage=version_preflight exit=1 category=PG_DUMP_VERSION_MISMATCH client_major={0} server_major={1}" -f $clientMajor, $serverMajor)
+    }
+    Log ("版本前檢通過（client_major={0} >= server_major={1}）" -f $clientMajor, $serverMajor)
+
     # 2) 沿用 Phase A task009_backup.ps1 產生 schema_*/data_*/manifest（隔離 subprocess，輸出捕捉不外流）
-    $backupScript = Join-Path $PSScriptRoot 'task009_backup.ps1'
-    [void](Invoke-Captured $script:pwshExe @('-NoProfile', '-File', $backupScript, '-BackupRoot', $script:runDir, '-Label', $Label, '-RetentionCount', '9999', '-Schemas', 'public', '-EnvironmentLabel', 'production') 'phaseA_backup')
+    # 測試專用 seam：TASK009_PHASEA_BACKUP_PATH 僅供以 fake Phase A 驗證失敗分類；production 不設此變數。
+    $backupScript = if ($env:TASK009_PHASEA_BACKUP_PATH) { $env:TASK009_PHASEA_BACKUP_PATH } else { (Join-Path $PSScriptRoot 'task009_backup.ps1') }
+    [void](Invoke-Captured $script:pwshExe @('-NoProfile', '-File', $backupScript, '-BackupRoot', $script:runDir, '-Label', $Label, '-RetentionCount', '9999', '-Schemas', 'public', '-EnvironmentLabel', 'production') 'phaseA_backup' 'phasea')
 
     $backupDir = @(Get-ChildItem -LiteralPath $script:runDir -Directory -Filter ("{0}_*" -f $Label) | Sort-Object Name -Descending | Select-Object -First 1)
     if (-not $backupDir -or $backupDir.Count -eq 0) { throw 'Phase A backup 目錄不存在' }
