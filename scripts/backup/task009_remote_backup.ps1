@@ -27,6 +27,36 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 function Log([string] $m) { Write-Host "[t009-remote] $m" }
 
+# 去敏 DB 連線錯誤分類：輸入資料庫外部工具（psql）stderr 原文，只回傳固定 allowlist 類別。
+# 絕不回傳 raw stderr、host、user、database、project/account id、endpoint、password 或連線字串；
+# 回傳值只可能是下列固定常數之一，皆不含任何識別資訊。順序由最具體到最一般，先命中者勝。
+function Get-DbErrorCategory([string] $stderr) {
+    $s = ''
+    if ($null -ne $stderr) { $s = ([string]$stderr).ToLowerInvariant() }
+    if ([string]::IsNullOrWhiteSpace($s)) { return 'DB_UNKNOWN' }
+    # 原生工具 stderr 經 host 換行時可能於「字中」插入換行（例如 "Connec\ntion refused"），
+    # 且 PowerShell 折行只插入空白、不加連字號；故移除所有空白後再比對，確保片語不因折行漏判。
+    # 回傳值仍只為固定安全類別，$stderr 從不外流。
+    $c = [regex]::Replace($s, '\s', '')
+    # Supavisor/pooler 暫時封鎖（circuit breaker / max clients）——先於一般連線錯誤判別
+    if ($c -match 'circuitbreaker' -or $c -match 'maxclients' -or $c -match 'supavisor' -or $c -match 'toomanyconnections' -or $c -match 'serverisnotacceptingconnections') { return 'DB_POOLER_CIRCUIT_BREAKER' }
+    # 認證/使用者
+    if ($c -match 'passwordauthenticationfailed' -or $c -match 'authenticationfailed' -or $c -match 'nopasswordsupplied' -or $c -match 'role.*doesnotexist' -or $c -match 'tenantoruser.*notfound' -or $c -match 'tenantorusernotfound' -or $c -match 'pamauthentication') { return 'DB_AUTH_FAILED' }
+    # DNS 解析
+    if ($c -match 'couldnottranslatehostname' -or $c -match 'nameorservicenotknown' -or $c -match 'nodenamenorservname' -or $c -match 'temporaryfailureinnameresolution' -or $c -match 'couldnotresolvehost') { return 'DB_DNS_FAILED' }
+    # 逾時
+    if ($c -match 'timeoutexpired' -or $c -match 'connectiontimedout' -or $c -match 'timedout') { return 'DB_TIMEOUT' }
+    # 連線被拒 / 網路不可達（一般連線錯誤放在逾時之後）
+    if ($c -match 'connectionrefused' -or $c -match 'noroutetohost' -or $c -match 'networkisunreachable' -or $c -match 'couldnotconnecttoserver') { return 'DB_REFUSED' }
+    # 存取政策（pg_hba）——需在 SSL 之前，因為 pg_hba 訊息常同時含 "ssl off"
+    if ($c -match 'nopg_hba\.confentry' -or $c -match 'pg_hba' -or $c -match 'notallowedtoconnect') { return 'DB_ACCESS_POLICY' }
+    # SSL
+    if ($c -match 'ssl') { return 'DB_SSL_FAILED' }
+    # port 非法
+    if ($c -match 'invalidport' -or $c -match 'invalidintegervalue.*port' -or $c -match 'badport') { return 'DB_PORT_INVALID' }
+    return 'DB_UNKNOWN'
+}
+
 # 固定 schema（強制恰為 public）
 $Schemas = @('public')
 
@@ -83,7 +113,7 @@ function Assert-CompleteRowCountSet([string[]] $Declared, $Allowlist) {
 
 # 外部工具去敏執行：捕捉 stdout/stderr 至暫存檔，永不外流原始輸出；
 # 失敗只 throw「external_tool_error stage=<階段> exit=<碼>」。需要 stdout 者（psql/HEAD）由回傳值取得，但不記錄。
-function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage) {
+function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [bool] $DbStage = $false) {
     $capBase = if ($script:runDir -and (Test-Path -LiteralPath $script:runDir)) { $script:runDir } else { [IO.Path]::GetTempPath() }
     $o = Join-Path $capBase ('.cap_o_' + [guid]::NewGuid().ToString('N'))
     $e = Join-Path $capBase ('.cap_e_' + [guid]::NewGuid().ToString('N'))
@@ -104,9 +134,19 @@ function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage) {
     finally { $ErrorActionPreference = $prev }
     $out = ''
     if (Test-Path -LiteralPath $o) { $out = Get-Content -LiteralPath $o -Raw }
+    # DB 外部工具（psql）失敗時，讀取 stderr「僅供分類」，永不外流原文；非 DB 階段一律不讀 stderr。
+    $errText = ''
+    if ($DbStage -and (Test-Path -LiteralPath $e)) { $errText = Get-Content -LiteralPath $e -Raw }
     Remove-Item -LiteralPath $o, $e -Force -ErrorAction SilentlyContinue
     if ($null -eq $code) { $code = 0 }
-    if ($code -ne 0) { throw ("external_tool_error stage={0} exit={1}" -f $stage, $code) }
+    if ($code -ne 0) {
+        if ($DbStage) {
+            # 只附加固定去敏類別；$errText 從不進入例外訊息或任何輸出。
+            $category = Get-DbErrorCategory $errText
+            throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, $category)
+        }
+        throw ("external_tool_error stage={0} exit={1}" -f $stage, $code)
+    }
     return $out
 }
 
@@ -159,7 +199,7 @@ try {
     # 1) 固定四表 row counts（去敏：psql 輸出僅供整數解析，不記錄原始輸出）
     $rowCounts = [ordered]@{}
     foreach ($t in $RowCountAllowlist.Keys) {
-        $raw = Invoke-Captured $psql @('-t', '-A', '-v', 'ON_ERROR_STOP=1', '-c', $RowCountAllowlist[$t]) 'rowcount'
+        $raw = Invoke-Captured $psql @('-t', '-A', '-v', 'ON_ERROR_STOP=1', '-c', $RowCountAllowlist[$t]) 'rowcount' $true
         $val = ("$raw").Trim()
         if ($val -notmatch '^\d+$') { throw "row-count 非整數（去敏，不含原始輸出）：$t" }
         $rowCounts[$t] = [int64] $val

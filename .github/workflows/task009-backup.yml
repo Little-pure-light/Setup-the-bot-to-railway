@@ -120,11 +120,14 @@ jobs:
           PGUSER: ${{ secrets.TASK009_PGUSER }}
           PGPASSWORD: ${{ secrets.TASK009_PGPASSWORD }}
           PGSSLMODE: require
-          # age recipient PUBLIC key (non-secret variable). Private identity is NEVER in GitHub.
-          AGE_RECIPIENT: ${{ vars.TASK009_AGE_RECIPIENT }}
-          # Private R2 bucket + endpoint (variables) and bucket-scoped R/W token (Environment secrets)
-          R2_BUCKET: ${{ vars.TASK009_R2_BUCKET }}
-          R2_ENDPOINT: ${{ vars.TASK009_R2_ENDPOINT }}
+          # age recipient PUBLIC key. Not a login credential, but read from an Environment secret so the
+          # value is masked in Actions logs (project policy: no full endpoint/account identifiers in logs).
+          # The age PRIVATE identity is NEVER in GitHub.
+          AGE_RECIPIENT: ${{ secrets.TASK009_AGE_RECIPIENT }}
+          # Private R2 bucket + endpoint: Environment secrets so the bucket name and full endpoint (account id)
+          # are masked in Actions logs. Bucket-scoped R/W token also lives in Environment secrets.
+          R2_BUCKET: ${{ secrets.TASK009_R2_BUCKET }}
+          R2_ENDPOINT: ${{ secrets.TASK009_R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.TASK009_R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.TASK009_R2_SECRET_ACCESS_KEY }}
         run: >-

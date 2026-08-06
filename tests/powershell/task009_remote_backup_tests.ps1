@@ -31,6 +31,9 @@ exit 0
     Set-Content -LiteralPath (Join-Path $dir 'fake_psql.ps1') -Encoding UTF8 -Value @'
 if ($env:FAKE_QUERY_LOG) { ($args -join ' ') | Add-Content -LiteralPath $env:FAKE_QUERY_LOG }
 if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }
+if ($env:FAKE_PSQL_STDERR) { [Console]::Error.WriteLine($env:FAKE_PSQL_STDERR) }
+$exit = if ($env:FAKE_PSQL_EXIT) { [int]$env:FAKE_PSQL_EXIT } else { 0 }
+if ($exit -ne 0) { exit $exit }
 $c = if ($env:FAKE_PSQL_COUNT) { $env:FAKE_PSQL_COUNT } else { '42' }
 Write-Output $c
 exit 0
@@ -117,6 +120,7 @@ function Base-Env() {
         FAKE_PSQL_COUNT='42'; FAKE_AGE_MODE='ok'; FAKE_S3_MODE='ok'
         FAKE_S3_KEYS=$keys; FAKE_S3_STATE=(Join-Path $tmp 'size.txt'); FAKE_S3_META=(Join-Path $tmp 'meta.txt'); FAKE_S3_HEADLOG=$headlog
         FAKE_QUERY_LOG=$qlog; MANIFEST_CHECK_PATH=''; TASK009_ROWCOUNT_SET_OVERRIDE=''; FAKE_SENSITIVE=''
+        FAKE_PSQL_STDERR=''; FAKE_PSQL_EXIT=''
     }
 }
 $args0 = @('-WorkRoot',$runnerTemp,'-RunId','test')
@@ -213,6 +217,39 @@ try {
     Assert-True ($r.ExitCode -eq 0) 'positive with sensitive-marker tools should still succeed'
     Assert-True (-not ($r.Output -like "*$marker*")) 'desensitization: positive-path tool stderr must not leak'
     Write-Host 'OK desensitization positive: tool stderr captured, not leaked'
+
+    # 10b) DB error CLASSIFICATION: for each allowlist category, a fake psql fails with a representative
+    #      libpq stderr that embeds a sensitive marker (host/user/ref). The orchestrator output must contain
+    #      ONLY the safe category label, and NEVER the raw stderr / marker / 'psql: error:' text.
+    $cmarker = 'SENSITIVE_dbident_9f3a2b1c'
+    $classCases = @(
+        @{ cat='DB_AUTH_FAILED';            err=('psql: error: connection to server failed: FATAL:  password authentication failed for user "postgres.{0}"' -f $cmarker) },
+        @{ cat='DB_DNS_FAILED';             err=('psql: error: could not translate host name "{0}.pooler.supabase.com" to address: Name or service not known' -f $cmarker) },
+        @{ cat='DB_TIMEOUT';                err=('psql: error: connection to server at "{0}" (10.0.0.1), port 5432 failed: Connection timed out' -f $cmarker) },
+        @{ cat='DB_REFUSED';                err=('psql: error: connection to server at "{0}" (10.0.0.1), port 5432 failed: Connection refused' -f $cmarker) },
+        @{ cat='DB_ACCESS_POLICY';          err=('psql: error: connection failed: FATAL:  no pg_hba.conf entry for host "10.0.0.{0}", user "postgres", database "postgres", no encryption' -f $cmarker) },
+        @{ cat='DB_SSL_FAILED';             err=('psql: error: connection failed: SSL error: certificate verify failed (host {0})' -f $cmarker) },
+        @{ cat='DB_PORT_INVALID';           err=('psql: error: invalid port number: "{0}"' -f $cmarker) },
+        @{ cat='DB_POOLER_CIRCUIT_BREAKER'; err=('psql: error: server closed the connection: Supavisor circuit breaker is open for tenant {0}' -f $cmarker) },
+        @{ cat='DB_UNKNOWN';                err=('psql: error: an unexpected internal failure occurred near {0}' -f $cmarker) }
+    )
+    foreach ($case in $classCases) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+        $e.FAKE_PSQL_EXIT='2'; $e.FAKE_PSQL_STDERR=$case.err
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) ("classification {0}: run must fail" -f $case.cat)
+        Assert-True ($r.Output -like ("*category={0}*" -f $case.cat)) ("classification: expected category={0} in output" -f $case.cat)
+        Assert-True (-not ($r.Output -like "*$cmarker*")) ("classification {0}: sensitive marker must be absent" -f $case.cat)
+        Assert-True (-not ($r.Output -like '*psql: error:*')) ("classification {0}: raw stderr must be absent" -f $case.cat)
+        Write-Host ("OK classification {0}: only safe category, no raw stderr/marker" -f $case.cat)
+    }
+    # 10c) no OTHER allowlist category may leak in place of the expected one (mutual exclusivity spot-check)
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+    $e.FAKE_PSQL_EXIT='2'; $e.FAKE_PSQL_STDERR=('psql: error: could not translate host name "{0}" to address: Name or service not known' -f $cmarker)
+    $r = Run-Capture $Script $e $args0
+    Assert-True ($r.Output -like '*category=DB_DNS_FAILED*') 'DNS case must classify as DB_DNS_FAILED'
+    Assert-True (-not ($r.Output -like '*DB_AUTH_FAILED*')) 'DNS case must NOT be misclassified as auth'
+    Write-Host 'OK classification mutual-exclusivity spot-check'
 
     # 11) REAL Phase A artifacts + REAL manifest_check: untouched PASS, manifest tamper FAIL, dump corruption FAIL
     $realEnv = @{ PG_DUMP_PATH=$fakes.pg; PG_RESTORE_PATH=$fakes.pgr; PGHOST='h'; PGDATABASE='d'; PGUSER='u'; PGPASSWORD='p' }
