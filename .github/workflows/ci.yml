@@ -142,6 +142,23 @@ jobs:
           done
           echo "PG17_CLIENT_PATHS_VERIFIED"
 
+  task009-age-roundtrip:
+    name: Task009 age encrypt round-trip proof
+    runs-on: ubuntu-latest
+    # Real-runner proof that the age binary can parse a recipient and round-trip, using a
+    # TEMPORARY generated keypair only. Uses NO production recipient/secret/private key, no
+    # DB, no R2, no live gate. Isolates whether an age_encrypt live failure is code/binary
+    # (would fail here too) vs. the production recipient value (would pass here).
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install age (no secrets)
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y age
+      - name: Age encrypt/decrypt round-trip with a temporary keypair
+        run: bash ./scripts/backup/verify_age_roundtrip.sh
+
   security:
     name: Secret scan
     runs-on: ubuntu-latest
