@@ -107,6 +107,41 @@ jobs:
       - name: Run Task009 activation gate matrix tests
         run: bash ./tests/workflow/task009_gate_matrix_tests.sh
 
+  task009-pg17-client-contract:
+    name: Task009 PG17 client contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run PG17 client static contract tests
+        run: bash ./tests/workflow/task009_pg17_client_contract_tests.sh
+
+  task009-pg17-client-install:
+    name: Task009 PG17 client install proof
+    runs-on: ubuntu-latest
+    # Real-runner proof that the exact same installer the live workflow uses yields
+    # major-17 client binaries. Uses NO production secrets, DB, R2, age recipient, or gate.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install PostgreSQL 17 client (official PGDG; no secrets)
+        run: bash ./scripts/backup/install_pg17_client.sh
+      - name: Prove exported major-17 tool paths exist (no secrets/DB/R2)
+        run: |
+          set -euo pipefail
+          for var in PSQL_PATH PG_DUMP_PATH PG_RESTORE_PATH; do
+            path="${!var:-}"
+            [ -n "$path" ] || { echo "MISSING_EXPORT ${var}"; exit 1; }
+            case "$path" in
+              /usr/lib/postgresql/17/bin/*) : ;;
+              *) echo "UNEXPECTED_PATH ${var}"; exit 1 ;;
+            esac
+            [ -x "$path" ] || { echo "MISSING_BINARY ${var}"; exit 1; }
+            ver="$("$path" --version)"
+            major="$(printf '%s' "$ver" | grep -oE '[0-9]+' | head -n1)"
+            [ "$major" = "17" ] || { echo "BAD_MAJOR ${var}=${major}"; exit 1; }
+            echo "$ver"
+          done
+          echo "PG17_CLIENT_PATHS_VERIFIED"
+
   security:
     name: Secret scan
     runs-on: ubuntu-latest

@@ -83,11 +83,12 @@ jobs:
         if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.mode == 'live'
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client age tar
-          pg_dump --version
-          pg_restore --version
-          psql --version
+          # PostgreSQL 17 CLIENT via official PGDG (exact /usr/lib/postgresql/17/bin paths).
+          # Exports PSQL_PATH / PG_DUMP_PATH / PG_RESTORE_PATH to GITHUB_ENV for the live step below.
+          # Fail-closed: no fallback to Ubuntu's major 16. Reads no secrets.
+          bash ./scripts/backup/install_pg17_client.sh
+          # age + tar from the distro are fine (not version-sensitive here).
+          sudo apt-get install -y age tar
           age --version
           tar --version | head -n1
 
