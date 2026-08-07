@@ -94,21 +94,10 @@ jobs:
 
       - name: Install pinned AWS CLI v2 (live only; deterministic S3 client)
         if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.mode == 'live'
-        env:
-          AWSCLI_VERSION: "2.15.30"
-        run: |
-          set -euo pipefail
-          tmp="$(mktemp -d)"
-          curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWSCLI_VERSION}.zip" -o "$tmp/awscliv2.zip"
-          unzip -q "$tmp/awscliv2.zip" -d "$tmp"
-          sudo "$tmp/aws/install" --update
-          rm -rf "$tmp"
-          installed="$(aws --version 2>&1 || true)"
-          echo "$installed"
-          case "$installed" in
-            *"aws-cli/${AWSCLI_VERSION}"*) echo "AWS CLI pinned version ${AWSCLI_VERSION} verified" ;;
-            *) echo "ERROR: AWS CLI version mismatch (expected aws-cli/${AWSCLI_VERSION})"; exit 1 ;;
-          esac
+        # Single source of truth: version pinned in scripts/backup/awscli_version.txt,
+        # installed/verified by scripts/backup/install_awscli.sh (shared with the CI arg-shape
+        # proof so CI and live cannot drift). Reads no secrets.
+        run: bash ./scripts/backup/install_awscli.sh
 
       - name: Run live encrypted remote backup (enabled only)
         if: steps.gate.outputs.should_run == 'true' && steps.gate.outputs.mode == 'live'
