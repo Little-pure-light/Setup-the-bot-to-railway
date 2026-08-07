@@ -56,7 +56,7 @@ exit 0
     Set-Content -LiteralPath (Join-Path $dir 'fake_age.ps1') -Encoding UTF8 -Value @'
 $mode = if ($env:FAKE_AGE_MODE) { $env:FAKE_AGE_MODE } else { 'ok' }
 $out = $null; for ($i=0;$i -lt $args.Count;$i++){ if ($args[$i] -eq '-o'){ $out=$args[$i+1] } }
-if ($mode -eq 'fail') { if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }; [Console]::Error.WriteLine('age boom'); exit 1 }
+if ($mode -eq 'fail') { if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }; if ($env:FAKE_AGE_STDERR) { [Console]::Error.WriteLine($env:FAKE_AGE_STDERR) } else { [Console]::Error.WriteLine('age boom') }; exit 1 }
 if ($out) { if ($mode -eq 'empty') { Set-Content -LiteralPath $out -Value '' -NoNewline -Encoding ASCII } else { Set-Content -LiteralPath $out -Value ('AGE-ENC ' + [guid]::NewGuid()) -Encoding ASCII } }
 exit 0
 '@
@@ -137,7 +137,7 @@ function Base-Env() {
         FAKE_QUERY_LOG=$qlog; MANIFEST_CHECK_PATH=''; TASK009_ROWCOUNT_SET_OVERRIDE=''; FAKE_SENSITIVE=''
         FAKE_PSQL_STDERR=''; FAKE_PSQL_EXIT=''
         FAKE_SERVER_VERSION_NUM='160014'; FAKE_PGDUMP_VERSION='16.14'; FAKE_SVQ_EXIT=''; FAKE_SVQ_STDERR=''
-        TASK009_PHASEA_BACKUP_PATH=''
+        TASK009_PHASEA_BACKUP_PATH=''; FAKE_AGE_STDERR=''
     }
 }
 $args0 = @('-WorkRoot',$runnerTemp,'-RunId','test')
@@ -362,6 +362,55 @@ exit 1
     $rc = Run-Script $ManifestCheckScript @{} @('-BackupDir',$bd3)
     Assert-True ($rc -ne 0) 'real checker must FAIL on corrupted dump bytes'
     Write-Host 'OK real-checker FAIL on dump corruption'
+
+    # 12) AGE ERROR CLASSIFICATION: fake age fails with a representative stderr embedding a
+    #     sensitive marker; orchestrator output must contain ONLY the safe age category and
+    #     NEVER the raw stderr / marker / 'age: error:' text.
+    $amarker = 'SENSITIVE_agekey_5c1d9f0e'
+    $ageCases = @(
+        @{ cat='AGE_RECIPIENT_INVALID'; err=('age: error: parsing recipient "{0}": malformed X25519 recipient' -f $amarker) },
+        @{ cat='AGE_RECIPIENT_INVALID'; err=('age: error: no recipients specified {0}' -f $amarker) },
+        @{ cat='AGE_ENCRYPT_FAILED';    err=('age: error: failed to write header near {0}' -f $amarker) }
+    )
+    foreach ($case in $ageCases) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+        $e.FAKE_AGE_MODE='fail'; $e.FAKE_AGE_STDERR=$case.err
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) ("age classification {0}: run must fail" -f $case.cat)
+        Assert-True ($r.Output -like ("*stage=age_encrypt*category={0}*" -f $case.cat)) ("age classification: expected category={0}" -f $case.cat)
+        Assert-True (-not ($r.Output -like "*$amarker*")) ("age classification {0}: marker must be absent" -f $case.cat)
+        Assert-True (-not ($r.Output -like '*age: error:*')) ("age classification {0}: raw stderr must be absent" -f $case.cat)
+        Assert-True (-not (Test-Path -LiteralPath $keys)) ("age classification {0}: no upload on age failure" -f $case.cat)
+        Write-Host ("OK age classification {0}: only safe category, no raw stderr/marker" -f $case.cat)
+    }
+
+    # 13) AGE RECIPIENT PREFLIGHT — fail-closed IMMEDIATELY after Require-Env, BEFORE any
+    #     row-count / psql / version-preflight / Phase A / tar / age / upload work. Proves an
+    #     invalid recipient never triggers production DB reads or plaintext backup generation.
+    foreach ($bad in @('age1UPPER','age1abc ',"age1abc`n",'notanagekey','age2abc','ssh-dss AAAA')) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.AGE_RECIPIENT=$bad
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) 'invalid recipient must fail'
+        Assert-True ($r.Output -like '*stage=age_preflight*category=AGE_RECIPIENT_INVALID*') 'invalid recipient -> AGE_RECIPIENT_INVALID at age_preflight'
+        Assert-True (-not ($r.Output -like "*$bad*")) 'preflight must not echo the recipient value'
+        Assert-True (-not ($r.Output -like '*age: error:*')) 'preflight must not leak raw age stderr'
+        # ordering: no DB query, and none of the later progress markers appeared
+        Assert-True (-not (Test-Path -LiteralPath $qlog)) 'preflight fails before any psql query (empty query log)'
+        Assert-True (-not ($r.Output -like '*row-count 完成*')) 'no row-count-complete marker before preflight fail'
+        Assert-True (-not ($r.Output -like '*版本前檢通過*')) 'no version-preflight-pass marker before preflight fail'
+        Assert-True (-not ($r.Output -like '*manifest/checksum 驗證通過*')) 'no Phase A / manifest-check-success marker before preflight fail'
+        Assert-True (-not ($r.Output -like '*TASK009_REMOTE_BACKUP_OK*')) 'no backup-success marker'
+        Assert-True (-not (Test-Path -LiteralPath $headlog)) 'no HEAD verification when preflight fails'
+        Assert-True (-not (Test-Path -LiteralPath $keys)) 'no R2 upload call when recipient preflight fails'
+        Write-Host 'OK age recipient preflight rejects invalid shape (early, fail-closed, no DB, no echo)'
+    }
+    # valid recipient shapes pass the preflight (full pipeline succeeds)
+    foreach ($good in @('age1fakerecipient','ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITEST comment-ok')) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.AGE_RECIPIENT=$good
+        $rc = Run-Backup $e $args0
+        Assert-True ($rc -eq 0) ("valid recipient must pass preflight and pipeline: {0}" -f $good)
+        Write-Host 'OK age recipient preflight accepts valid shape'
+    }
 
     Write-Host ''
     Write-Host 'TASK009_REMOTE_BACKUP_TESTS_PASS'

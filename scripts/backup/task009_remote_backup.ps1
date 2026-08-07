@@ -97,6 +97,33 @@ function Get-MajorFromPgDumpVersion([string] $raw) {
     return $maj
 }
 
+# 去敏 age 加密錯誤分類：輸入 age 工具 captured stderr，只回傳固定 allowlist 類別。
+# 絕不回傳 raw stderr、recipient 公鑰、host、path、secret 或任何識別資訊。移除所有空白後比對。
+function Get-AgeErrorCategory([string] $stderr) {
+    $s = ''
+    if ($null -ne $stderr) { $s = ([string]$stderr).ToLowerInvariant() }
+    if ([string]::IsNullOrWhiteSpace($s)) { return 'AGE_UNKNOWN' }
+    $c = [regex]::Replace($s, '\s', '')
+    # recipient（公鑰）解析/格式問題——最可能的根因類別
+    if ($c -match 'parsingrecipient' -or $c -match 'norecipients' -or $c -match 'malformedrecipient' -or $c -match 'invalidrecipient' -or $c -match 'unknownrecipienttype' -or $c -match 'notavalidrecipient' -or $c -match 'failedtoparse' -or $c -match 'invalidkey' -or $c -match 'x25519') { return 'AGE_RECIPIENT_INVALID' }
+    # 其他 age 執行失敗（非空 stderr）
+    return 'AGE_ENCRYPT_FAILED'
+}
+
+# 安全 recipient preflight：在呼叫 age 前 fail-closed 檢查 AGE_RECIPIENT 形狀；絕不回顯 recipient 值。
+# allowlist：age X25519 recipient（age1…）或 ssh recipient（ssh-ed25519 / ssh-rsa …，可含註解）。
+# 空、含前後空白、含控制字元/換行、或不符任一形狀 → 丟固定去敏 AGE_RECIPIENT_INVALID（不含 recipient 值）。
+# 不修剪、不猜測、不改寫（production secret 若有隱形空白/換行即在此暴露為可定位的安全類別）。
+function Assert-AgeRecipientSafe([string] $recipient) {
+    $r = [string]$recipient
+    if ([string]::IsNullOrEmpty($r)) { throw 'external_tool_error stage=age_preflight exit=1 category=AGE_RECIPIENT_INVALID' }
+    if ($r -ne $r.Trim() -or $r -match '[\x00-\x1f]') { throw 'external_tool_error stage=age_preflight exit=1 category=AGE_RECIPIENT_INVALID' }
+    # 大小寫敏感（-cmatch）：age X25519 recipient 為 bech32 全小寫；ssh 型別前綴亦為小寫。
+    $isAge = $r -cmatch '^age1[0-9a-z]+$'
+    $isSsh = $r -cmatch '^ssh-ed25519 [A-Za-z0-9+/]+=*( .+)?$' -or $r -cmatch '^ssh-rsa [A-Za-z0-9+/]+=*( .+)?$'
+    if (-not ($isAge -or $isSsh)) { throw 'external_tool_error stage=age_preflight exit=1 category=AGE_RECIPIENT_INVALID' }
+}
+
 # 固定 schema（強制恰為 public）
 $Schemas = @('public')
 
@@ -153,7 +180,7 @@ function Assert-CompleteRowCountSet([string[]] $Declared, $Allowlist) {
 
 # 外部工具去敏執行：捕捉 stdout/stderr 至暫存檔，永不外流原始輸出；
 # 失敗只 throw「external_tool_error stage=<階段> exit=<碼>[ category=<類別>]」。需要 stdout 者（psql/HEAD）由回傳值取得，但不記錄。
-# $Classify：'none'（預設，一律不讀 stderr）｜'db'（psql，套 Get-DbErrorCategory）｜'phasea'（Phase A backup，套 Get-PhaseAErrorCategory）。
+# $Classify：'none'（預設，一律不讀 stderr）｜'db'（psql，套 Get-DbErrorCategory）｜'phasea'（Phase A，套 Get-PhaseAErrorCategory）｜'age'（age 加密，套 Get-AgeErrorCategory）。
 # 讀 stderr「僅供分類」，原文從不進入例外訊息或任何輸出。
 function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [string] $Classify = 'none') {
     $capBase = if ($script:runDir -and (Test-Path -LiteralPath $script:runDir)) { $script:runDir } else { [IO.Path]::GetTempPath() }
@@ -188,6 +215,9 @@ function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [s
         }
         if ($Classify -eq 'phasea') {
             throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, (Get-PhaseAErrorCategory $errText))
+        }
+        if ($Classify -eq 'age') {
+            throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, (Get-AgeErrorCategory $errText))
         }
         throw ("external_tool_error stage={0} exit={1}" -f $stage, $code)
     }
@@ -237,6 +267,9 @@ try {
     }
 
     Require-Env @('PGHOST', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'AGE_RECIPIENT', 'R2_BUCKET', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY')
+    # 安全 recipient preflight 提前至此：緊接 Require-Env 成功後、任何 row-count/psql/版本前檢/Phase A/tar/age 之前。
+    # 明顯無效的 recipient 會 fail-closed 立即停止，避免重複讀取正式 DB 或產生明文備份。fail-closed，不回顯 recipient 值。
+    Assert-AgeRecipientSafe $env:AGE_RECIPIENT
     if (-not $env:PGPORT) { $env:PGPORT = '5432' }
     $env:PGSSLMODE = 'require'
 
@@ -295,9 +328,10 @@ try {
     [void](Invoke-Captured 'tar' @('-cf', $tarPath, '-C', $backupDir, '.') 'tar')
     if (-not (Test-Path -LiteralPath $tarPath) -or (Get-Item -LiteralPath $tarPath).Length -le 0) { throw '打包失敗（tar 產物為空）' }
 
-    # 6) age 公鑰加密（輸出捕捉不外流）
+    # 6) age 公鑰加密（輸出捕捉不外流；失敗套 age allowlist 分類）
+    #    recipient 安全 preflight 已於 Require-Env 後、任何 DB/Phase A 之前完成（見上方 Assert-AgeRecipientSafe）。
     $agePath = Join-Path $script:runDir 'backup.tar.age'
-    [void](Invoke-Captured $age @('-r', $env:AGE_RECIPIENT, '-o', $agePath, $tarPath) 'age_encrypt')
+    [void](Invoke-Captured $age @('-r', $env:AGE_RECIPIENT, '-o', $agePath, $tarPath) 'age_encrypt' 'age')
     if (-not (Test-Path -LiteralPath $agePath -PathType Leaf) -or (Get-Item -LiteralPath $agePath).Length -le 0) { throw 'age 密文為空，拒絕上傳' }
 
     # 去敏 upload manifest 複本；刪除所有明文（dump 目錄 + tar）
