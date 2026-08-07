@@ -70,7 +70,7 @@ if ($args[0] -eq 's3' -and $args[1] -eq 'cp') {
     if ($env:FAKE_S3_STATE) { (Get-Item -LiteralPath $src).Length | Set-Content -LiteralPath $env:FAKE_S3_STATE }
     if ($meta -and $meta -like 'sha256=*' -and $env:FAKE_S3_META) { ($meta -replace '^sha256=','') | Set-Content -LiteralPath $env:FAKE_S3_META }
   }
-  if ($mode -eq 'upload_fail') { if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }; [Console]::Error.WriteLine('upload boom'); exit 1 }
+  if ($mode -eq 'upload_fail') { if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }; if ($env:FAKE_S3_STDERR) { [Console]::Error.WriteLine($env:FAKE_S3_STDERR) } else { [Console]::Error.WriteLine('upload boom') }; $xc = if ($env:FAKE_S3_EXIT) { [int]$env:FAKE_S3_EXIT } else { 1 }; exit $xc }
   exit 0
 }
 if ($args[0] -eq 's3api' -and $args[1] -eq 'head-object') {
@@ -131,13 +131,13 @@ function Base-Env() {
         RUNNER_TEMP = $runnerTemp
         PG_DUMP_PATH=$fakes.pg; PG_RESTORE_PATH=$fakes.pgr; PSQL_PATH=$fakes.psql; AGE_PATH=$fakes.age; S3_CLIENT_PATH=$fakes.aws
         PGHOST='h'; PGDATABASE='d'; PGUSER='u'; PGPASSWORD='p'
-        AGE_RECIPIENT='age1fakerecipient'; R2_BUCKET='b'; R2_ENDPOINT='https://example.invalid'; R2_ACCESS_KEY_ID='k'; R2_SECRET_ACCESS_KEY='s'
+        AGE_RECIPIENT='age1fakerecipient'; R2_BUCKET='ci-test-bucket'; R2_ENDPOINT='https://example.invalid'; R2_ACCESS_KEY_ID='k'; R2_SECRET_ACCESS_KEY='s'
         FAKE_PSQL_COUNT='42'; FAKE_AGE_MODE='ok'; FAKE_S3_MODE='ok'
         FAKE_S3_KEYS=$keys; FAKE_S3_STATE=(Join-Path $tmp 'size.txt'); FAKE_S3_META=(Join-Path $tmp 'meta.txt'); FAKE_S3_HEADLOG=$headlog
         FAKE_QUERY_LOG=$qlog; MANIFEST_CHECK_PATH=''; TASK009_ROWCOUNT_SET_OVERRIDE=''; FAKE_SENSITIVE=''
         FAKE_PSQL_STDERR=''; FAKE_PSQL_EXIT=''
         FAKE_SERVER_VERSION_NUM='160014'; FAKE_PGDUMP_VERSION='16.14'; FAKE_SVQ_EXIT=''; FAKE_SVQ_STDERR=''
-        TASK009_PHASEA_BACKUP_PATH=''; FAKE_AGE_STDERR=''
+        TASK009_PHASEA_BACKUP_PATH=''; FAKE_AGE_STDERR=''; FAKE_S3_STDERR=''; FAKE_S3_EXIT=''
     }
 }
 $args0 = @('-WorkRoot',$runnerTemp,'-RunId','test')
@@ -410,6 +410,64 @@ exit 1
         $rc = Run-Backup $e $args0
         Assert-True ($rc -eq 0) ("valid recipient must pass preflight and pipeline: {0}" -f $good)
         Write-Host 'OK age recipient preflight accepts valid shape'
+    }
+
+    # 14) AWS/S3 ERROR CLASSIFICATION: fake aws s3 cp fails with a representative stderr embedding a
+    #     sensitive marker; orchestrator output must contain ONLY the safe R2 category and NEVER the
+    #     raw stderr / marker. Also verifies AWS official exit-code fallback (252/253/254).
+    $s3marker = 'SENSITIVE_r2ident_3e9a7c15'
+    $s3cases = @(
+        @{ cat='R2_PARAMETER_INVALID';     exit='2';   err=('Parameter validation failed: Invalid bucket name "{0}"' -f $s3marker) },
+        @{ cat='R2_CONFIG_OR_CREDENTIALS'; exit='2';   err=('Unable to locate credentials near {0}' -f $s3marker) },
+        @{ cat='R2_SERVICE_REJECTED';      exit='2';   err=('An error occurred (AccessDenied) when calling PutObject {0}' -f $s3marker) },
+        @{ cat='R2_PARAMETER_INVALID';     exit='252'; err='' },   # exit-code fallback (252)
+        @{ cat='R2_CONFIG_OR_CREDENTIALS'; exit='253'; err='' },   # exit-code fallback (253)
+        @{ cat='R2_SERVICE_REJECTED';      exit='254'; err='' },   # exit-code fallback (254)
+        @{ cat='R2_UNKNOWN';               exit='1';   err='' }
+    )
+    foreach ($case in $s3cases) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+        $e.FAKE_S3_MODE='upload_fail'; $e.FAKE_S3_EXIT=$case.exit; $e.FAKE_S3_STDERR=$case.err
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) ("s3 classification {0}: run must fail" -f $case.cat)
+        Assert-True ($r.Output -like ("*stage=s3_upload*category={0}*" -f $case.cat)) ("s3 classification: expected category={0}" -f $case.cat)
+        if ($case.err) { Assert-True (-not ($r.Output -like "*$s3marker*")) ("s3 classification {0}: marker must be absent" -f $case.cat) }
+        Write-Host ("OK s3 classification {0}: only safe category, no raw stderr/marker" -f $case.cat)
+    }
+
+    # 15) R2 TARGET PREFLIGHT — fail-closed IMMEDIATELY after Require-Env, BEFORE any DB/Phase A/upload.
+    #     invalid bucket/endpoint shapes -> R2_PARAMETER_INVALID at stage=r2_preflight; value never echoed.
+    $r2bad = @(
+        @{ k='R2_BUCKET';   v='ab' },                 # too short (<3)
+        @{ k='R2_BUCKET';   v='ci-test-bucket ' },    # trailing space
+        @{ k='R2_BUCKET';   v="ci-test`nbucket" },    # newline
+        @{ k='R2_BUCKET';   v='CI-Test-Bucket' },     # uppercase
+        @{ k='R2_BUCKET';   v='ci..bucket' },         # consecutive dots
+        @{ k='R2_ENDPOINT'; v='http://example.invalid' },   # not https
+        @{ k='R2_ENDPOINT'; v='https://example.invalid ' }, # trailing space
+        @{ k='R2_ENDPOINT'; v="https://example.invalid`n" }, # newline
+        @{ k='R2_ENDPOINT'; v='ftp://example.invalid' }      # wrong scheme
+    )
+    foreach ($case in $r2bad) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e[$case.k]=$case.v
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) ("invalid {0} must fail" -f $case.k)
+        Assert-True ($r.Output -like '*stage=r2_preflight*category=R2_PARAMETER_INVALID*') ("invalid {0} -> R2_PARAMETER_INVALID at r2_preflight" -f $case.k)
+        Assert-True (-not ($r.Output -like ("*{0}*" -f $case.v))) 'r2 preflight must not echo the value'
+        Assert-True (-not (Test-Path -LiteralPath $qlog)) 'r2 preflight fails before any psql query (empty query log)'
+        Assert-True (-not ($r.Output -like '*row-count 完成*')) 'no row-count-complete marker before r2 preflight fail'
+        Assert-True (-not (Test-Path -LiteralPath $keys)) 'no R2 upload when r2 preflight fails'
+        Write-Host ("OK r2 target preflight rejects invalid {0} (early, fail-closed, no DB, no echo)" -f $case.k)
+    }
+    # valid bucket/endpoint shapes pass the preflight (full pipeline succeeds)
+    foreach ($case in @(
+        @{ b='xiaochenguang-task009-backups'; ep='https://acct.r2.cloudflarestorage.com' },
+        @{ b='ci.test.bucket'; ep='https://example.invalid:8443/path' }
+    )) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.R2_BUCKET=$case.b; $e.R2_ENDPOINT=$case.ep
+        $rc = Run-Backup $e $args0
+        Assert-True ($rc -eq 0) ("valid R2 target must pass preflight and pipeline: {0}" -f $case.b)
+        Write-Host 'OK r2 target preflight accepts valid shape'
     }
 
     Write-Host ''

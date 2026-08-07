@@ -124,6 +124,48 @@ function Assert-AgeRecipientSafe([string] $recipient) {
     if (-not ($isAge -or $isSsh)) { throw 'external_tool_error stage=age_preflight exit=1 category=AGE_RECIPIENT_INVALID' }
 }
 
+# 去敏 AWS CLI（s3/s3api）錯誤分類：輸入 aws 工具 captured stderr 與 exit code，只回傳固定 allowlist 類別。
+# 絕不回傳 raw stderr、bucket、endpoint、object key、token 或任何識別資訊。移除所有空白後比對。
+# AWS 官方 return code：252=參數/語法/參數值不合法；253=環境/設定/憑證問題；254=已送 request 但 service 回錯。
+function Get-AwsS3ErrorCategory([string] $stderr, [int] $exitCode) {
+    $s = ''
+    if ($null -ne $stderr) { $s = ([string]$stderr).ToLowerInvariant() }
+    $c = [regex]::Replace($s, '\s', '')
+    # 1) 參數/語法/參數值不合法（含 bucket/endpoint 形狀）——本專案首要懷疑
+    if ($c -match 'parametervalidation' -or $c -match 'invalidbucketname' -or $c -match 'invalidbucket' -or $c -match 'invalidendpoint' -or $c -match 'unknownoptions' -or $c -match 'invalidchoice' -or $c -match 'unknownparameter' -or $c -match 'argument.*required' -or $c -match 'usage:aws' -or $c -match 'invaliduri' -or $c -match 'invalids3uri') { return 'R2_PARAMETER_INVALID' }
+    # 2) 環境/設定/憑證
+    if ($c -match 'unabletolocatecredentials' -or $c -match 'nocredentials' -or $c -match 'credentialsnotfound' -or $c -match 'youmustspecifyaregion' -or $c -match 'invalidconfig' -or $c -match 'configparse' -or $c -match 'missingcredentials') { return 'R2_CONFIG_OR_CREDENTIALS' }
+    # 3) 已送 request、service 回錯
+    if ($c -match 'accessdenied' -or $c -match 'signaturedoesnotmatch' -or $c -match 'invalidaccesskeyid' -or $c -match 'nosuchbucket' -or $c -match 'anerroroccurred' -or $c -match 'whencalling' -or $c -match 'slowdown' -or $c -match 'requesttimeout' -or $c -match 'httpstatus' -or $c -match '\b40[0-9]\b' -or $c -match '\b50[0-9]\b') { return 'R2_SERVICE_REJECTED' }
+    # 4) stderr 不足以判斷時，退回 AWS 官方 exit code 語意
+    switch ($exitCode) {
+        252 { return 'R2_PARAMETER_INVALID' }
+        253 { return 'R2_CONFIG_OR_CREDENTIALS' }
+        254 { return 'R2_SERVICE_REJECTED' }
+        default { return 'R2_UNKNOWN' }
+    }
+}
+
+# 安全 R2 目標 preflight：在呼叫 aws／任何 DB 之前 fail-closed 檢查 R2_BUCKET 與 R2_ENDPOINT 形狀；
+# 絕不回顯值。空、含前後空白、含控制字元/換行、scheme 非 https、host 不合法、或 bucket 形狀不合法 →
+# 丟固定去敏 external_tool_error stage=r2_preflight exit=1 category=R2_PARAMETER_INVALID（不含值）。
+# 不修剪、不猜測、不改寫（production secret 若有隱形空白/換行或錯誤 scheme 即在此暴露為可定位安全類別）。
+function Assert-R2TargetSafe([string] $bucket, [string] $endpoint) {
+    $b = [string]$bucket
+    $e = [string]$endpoint
+    $bad = { throw 'external_tool_error stage=r2_preflight exit=1 category=R2_PARAMETER_INVALID' }
+    if ([string]::IsNullOrEmpty($b) -or [string]::IsNullOrEmpty($e)) { & $bad }
+    if ($b -ne $b.Trim() -or $b -match '[\x00-\x1f]') { & $bad }
+    if ($e -ne $e.Trim() -or $e -match '[\x00-\x1f]') { & $bad }
+    # endpoint：必須 https、單一 host（可含 port/path）；不含空白。
+    if ($e -notmatch '^https://[A-Za-z0-9][A-Za-z0-9.\-]*(:[0-9]{1,5})?(/[^\s]*)?$') { & $bad }
+    # bucket：S3/R2 名稱形狀（3-63、小寫英數與 . -、頭尾為英數、無連續點、非 IP 形狀）。
+    if ($b.Length -lt 3 -or $b.Length -gt 63) { & $bad }
+    if ($b -cnotmatch '^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$') { & $bad }
+    if ($b -match '\.\.' -or $b -match '\.-' -or $b -match '-\.') { & $bad }
+    if ($b -match '^[0-9]{1,3}(\.[0-9]{1,3}){3}$') { & $bad }
+}
+
 # 固定 schema（強制恰為 public）
 $Schemas = @('public')
 
@@ -180,7 +222,7 @@ function Assert-CompleteRowCountSet([string[]] $Declared, $Allowlist) {
 
 # 外部工具去敏執行：捕捉 stdout/stderr 至暫存檔，永不外流原始輸出；
 # 失敗只 throw「external_tool_error stage=<階段> exit=<碼>[ category=<類別>]」。需要 stdout 者（psql/HEAD）由回傳值取得，但不記錄。
-# $Classify：'none'（預設，一律不讀 stderr）｜'db'（psql，套 Get-DbErrorCategory）｜'phasea'（Phase A，套 Get-PhaseAErrorCategory）｜'age'（age 加密，套 Get-AgeErrorCategory）。
+# $Classify：'none'（一律不讀 stderr）｜'db'（psql）｜'phasea'（Phase A）｜'age'（age 加密）｜'s3aws'（aws s3/s3api，套 Get-AwsS3ErrorCategory）。
 # 讀 stderr「僅供分類」，原文從不進入例外訊息或任何輸出。
 function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [string] $Classify = 'none') {
     $capBase = if ($script:runDir -and (Test-Path -LiteralPath $script:runDir)) { $script:runDir } else { [IO.Path]::GetTempPath() }
@@ -218,6 +260,9 @@ function Invoke-Captured([string] $exe, [string[]] $argList, [string] $stage, [s
         }
         if ($Classify -eq 'age') {
             throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, (Get-AgeErrorCategory $errText))
+        }
+        if ($Classify -eq 's3aws') {
+            throw ("external_tool_error stage={0} exit={1} category={2}" -f $stage, $code, (Get-AwsS3ErrorCategory $errText $code))
         }
         throw ("external_tool_error stage={0} exit={1}" -f $stage, $code)
     }
@@ -267,9 +312,11 @@ try {
     }
 
     Require-Env @('PGHOST', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'AGE_RECIPIENT', 'R2_BUCKET', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY')
-    # 安全 recipient preflight 提前至此：緊接 Require-Env 成功後、任何 row-count/psql/版本前檢/Phase A/tar/age 之前。
-    # 明顯無效的 recipient 會 fail-closed 立即停止，避免重複讀取正式 DB 或產生明文備份。fail-closed，不回顯 recipient 值。
+    # 安全 recipient / R2 目標 preflight 提前至此：緊接 Require-Env 成功後、任何 row-count/psql/版本前檢/Phase A/tar/age/上傳 之前。
+    # 明顯無效的 recipient 或 R2 bucket/endpoint 形狀會 fail-closed 立即停止，避免重複讀取正式 DB 或產生明文備份。
+    # 皆 fail-closed、不回顯值。
     Assert-AgeRecipientSafe $env:AGE_RECIPIENT
+    Assert-R2TargetSafe $env:R2_BUCKET $env:R2_ENDPOINT
     if (-not $env:PGPORT) { $env:PGPORT = '5432' }
     $env:PGSSLMODE = 'require'
 
@@ -351,14 +398,14 @@ try {
     $env:AWS_SECRET_ACCESS_KEY = $env:R2_SECRET_ACCESS_KEY
     if (-not $env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION = 'auto' }
     $ageKey = "$keyBase/backup.tar.age"
-    [void](Invoke-Captured $s3 @('s3', 'cp', $agePath, ("s3://{0}/{1}" -f $env:R2_BUCKET, $ageKey), '--endpoint-url', $env:R2_ENDPOINT, '--metadata', ("sha256={0}" -f $ageSha), '--only-show-errors') 's3_upload')
+    [void](Invoke-Captured $s3 @('s3', 'cp', $agePath, ("s3://{0}/{1}" -f $env:R2_BUCKET, $ageKey), '--endpoint-url', $env:R2_ENDPOINT, '--metadata', ("sha256={0}" -f $ageSha), '--only-show-errors') 's3_upload' 's3aws')
     foreach ($pair in @(@($uploadManifest, "$keyBase/manifest.json"), @($sumsPath, "$keyBase/SHA256SUMS"))) {
-        [void](Invoke-Captured $s3 @('s3', 'cp', $pair[0], ("s3://{0}/{1}" -f $env:R2_BUCKET, $pair[1]), '--endpoint-url', $env:R2_ENDPOINT, '--only-show-errors') 's3_upload')
+        [void](Invoke-Captured $s3 @('s3', 'cp', $pair[0], ("s3://{0}/{1}" -f $env:R2_BUCKET, $pair[1]), '--endpoint-url', $env:R2_ENDPOINT, '--only-show-errors') 's3_upload' 's3aws')
     }
     Log ("上傳完成（去敏；.age size={0} bytes, sha256={1}...）" -f $ageSize, $ageSha.Substring(0, 12))
 
     # 8) HEAD 驗證（不下載/解密）：size 一致 + metadata checksum 一致（HEAD 輸出捕捉不外流）
-    $headJson = Invoke-Captured $s3 @('s3api', 'head-object', '--bucket', $env:R2_BUCKET, '--key', $ageKey, '--endpoint-url', $env:R2_ENDPOINT) 's3_head'
+    $headJson = Invoke-Captured $s3 @('s3api', 'head-object', '--bucket', $env:R2_BUCKET, '--key', $ageKey, '--endpoint-url', $env:R2_ENDPOINT) 's3_head' 's3aws'
     $head = $null
     try { $head = ("$headJson") | ConvertFrom-Json } catch { throw 'HEAD 回傳無法解析' }
     $remoteLen = $null; try { $remoteLen = [int64] $head.ContentLength } catch { throw 'HEAD 無 ContentLength' }

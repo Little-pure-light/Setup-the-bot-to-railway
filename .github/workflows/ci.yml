@@ -159,6 +159,17 @@ jobs:
       - name: Age encrypt/decrypt round-trip with a temporary keypair
         run: bash ./scripts/backup/verify_age_roundtrip.sh
 
+  task009-s3-argshape:
+    name: Task009 S3 argument-shape proof (zero network)
+    runs-on: ubuntu-latest
+    # Real AWS CLI v2, dummy bucket/endpoint, temp file, `s3 cp --dryrun`: proves the exact
+    # orchestrator CLI argument shape is syntactically valid with ZERO network. Uses NO
+    # production R2 bucket/endpoint/token/secret, no DB, no gate.
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prove S3 cp argument shape (no production R2/secret, no network)
+        run: bash ./scripts/backup/verify_s3_argshape.sh
+
   security:
     name: Secret scan
     runs-on: ubuntu-latest
