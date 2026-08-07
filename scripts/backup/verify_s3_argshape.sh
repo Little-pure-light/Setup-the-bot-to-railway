@@ -17,7 +17,17 @@ set -euo pipefail
 fail() { echo "S3_ARGSHAPE_FAILED reason=$1"; exit 1; }
 
 command -v aws >/dev/null 2>&1 || fail "aws_not_installed"
-aws --version   # product/version only — safe
+awsver="$(aws --version 2>&1)"
+echo "$awsver"   # product/version only — safe
+
+# Must run against the SAME pinned AWS CLI the live workflow uses (single source of truth),
+# so this proof genuinely covers the production parser, not a runner-preinstalled newer CLI.
+here="$(cd "$(dirname "$0")" && pwd)"
+PINNED="$(tr -d ' \t\r\n' < "${here}/awscli_version.txt")"
+case "$awsver" in
+  *"aws-cli/${PINNED}"*) : ;;
+  *) fail "aws_version_not_pinned_expected_${PINNED}" ;;
+esac
 
 # Non-production dummies. --dryrun short-circuits before any network/auth for `aws s3 cp`.
 export AWS_ACCESS_KEY_ID="dummy-ci-not-real"
@@ -37,10 +47,18 @@ aws s3 cp "$tmp/backup.tar.age" "s3://${BUCKET}/${PREFIX}/backup.tar.age" \
   --endpoint-url "$ENDPOINT" --metadata "sha256=deadbeefdeadbeefdeadbeefdeadbeef" \
   --only-show-errors --dryrun >/dev/null 2>&1 || fail "cp_age_metadata_shape_exit_$?"
 
-# B) exact manifest/SHA256SUMS upload shape (no metadata); also prove --dryrun is genuinely no-network
+# B) exact manifest upload shape (no metadata) — also prove --dryrun is genuinely no-network
 out="$(aws s3 cp "$tmp/backup.tar.age" "s3://${BUCKET}/${PREFIX}/manifest.json" \
-  --endpoint-url "$ENDPOINT" --dryrun 2>&1)" || fail "cp_plain_shape_exit_$?"
-case "$out" in
+  --endpoint-url "$ENDPOINT" --only-show-errors --dryrun 2>&1)" || fail "cp_manifest_shape_exit_$?"
+
+# C) exact SHA256SUMS upload shape (same as manifest: no metadata)
+aws s3 cp "$tmp/backup.tar.age" "s3://${BUCKET}/${PREFIX}/SHA256SUMS" \
+  --endpoint-url "$ENDPOINT" --only-show-errors --dryrun >/dev/null 2>&1 || fail "cp_sha256sums_shape_exit_$?"
+
+# prove --dryrun is genuinely no-network (marker shown when NOT using --only-show-errors)
+out2="$(aws s3 cp "$tmp/backup.tar.age" "s3://${BUCKET}/${PREFIX}/manifest.json" \
+  --endpoint-url "$ENDPOINT" --dryrun 2>&1)" || fail "cp_dryrun_marker_probe_exit_$?"
+case "$out2" in
   *"(dryrun)"*) : ;;
   *) fail "dryrun_marker_absent" ;;
 esac

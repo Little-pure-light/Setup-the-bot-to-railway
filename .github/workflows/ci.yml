@@ -162,12 +162,15 @@ jobs:
   task009-s3-argshape:
     name: Task009 S3 argument-shape proof (zero network)
     runs-on: ubuntu-latest
-    # Real AWS CLI v2, dummy bucket/endpoint, temp file, `s3 cp --dryrun`: proves the exact
-    # orchestrator CLI argument shape is syntactically valid with ZERO network. Uses NO
-    # production R2 bucket/endpoint/token/secret, no DB, no gate.
+    # Real AWS CLI v2 pinned to the SAME version the live workflow uses (shared installer +
+    # awscli_version.txt), dummy bucket/endpoint, temp file, `s3 cp --dryrun`: proves the exact
+    # orchestrator CLI argument shape is syntactically valid on the production CLI with ZERO
+    # network. Uses NO production R2 bucket/endpoint/token/secret, no DB, no gate.
     steps:
       - uses: actions/checkout@v4
-      - name: Prove S3 cp argument shape (no production R2/secret, no network)
+      - name: Install the pinned AWS CLI (same as live; no secrets)
+        run: bash ./scripts/backup/install_awscli.sh
+      - name: Prove S3 cp argument shape on the pinned CLI (no production R2/secret, no network)
         run: bash ./scripts/backup/verify_s3_argshape.sh
 
   security:
