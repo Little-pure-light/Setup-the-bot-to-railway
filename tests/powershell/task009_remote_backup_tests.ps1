@@ -384,17 +384,25 @@ exit 1
         Write-Host ("OK age classification {0}: only safe category, no raw stderr/marker" -f $case.cat)
     }
 
-    # 13) AGE RECIPIENT PREFLIGHT (fail-closed before age is invoked; never echoes recipient):
-    #     invalid recipient shapes -> AGE_RECIPIENT_INVALID at stage=age_preflight, no upload,
-    #     and age is never called (fake age would otherwise produce ciphertext).
+    # 13) AGE RECIPIENT PREFLIGHT — fail-closed IMMEDIATELY after Require-Env, BEFORE any
+    #     row-count / psql / version-preflight / Phase A / tar / age / upload work. Proves an
+    #     invalid recipient never triggers production DB reads or plaintext backup generation.
     foreach ($bad in @('age1UPPER','age1abc ',"age1abc`n",'notanagekey','age2abc','ssh-dss AAAA')) {
         Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH'); $e.AGE_RECIPIENT=$bad
         $r = Run-Capture $Script $e $args0
         Assert-True ($r.ExitCode -ne 0) 'invalid recipient must fail'
         Assert-True ($r.Output -like '*stage=age_preflight*category=AGE_RECIPIENT_INVALID*') 'invalid recipient -> AGE_RECIPIENT_INVALID at age_preflight'
         Assert-True (-not ($r.Output -like "*$bad*")) 'preflight must not echo the recipient value'
-        Assert-True (-not (Test-Path -LiteralPath $keys)) 'no upload when recipient preflight fails'
-        Write-Host 'OK age recipient preflight rejects invalid shape (fail-closed, no echo)'
+        Assert-True (-not ($r.Output -like '*age: error:*')) 'preflight must not leak raw age stderr'
+        # ordering: no DB query, and none of the later progress markers appeared
+        Assert-True (-not (Test-Path -LiteralPath $qlog)) 'preflight fails before any psql query (empty query log)'
+        Assert-True (-not ($r.Output -like '*row-count 完成*')) 'no row-count-complete marker before preflight fail'
+        Assert-True (-not ($r.Output -like '*版本前檢通過*')) 'no version-preflight-pass marker before preflight fail'
+        Assert-True (-not ($r.Output -like '*manifest/checksum 驗證通過*')) 'no Phase A / manifest-check-success marker before preflight fail'
+        Assert-True (-not ($r.Output -like '*TASK009_REMOTE_BACKUP_OK*')) 'no backup-success marker'
+        Assert-True (-not (Test-Path -LiteralPath $headlog)) 'no HEAD verification when preflight fails'
+        Assert-True (-not (Test-Path -LiteralPath $keys)) 'no R2 upload call when recipient preflight fails'
+        Write-Host 'OK age recipient preflight rejects invalid shape (early, fail-closed, no DB, no echo)'
     }
     # valid recipient shapes pass the preflight (full pipeline succeeds)
     foreach ($good in @('age1fakerecipient','ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITEST comment-ok')) {

@@ -267,6 +267,9 @@ try {
     }
 
     Require-Env @('PGHOST', 'PGDATABASE', 'PGUSER', 'PGPASSWORD', 'AGE_RECIPIENT', 'R2_BUCKET', 'R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY')
+    # 安全 recipient preflight 提前至此：緊接 Require-Env 成功後、任何 row-count/psql/版本前檢/Phase A/tar/age 之前。
+    # 明顯無效的 recipient 會 fail-closed 立即停止，避免重複讀取正式 DB 或產生明文備份。fail-closed，不回顯 recipient 值。
+    Assert-AgeRecipientSafe $env:AGE_RECIPIENT
     if (-not $env:PGPORT) { $env:PGPORT = '5432' }
     $env:PGSSLMODE = 'require'
 
@@ -326,8 +329,7 @@ try {
     if (-not (Test-Path -LiteralPath $tarPath) -or (Get-Item -LiteralPath $tarPath).Length -le 0) { throw '打包失敗（tar 產物為空）' }
 
     # 6) age 公鑰加密（輸出捕捉不外流；失敗套 age allowlist 分類）
-    #    先做安全 recipient preflight（fail-closed，不回顯 recipient 值），再呼叫 age。
-    Assert-AgeRecipientSafe $env:AGE_RECIPIENT
+    #    recipient 安全 preflight 已於 Require-Env 後、任何 DB/Phase A 之前完成（見上方 Assert-AgeRecipientSafe）。
     $agePath = Join-Path $script:runDir 'backup.tar.age'
     [void](Invoke-Captured $age @('-r', $env:AGE_RECIPIENT, '-o', $agePath, $tarPath) 'age_encrypt' 'age')
     if (-not (Test-Path -LiteralPath $agePath -PathType Leaf) -or (Get-Item -LiteralPath $agePath).Length -le 0) { throw 'age 密文為空，拒絕上傳' }
