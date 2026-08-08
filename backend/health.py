@@ -156,6 +156,19 @@ def readiness_payload(*, check_dns: Optional[bool] = None) -> Dict[str, Any]:
     else:
         services["supabase"] = "missing_url"
 
+    # 持久化狀態（去敏；資訊性欄位，不改變 status gating）：
+    # persistence = "volume"（data/ 掛在獨立持久卷）| "ephemeral"（暫時磁碟，重部署即失）| "unknown"。
+    # 讓 Gate 2「有沒有真的掛上卷」可被客觀驗證，避免假成功。
+    persistence_detail: Dict[str, Any] = {"mode": "unknown"}
+    try:
+        from backend.modules.persistence import persistence_status
+
+        persistence_detail = persistence_status(probe_write=False)
+        services["persistence"] = persistence_detail.get("mode", "unknown")
+    except Exception as e:
+        services["persistence"] = "unknown"
+        persistence_detail = {"mode": "unknown", "error_type": type(e).__name__}
+
     critical_missing = [
         k
         for k, v in {
@@ -183,10 +196,12 @@ def readiness_payload(*, check_dns: Optional[bool] = None) -> Dict[str, Any]:
         **_version_fields(),
         "services": services,
         "redis_detail": redis_detail,
+        "persistence": persistence_detail,
         "notes": {
             "supabase": "config_and_optional_dns_only_not_db_probe",
             "redis": "short_ping_with_mode_real_mock_none",
             "openai": "key_presence_only_no_api_call",
+            "persistence": "volume_ephemeral_unknown_via_mount_detection_informational_only",
         },
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
