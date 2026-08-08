@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 import datetime
+import hmac
 import logging
 import os
 
@@ -239,7 +240,8 @@ async def api_auth_middleware(request: Request, call_next):
         auth_header = request.headers.get("Authorization", "")
         token = auth_header.replace("Bearer ", "").strip() if auth_header else ""
         allowed = False
-        if token and token == API_SECRET:
+        # 常數時間比對，避免以回應時間差旁路推測 API_SECRET（值本身不記錄、不回顯）。
+        if token and hmac.compare_digest(token.encode("utf-8"), API_SECRET.encode("utf-8")):
             allowed = True
         elif token:
             # 允許已登入的 Supabase 使用者 JWT
