@@ -70,7 +70,18 @@ if ($args[0] -eq 's3' -and $args[1] -eq 'cp') {
     if ($env:FAKE_S3_STATE) { (Get-Item -LiteralPath $src).Length | Set-Content -LiteralPath $env:FAKE_S3_STATE }
     if ($meta -and $meta -like 'sha256=*' -and $env:FAKE_S3_META) { ($meta -replace '^sha256=','') | Set-Content -LiteralPath $env:FAKE_S3_META }
   }
-  if ($mode -eq 'upload_fail') { if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }; if ($env:FAKE_S3_STDERR) { [Console]::Error.WriteLine($env:FAKE_S3_STDERR) } else { [Console]::Error.WriteLine('upload boom') }; $xc = if ($env:FAKE_S3_EXIT) { [int]$env:FAKE_S3_EXIT } else { 1 }; exit $xc }
+  if ($mode -eq 'upload_fail') {
+    # FAKE_S3_FAIL_ON targets a single object so upload sequencing can be tested per fixed stage;
+    # default 'age' fails the first cp (preserves prior behaviour: age is uploaded first).
+    $target = if ($env:FAKE_S3_FAIL_ON) { $env:FAKE_S3_FAIL_ON } else { 'age' }
+    $isTarget = switch ($target) {
+      'age'       { $dst -like '*backup.tar.age' }
+      'manifest'  { $dst -like '*/manifest.json' }
+      'checksums' { $dst -like '*/SHA256SUMS' }
+      default     { $true }
+    }
+    if ($isTarget) { if ($env:FAKE_SENSITIVE) { [Console]::Error.WriteLine($env:FAKE_SENSITIVE) }; if ($env:FAKE_S3_STDERR) { [Console]::Error.WriteLine($env:FAKE_S3_STDERR) } else { [Console]::Error.WriteLine('upload boom') }; $xc = if ($env:FAKE_S3_EXIT) { [int]$env:FAKE_S3_EXIT } else { 1 }; exit $xc }
+  }
   exit 0
 }
 if ($args[0] -eq 's3api' -and $args[1] -eq 'head-object') {
@@ -137,7 +148,7 @@ function Base-Env() {
         FAKE_QUERY_LOG=$qlog; MANIFEST_CHECK_PATH=''; TASK009_ROWCOUNT_SET_OVERRIDE=''; FAKE_SENSITIVE=''
         FAKE_PSQL_STDERR=''; FAKE_PSQL_EXIT=''
         FAKE_SERVER_VERSION_NUM='160014'; FAKE_PGDUMP_VERSION='16.14'; FAKE_SVQ_EXIT=''; FAKE_SVQ_STDERR=''
-        TASK009_PHASEA_BACKUP_PATH=''; FAKE_AGE_STDERR=''; FAKE_S3_STDERR=''; FAKE_S3_EXIT=''
+        TASK009_PHASEA_BACKUP_PATH=''; FAKE_AGE_STDERR=''; FAKE_S3_STDERR=''; FAKE_S3_EXIT=''; FAKE_S3_FAIL_ON=''
     }
 }
 $args0 = @('-WorkRoot',$runnerTemp,'-RunId','test')
@@ -412,27 +423,89 @@ exit 1
         Write-Host 'OK age recipient preflight accepts valid shape'
     }
 
-    # 14) AWS/S3 ERROR CLASSIFICATION: fake aws s3 cp fails with a representative stderr embedding a
-    #     sensitive marker; orchestrator output must contain ONLY the safe R2 category and NEVER the
-    #     raw stderr / marker. Also verifies AWS official exit-code fallback (252/253/254).
+    # 14) AWS/S3 ERROR CLASSIFICATION: fake aws s3 cp fails with a representative stderr; orchestrator
+    #     output must contain ONLY the safe R2 (sub)category and NEVER the raw stderr / marker. Covers the
+    #     refined service-rejection subcategories (AccessDenied / SignatureDoesNotMatch / InvalidAccessKeyId /
+    #     NoSuchBucket / SlowDown / RequestTimeout / 4xx / 5xx / generic) plus client parameter/credentials
+    #     cases and AWS official exit-code fallback (252/253/254) and empty->R2_UNKNOWN. The first upload is
+    #     backup.tar.age, so the failing stage is the fixed s3_upload_age.
     $s3marker = 'SENSITIVE_r2ident_3e9a7c15'
     $s3cases = @(
         @{ cat='R2_PARAMETER_INVALID';     exit='2';   err=('Parameter validation failed: Invalid bucket name "{0}"' -f $s3marker) },
         @{ cat='R2_CONFIG_OR_CREDENTIALS'; exit='2';   err=('Unable to locate credentials near {0}' -f $s3marker) },
-        @{ cat='R2_SERVICE_REJECTED';      exit='2';   err=('An error occurred (AccessDenied) when calling PutObject {0}' -f $s3marker) },
+        @{ cat='R2_ACCESS_DENIED';         exit='1';   err=('An error occurred (AccessDenied) when calling the PutObject operation: Access Denied {0}' -f $s3marker) },
+        @{ cat='R2_SIGNATURE_MISMATCH';    exit='1';   err=('An error occurred (SignatureDoesNotMatch) when calling the PutObject operation: The request signature we calculated does not match the signature you provided. Check your key and signing method. {0}' -f $s3marker) },
+        @{ cat='R2_INVALID_ACCESS_KEY';    exit='1';   err=('An error occurred (InvalidAccessKeyId) when calling the PutObject operation: The AWS Access Key Id you provided does not exist in our records. {0}' -f $s3marker) },
+        @{ cat='R2_BUCKET_NOT_FOUND';      exit='1';   err=('An error occurred (NoSuchBucket) when calling the PutObject operation: The specified bucket does not exist. {0}' -f $s3marker) },
+        @{ cat='R2_RATE_LIMITED';          exit='1';   err=('An error occurred (SlowDown) when calling the PutObject operation (reached max retries: 2): Please reduce your request rate. {0}' -f $s3marker) },
+        @{ cat='R2_REQUEST_TIMEOUT';       exit='1';   err=('An error occurred (RequestTimeout) when calling the PutObject operation: Your socket connection to the server was not read from or written to within the timeout period. {0}' -f $s3marker) },
+        @{ cat='R2_SERVICE_4XX';           exit='1';   err=('An error occurred (400) when calling the PutObject operation: Bad Request {0}' -f $s3marker) },
+        @{ cat='R2_SERVICE_5XX';           exit='1';   err=('An error occurred (500) when calling the PutObject operation (reached max retries: 4): We encountered an internal error. Please try again. {0}' -f $s3marker) },
+        @{ cat='R2_SERVICE_REJECTED';      exit='1';   err=('An error occurred (UnmappedServiceThing) when calling the PutObject operation: unexpected service response {0}' -f $s3marker) },
         @{ cat='R2_PARAMETER_INVALID';     exit='252'; err='' },   # exit-code fallback (252)
         @{ cat='R2_CONFIG_OR_CREDENTIALS'; exit='253'; err='' },   # exit-code fallback (253)
         @{ cat='R2_SERVICE_REJECTED';      exit='254'; err='' },   # exit-code fallback (254)
-        @{ cat='R2_UNKNOWN';               exit='1';   err='' }
+        @{ cat='R2_UNKNOWN';               exit='1';   err='' }     # empty/unrecognized stderr + exit 1
     )
     foreach ($case in $s3cases) {
         Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
         $e.FAKE_S3_MODE='upload_fail'; $e.FAKE_S3_EXIT=$case.exit; $e.FAKE_S3_STDERR=$case.err
         $r = Run-Capture $Script $e $args0
         Assert-True ($r.ExitCode -ne 0) ("s3 classification {0}: run must fail" -f $case.cat)
-        Assert-True ($r.Output -like ("*stage=s3_upload*category={0}*" -f $case.cat)) ("s3 classification: expected category={0}" -f $case.cat)
+        Assert-True ($r.Output -like ("*stage=s3_upload_age*category={0}*" -f $case.cat)) ("s3 classification: expected stage=s3_upload_age category={0}" -f $case.cat)
         if ($case.err) { Assert-True (-not ($r.Output -like "*$s3marker*")) ("s3 classification {0}: marker must be absent" -f $case.cat) }
         Write-Host ("OK s3 classification {0}: only safe category, no raw stderr/marker" -f $case.cat)
+    }
+
+    # 14a) SUBCATEGORY MUTUAL-EXCLUSIVITY — a specific service code must NOT be swallowed by the generic
+    #      "An error occurred ... when calling ..." envelope that surrounds every AWS service error.
+    foreach ($case in @(
+        @{ cat='R2_ACCESS_DENIED';      err='An error occurred (AccessDenied) when calling the PutObject operation: Access Denied' },
+        @{ cat='R2_SIGNATURE_MISMATCH'; err='An error occurred (SignatureDoesNotMatch) when calling the PutObject operation: signature mismatch' },
+        @{ cat='R2_INVALID_ACCESS_KEY'; err='An error occurred (InvalidAccessKeyId) when calling the PutObject operation: key id unknown' },
+        @{ cat='R2_BUCKET_NOT_FOUND';   err='An error occurred (NoSuchBucket) when calling the PutObject operation: bucket missing' },
+        @{ cat='R2_RATE_LIMITED';       err='An error occurred (SlowDown) when calling the PutObject operation: slow down' }
+    )) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+        $e.FAKE_S3_MODE='upload_fail'; $e.FAKE_S3_EXIT='1'; $e.FAKE_S3_STDERR=$case.err
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.Output -like ("*category={0}*" -f $case.cat)) ("subcategory precedence: expected {0}" -f $case.cat)
+        Assert-True (-not ($r.Output -like '*category=R2_SERVICE_REJECTED*')) ("generic envelope must not swallow {0}" -f $case.cat)
+        Write-Host ("OK s3 subcategory precedence {0}: specific code wins over generic envelope" -f $case.cat)
+    }
+
+    # 14b) HOSTILE MARKERS — captured stderr resembles endpoint / bucket / object key / access key id /
+    #      signature; the public terminal output must remain exactly the fixed contract and leak none of them.
+    $hostile = 'https://SECRETACCT.r2.cloudflarestorage.com bucket=super-secret-bucket key=xcg/pg/public/20260101_000000Z-999/backup.tar.age AKIAHOSTILEKEY0001 Signature=ABCDEFhostilesig=='
+    Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+    $e.FAKE_S3_MODE='upload_fail'; $e.FAKE_S3_EXIT='1'; $e.FAKE_S3_STDERR=('An error occurred (AccessDenied) when calling the PutObject operation: {0}' -f $hostile)
+    $r = Run-Capture $Script $e $args0
+    Assert-True ($r.ExitCode -ne 0) 'hostile-marker case must fail'
+    Assert-True ($r.Output -like '*stage=s3_upload_age*category=R2_ACCESS_DENIED*') 'hostile-marker case still classifies to fixed safe category'
+    foreach ($frag in @('SECRETACCT','r2.cloudflarestorage.com','super-secret-bucket','backup.tar.age','AKIAHOSTILEKEY0001','hostilesig','xcg/pg/public')) {
+        Assert-True (-not ($r.Output -like "*$frag*")) ("hostile marker '$frag' must never appear in public output")
+    }
+    Write-Host 'OK s3 hostile-marker: endpoint/bucket/object-key/access-key/signature never leaked'
+
+    # 14c) UPLOAD SEQUENCING — three distinct fixed upload stages (age -> manifest -> checksums). Failing one
+    #      proves the exact fixed stage AND that later uploads + HEAD are never reached.
+    foreach ($case in @(
+        @{ on='age';       stage='s3_upload_age';       absent=@('*/manifest.json','*/SHA256SUMS') },
+        @{ on='manifest';  stage='s3_upload_manifest';  absent=@('*/SHA256SUMS') },
+        @{ on='checksums'; stage='s3_upload_checksums'; absent=@() }
+    )) {
+        Reset; $e = Base-Env; $e.Remove('MANIFEST_CHECK_PATH')
+        $e.FAKE_S3_MODE='upload_fail'; $e.FAKE_S3_FAIL_ON=$case.on; $e.FAKE_S3_EXIT='1'
+        $r = Run-Capture $Script $e $args0
+        Assert-True ($r.ExitCode -ne 0) ("upload sequencing {0}: run must fail" -f $case.on)
+        Assert-True ($r.Output -like ("*stage={0}*" -f $case.stage)) ("upload sequencing: expected fixed stage={0}" -f $case.stage)
+        $k = @(Get-Content -LiteralPath $keys -ErrorAction SilentlyContinue)
+        foreach ($pat in $case.absent) {
+            Assert-True (@($k | Where-Object { $_ -like $pat }).Count -eq 0) ("upload sequencing {0}: later upload '$pat' must NOT be reached" -f $case.on)
+        }
+        Assert-True (-not (Test-Path -LiteralPath $headlog)) ("upload sequencing {0}: HEAD must NOT be reached after upload failure" -f $case.on)
+        Assert-True (-not ($r.Output -like '*TASK009_REMOTE_BACKUP_OK*')) ("upload sequencing {0}: no backup-success marker" -f $case.on)
+        Write-Host ("OK upload sequencing {0}: fixed stage {1}, later uploads + HEAD not reached" -f $case.on, $case.stage)
     }
 
     # 15) R2 TARGET PREFLIGHT — fail-closed IMMEDIATELY after Require-Env, BEFORE any DB/Phase A/upload.

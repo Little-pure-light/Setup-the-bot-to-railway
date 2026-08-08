@@ -125,18 +125,36 @@ function Assert-AgeRecipientSafe([string] $recipient) {
 }
 
 # 去敏 AWS CLI（s3/s3api）錯誤分類：輸入 aws 工具 captured stderr 與 exit code，只回傳固定 allowlist 類別。
-# 絕不回傳 raw stderr、bucket、endpoint、object key、token 或任何識別資訊。移除所有空白後比對。
+# 絕不回傳 raw stderr、bucket、endpoint、object key、token、signature、account id 或任何識別資訊。移除所有空白後比對。
 # AWS 官方 return code：252=參數/語法/參數值不合法；253=環境/設定/憑證問題；254=已送 request 但 service 回錯。
+# 規則由「最具體」到「最一般」：service 端具體錯誤碼（AccessDenied / SignatureDoesNotMatch / InvalidAccessKeyId /
+# NoSuchBucket / SlowDown / RequestTimeout / 4xx / 5xx）必須先於一般 service 片語（"An error occurred ... when calling ..."），
+# 一般片語只作為 service 回應的 fallback（R2_SERVICE_REJECTED）；client 端參數/設定問題仍優先於所有 service 判別。
 function Get-AwsS3ErrorCategory([string] $stderr, [int] $exitCode) {
     $s = ''
     if ($null -ne $stderr) { $s = ([string]$stderr).ToLowerInvariant() }
     $c = [regex]::Replace($s, '\s', '')
-    # 1) 參數/語法/參數值不合法（含 bucket/endpoint 形狀）——本專案首要懷疑
+    # 1) client 端：參數/語法/參數值不合法（含 bucket/endpoint 形狀）——先於任何 service 判別
     if ($c -match 'parametervalidation' -or $c -match 'invalidbucketname' -or $c -match 'invalidbucket' -or $c -match 'invalidendpoint' -or $c -match 'unknownoptions' -or $c -match 'invalidchoice' -or $c -match 'unknownparameter' -or $c -match 'argument.*required' -or $c -match 'usage:aws' -or $c -match 'invaliduri' -or $c -match 'invalids3uri') { return 'R2_PARAMETER_INVALID' }
-    # 2) 環境/設定/憑證
+    # 2) client 端：環境/設定/憑證缺漏（尚未送出 request）
     if ($c -match 'unabletolocatecredentials' -or $c -match 'nocredentials' -or $c -match 'credentialsnotfound' -or $c -match 'youmustspecifyaregion' -or $c -match 'invalidconfig' -or $c -match 'configparse' -or $c -match 'missingcredentials') { return 'R2_CONFIG_OR_CREDENTIALS' }
-    # 3) 已送 request、service 回錯
-    if ($c -match 'accessdenied' -or $c -match 'signaturedoesnotmatch' -or $c -match 'invalidaccesskeyid' -or $c -match 'nosuchbucket' -or $c -match 'anerroroccurred' -or $c -match 'whencalling' -or $c -match 'slowdown' -or $c -match 'requesttimeout' -or $c -match 'httpstatus' -or $c -match '\b40[0-9]\b' -or $c -match '\b50[0-9]\b') { return 'R2_SERVICE_REJECTED' }
+    # 3) service 端已回覆——細分類，最具體先判（一般片語不得吞掉具體碼）
+    #   3a) 憑證/簽章（request 已達 service 才會回這些）
+    if ($c -match 'invalidaccesskeyid') { return 'R2_INVALID_ACCESS_KEY' }
+    if ($c -match 'signaturedoesnotmatch') { return 'R2_SIGNATURE_MISMATCH' }
+    if ($c -match 'accessdenied' -or $c -match 'allaccessdisabled' -or $c -match 'forbidden' -or $c -match '\(403\)' -or $c -match '\b403\b') { return 'R2_ACCESS_DENIED' }
+    #   3b) 目標 bucket 不存在（service 回覆，非 client 形狀）
+    if ($c -match 'nosuchbucket') { return 'R2_BUCKET_NOT_FOUND' }
+    #   3c) 節流/限速
+    if ($c -match 'slowdown' -or $c -match 'toomanyrequests' -or $c -match 'requestlimitexceeded' -or $c -match 'ratelimit' -or $c -match '\(429\)' -or $c -match '\b429\b') { return 'R2_RATE_LIMITED' }
+    #   3d) 請求逾時（service 端）
+    if ($c -match 'requesttimeout' -or $c -match '\(408\)' -or $c -match '\b408\b') { return 'R2_REQUEST_TIMEOUT' }
+    #   3e) 一般 5xx（server 端錯誤）
+    if ($c -match 'internalerror' -or $c -match 'serviceunavailable' -or $c -match 'servererror' -or $c -match 'httpstatuscode:50[0-9]' -or $c -match '\(50[0-9]\)' -or $c -match '\b50[0-9]\b') { return 'R2_SERVICE_5XX' }
+    #   3f) 一般 4xx（client 端請求錯誤，未落入上述具體者）
+    if ($c -match 'badrequest' -or $c -match 'entitytoolarge' -or $c -match 'malformedxml' -or $c -match 'httpstatuscode:40[0-9]' -or $c -match '\(40[0-9]\)' -or $c -match '\b40[0-9]\b') { return 'R2_SERVICE_4XX' }
+    #   3g) 一般 service 回應（fallback；具體碼已於上方處理）
+    if ($c -match 'anerroroccurred' -or $c -match 'whencalling' -or $c -match 'httpstatus') { return 'R2_SERVICE_REJECTED' }
     # 4) stderr 不足以判斷時，退回 AWS 官方 exit code 語意
     switch ($exitCode) {
         252 { return 'R2_PARAMETER_INVALID' }
@@ -397,11 +415,12 @@ try {
     $env:AWS_ACCESS_KEY_ID = $env:R2_ACCESS_KEY_ID
     $env:AWS_SECRET_ACCESS_KEY = $env:R2_SECRET_ACCESS_KEY
     if (-not $env:AWS_DEFAULT_REGION) { $env:AWS_DEFAULT_REGION = 'auto' }
+    # 三個上傳各用固定、非敏感的獨立階段名，讓後續證據能辨識「失敗前完成了幾個上傳」而不洩漏 object key。
+    # 順序固定：age -> manifest -> checksums；任一失敗即 throw，後續上傳與 HEAD 皆不會執行。
     $ageKey = "$keyBase/backup.tar.age"
-    [void](Invoke-Captured $s3 @('s3', 'cp', $agePath, ("s3://{0}/{1}" -f $env:R2_BUCKET, $ageKey), '--endpoint-url', $env:R2_ENDPOINT, '--metadata', ("sha256={0}" -f $ageSha), '--only-show-errors') 's3_upload' 's3aws')
-    foreach ($pair in @(@($uploadManifest, "$keyBase/manifest.json"), @($sumsPath, "$keyBase/SHA256SUMS"))) {
-        [void](Invoke-Captured $s3 @('s3', 'cp', $pair[0], ("s3://{0}/{1}" -f $env:R2_BUCKET, $pair[1]), '--endpoint-url', $env:R2_ENDPOINT, '--only-show-errors') 's3_upload' 's3aws')
-    }
+    [void](Invoke-Captured $s3 @('s3', 'cp', $agePath, ("s3://{0}/{1}" -f $env:R2_BUCKET, $ageKey), '--endpoint-url', $env:R2_ENDPOINT, '--metadata', ("sha256={0}" -f $ageSha), '--only-show-errors') 's3_upload_age' 's3aws')
+    [void](Invoke-Captured $s3 @('s3', 'cp', $uploadManifest, ("s3://{0}/{1}" -f $env:R2_BUCKET, ("{0}/manifest.json" -f $keyBase)), '--endpoint-url', $env:R2_ENDPOINT, '--only-show-errors') 's3_upload_manifest' 's3aws')
+    [void](Invoke-Captured $s3 @('s3', 'cp', $sumsPath, ("s3://{0}/{1}" -f $env:R2_BUCKET, ("{0}/SHA256SUMS" -f $keyBase)), '--endpoint-url', $env:R2_ENDPOINT, '--only-show-errors') 's3_upload_checksums' 's3aws')
     Log ("上傳完成（去敏；.age size={0} bytes, sha256={1}...）" -f $ageSize, $ageSha.Substring(0, 12))
 
     # 8) HEAD 驗證（不下載/解密）：size 一致 + metadata checksum 一致（HEAD 輸出捕捉不外流）
