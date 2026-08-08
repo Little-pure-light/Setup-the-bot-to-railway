@@ -7,6 +7,7 @@ Not for public anonymous use.
 """
 from __future__ import annotations
 
+import hmac
 import logging
 import os
 from typing import Any, Dict, Optional
@@ -46,7 +47,8 @@ def _check_internal_token(authorization: Optional[str], x_internal_token: Option
             token = auth[7:].strip()
         else:
             token = auth
-    if not token or token != expected:
+    # 常數時間比對（expected 已於上方保證非空；token/secret 值不記錄、不回顯）。
+    if not token or not hmac.compare_digest(token.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
