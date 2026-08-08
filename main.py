@@ -80,6 +80,26 @@ async def lifespan(app: FastAPI):
                 )
     except Exception as e:
         logger.warning(f"⚠️ Supabase 啟動檢查略過: {e}")
+    # 啟動時檢查持久化根目錄（data/）存在且可寫，並標示掛卷狀態（只印去敏資訊）。
+    # fail-open：任何失敗只記錄，不阻擋啟動（退回既有暫時磁碟行為）。
+    try:
+        from backend.modules.persistence import ensure_persistence_root
+
+        _p = ensure_persistence_root()
+        logger.info(
+            "🗄️ persistence root=%s mode=%s writable=%s is_mount=%s",
+            _p.get("root"), _p.get("mode"), _p.get("writable"), _p.get("is_mount"),
+        )
+        if _p.get("mode") != "volume":
+            logger.warning(
+                "⚠️ persistence mode=%s（非持久卷）— 重部署後 data/ 內容會遺失；"
+                "請依 Runbook 於 Railway 掛載 volume 至 data/ 根。",
+                _p.get("mode"),
+            )
+        if not _p.get("writable"):
+            logger.error("❌ persistence root 不可寫 root=%s — identity/graph 寫入會失敗", _p.get("root"))
+    except Exception as e:
+        logger.warning(f"⚠️ persistence 啟動檢查略過: {e}")
     yield
     logger.info("👋 小晨光 AI 系統關閉中...")
 
