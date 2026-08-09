@@ -46,6 +46,7 @@ try:
     from backend.ai_kernel.debug_router import router as kernel_debug_router
     from backend.openai_compat_router import router as openai_compat_router
     from backend.internal_night_growth_router import router as internal_night_growth_router
+    from backend.memory_center_page import router as memory_center_page_router
 except Exception as e:
     logger.warning(f"⚠️ 無法載入部分 router: {e}")
 
@@ -339,6 +340,11 @@ try:
         app.include_router(internal_night_growth_router)
     except NameError:
         logger.warning("internal_night_growth_router 未載入")
+    # 記憶檢視唯讀頁（方向 C：後端直出；同源，無 /api 前綴）
+    try:
+        app.include_router(memory_center_page_router)
+    except NameError:
+        logger.warning("memory_center_page_router 未載入")
     logger.info("✅ 所有 router 掛載完成")
 except Exception as e:
     logger.error(f"❌ 掛載 router 失敗: {e}")
