@@ -27,6 +27,15 @@ class NightGrowthRunRequest(BaseModel):
     force: bool = False
 
 
+def _live_runs_enabled() -> bool:
+    return os.getenv("NIGHT_GROWTH_ENABLED", "false").lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
 def _check_internal_token(authorization: Optional[str], x_internal_token: Optional[str]) -> None:
     expected = (
         os.getenv("NIGHT_GROWTH_INTERNAL_TOKEN")
@@ -93,6 +102,11 @@ async def run_night_growth(
     ):
         raise HTTPException(status_code=403, detail="Night growth endpoint disabled")
 
+    # Gate 1 safety: authenticated dry-runs stay available, but a real run needs
+    # the independent server-side activation flag. The default remains off.
+    if not body.dry_run and not _live_runs_enabled():
+        raise HTTPException(status_code=403, detail="Night growth live runs disabled")
+
     try:
         from backend.modules.night_growth import NightGrowth
 
@@ -118,6 +132,7 @@ async def run_night_growth(
             "archived_ids_count": len(report.get("archived_ids") or []),
             "identity_version_id": report.get("identity_version_id"),
             "graph_edge_ids": report.get("graph_edge_ids"),
+            "usage": report.get("usage"),
             "error": report.get("error"),
             "message": report.get("message"),
             "started_at": report.get("started_at"),
