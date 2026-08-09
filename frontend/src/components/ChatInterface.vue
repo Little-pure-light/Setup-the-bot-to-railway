@@ -388,7 +388,6 @@ import axios from 'axios'
 import {
   CHAT_API,
   API_BASE,
-  API_SECRET,
   getClientId,
   getAuthHeaders,
   VOICE_EVENTS_API,
@@ -787,7 +786,7 @@ export default {
       return uid
     },
     async buildRequestHeaders() {
-      // 已登入：帶 Supabase JWT；否則回退 API_SECRET
+      // 已登入：帶 Supabase JWT；未登入則不帶 Authorization（前端不再持有共享 secret）
       try {
         return await getUserAuthHeaders()
       } catch {

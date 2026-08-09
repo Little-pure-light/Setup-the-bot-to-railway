@@ -22,8 +22,9 @@ export const VOICE_EVENTS_API = `${API_BASE}/api/voice/events`
 export const voiceSettingsApi = (userId) =>
   `${API_BASE}/api/voice/settings/${encodeURIComponent(userId || 'default_user')}`
 
-// 選擇性 API Secret（若後端有設定 API_SECRET，前端需帶此 token）
-export const API_SECRET = import.meta.env.VITE_API_SECRET || ''
+// 已移除對 VITE_API_SECRET 的依賴：共享 secret 不得被烤進「公開」前端 bundle
+// （任何人都能從瀏覽器讀到）。前端一律改走「登入者的 Supabase JWT」，未登入即不帶 Authorization。
+// 後端 API_SECRET 仍作為伺服器對伺服器/管理用途（例如 Open WebUI），不由瀏覽器前端持有。
 
 // Supabase Auth（前端 Email 登入）
 export const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || ''
@@ -38,13 +39,11 @@ export function getClientId() {
   return (CLIENT_ID || '').trim()
 }
 
-// 取得帶有 Auth 的通用請求 headers（同步版；優先使用 localStorage 中的 session 由呼叫端覆寫）
+// 取得通用請求 headers（同步版，無 Auth fallback）。
+// 真正的授權一律由 lib/auth.js 的 getUserAuthHeaders() 以登入者的 Supabase JWT 提供；
+// 未登入時不帶 Authorization（受保護端點會回 401，屬預期）。前端不再持有任何共享 secret。
 export const getAuthHeaders = () => {
-  const headers = { 'Content-Type': 'application/json' }
-  if (API_SECRET) {
-    headers['Authorization'] = `Bearer ${API_SECRET}`
-  }
-  return headers
+  return { 'Content-Type': 'application/json' }
 }
 
 console.log('📡 [Config] API_BASE:', API_BASE)

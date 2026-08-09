@@ -2,7 +2,7 @@
  * Supabase Auth 輔助函式（Email 登入 / 註冊 / 登出）
  */
 import { getSupabase, isAuthConfigured } from './supabase.js'
-import { API_BASE, API_SECRET } from '../config.js'
+import { API_BASE } from '../config.js'
 
 const USER_ID_KEY = 'xiaochenguang_user_id'
 const GUEST_ID_KEY = 'xiaochenguang_guest_id'
@@ -81,15 +81,14 @@ export function onAuthStateChange(callback) {
 }
 
 /**
- * 組合請求 headers：API_SECRET 或 Supabase access_token
+ * 組合請求 headers：僅使用登入者的 Supabase access_token（JWT）。
+ * 未登入時不帶 Authorization（受保護端點回 401，屬預期）；前端不再持有任何共享 secret。
  */
 export async function getUserAuthHeaders() {
   const headers = { 'Content-Type': 'application/json' }
   const session = await getSession()
   if (session?.access_token) {
     headers['Authorization'] = `Bearer ${session.access_token}`
-  } else if (API_SECRET) {
-    headers['Authorization'] = `Bearer ${API_SECRET}`
   }
   return headers
 }
