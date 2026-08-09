@@ -10,6 +10,7 @@ Debug Trace API — 嚴格鎖定。
 """
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Optional
 
@@ -52,7 +53,8 @@ def _auth(authorization: Optional[str]) -> None:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Unauthorized")
     token = authorization.split(" ", 1)[1].strip()
-    if token != secret:
+    # 常數時間比對（secret 已於上方保證非空；token/secret 值不記錄、不回顯）。
+    if not token or not hmac.compare_digest(token.encode("utf-8"), secret.encode("utf-8")):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
