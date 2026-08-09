@@ -170,6 +170,132 @@ async def test_night_growth_lock(tmp_path, v1_ms):
     store.release_lock("u-lock")
 
 
+@pytest.mark.asyncio
+async def test_night_growth_cost_guard_limits_dry_run(tmp_path, v1_ms):
+    store = NightGrowthExecutionStore(base_dir=str(tmp_path / "ng-budget"))
+    ng = NightGrowth(
+        MemoryManager(v1_ms),
+        execution_store=store,
+        max_turns=2,
+        max_conversations=1,
+        max_input_tokens=500,
+    )
+    turns = [
+        {
+            "conversation_id": "older",
+            "user_message": "old",
+            "assistant_message": "old",
+        },
+        {
+            "conversation_id": "newer",
+            "user_message": "new 1",
+            "assistant_message": "new 1",
+        },
+        {
+            "conversation_id": "newer",
+            "user_message": "new 2",
+            "assistant_message": "new 2",
+        },
+    ]
+
+    report = await ng.run_once(
+        user_id="u-budget", recent_turns=turns, dry_run=True, force=True
+    )
+
+    assert report["status"] == "completed_dry_run"
+    assert report["usage"]["turns_loaded"] == 3
+    assert report["usage"]["turns_processed"] == 2
+    assert report["usage"]["turns_dropped"] == 1
+    assert report["usage"]["conversations_processed"] == 1
+    assert report["usage"]["estimated_input_tokens"] <= 500
+    assert report["usage"]["limits"] == {
+        "max_turns": 2,
+        "max_conversations": 1,
+        "max_input_tokens": 500,
+    }
+    assert report["saved_ids"] == []
+
+
+@pytest.mark.asyncio
+async def test_night_growth_gate1_dry_run_e2e_has_all_stages(tmp_path, v1_ms):
+    ng = NightGrowth(
+        MemoryManager(v1_ms),
+        identity_engine=IdentityEngine(
+            user_id="u-dry-e2e",
+            base_dir=str(tmp_path / "identity-e2e"),
+            update_mode="candidate",
+        ),
+        execution_store=NightGrowthExecutionStore(
+            base_dir=str(tmp_path / "ng-dry-e2e")
+        ),
+    )
+    turns = [
+        {
+            "conversation_id": "fake-conversation",
+            "user_message": "我喜歡安靜地整理每天學到的事",
+            "assistant_message": "我會先整理成可修正的候選理解",
+            "reflection": {
+                "summary": "以假資料驗證離線鞏固",
+                "causes": ["Gate 1 dry-run"],
+                "lessons": ["先驗證再啟用"],
+                "confidence": 0.8,
+                "timestamp": "2026-08-09T00:00:00Z",
+            },
+        }
+    ]
+
+    report = await ng.run_once(
+        user_id="u-dry-e2e", recent_turns=turns, dry_run=True, force=False
+    )
+
+    assert report["status"] == "completed_dry_run"
+    expected_stages = {
+        "load_turns",
+        "reflection",
+        "semantic_builder",
+        "decision_engine",
+        "identity_update",
+        "attention_update",
+        "transformation_update",
+        "graph_update",
+        "archive",
+    }
+    assert expected_stages <= report["steps"].keys()
+    assert all(report["steps"][stage]["status"] == "ok" for stage in expected_stages)
+    assert report["saved_ids"] == []
+    assert report["archived_ids"] == []
+    assert report["graph_edge_ids"] == []
+    assert report["usage"]["turns_processed"] == 1
+    assert report["usage"]["outputs_total"] == 0
+
+
+def test_night_growth_identity_update_stays_candidate(tmp_path, v1_ms):
+    identity = IdentityEngine(
+        user_id="u-candidate",
+        base_dir=str(tmp_path / "identity"),
+        update_mode="candidate",
+    )
+    identity.load()
+    ng = NightGrowth(
+        MemoryManager(v1_ms),
+        identity_engine=identity,
+        execution_store=NightGrowthExecutionStore(base_dir=str(tmp_path / "ng-id")),
+    )
+
+    result = ng._maybe_identity_update(
+        user_message="我喜歡無糖綠茶",
+        reflection=None,
+        classification={"tags": ["preference"], "confidence": 0.8},
+        execution_id="unit",
+        decision_identity_update=True,
+    )
+
+    assert result is not None
+    assert result["status"] == "candidate"
+    assert identity.load()["version"] == 1
+    assert len(identity.list_candidates()) == 1
+
+
 # ---------------------------------------------------------------------------
 # Task D — Graph integrity
 # ---------------------------------------------------------------------------

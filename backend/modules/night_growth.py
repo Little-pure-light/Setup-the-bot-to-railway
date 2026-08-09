@@ -13,6 +13,7 @@ Safety (Fix stage):
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -34,6 +35,54 @@ from backend.modules.night_growth_safety import (
 logger = logging.getLogger("memory.night_growth")
 
 
+def _bounded_positive_int(value: Any, default: int, *, maximum: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        parsed = default
+    return max(1, min(parsed, maximum))
+
+
+def _positive_int_env(name: str, default: int, *, maximum: int) -> int:
+    """Read a bounded positive integer without allowing an unsafe high limit."""
+    raw = (os.getenv(name) or "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        logger.warning("invalid night growth limit; using safe default name=%s", name)
+        value = default
+    return _bounded_positive_int(value, default, maximum=maximum)
+
+
+def _estimate_turn_tokens(turn: Dict[str, Any]) -> int:
+    """Conservative local estimate; no tokenizer or external API is called."""
+    payload = {
+        "user_message": turn.get("user_message") or "",
+        "assistant_message": turn.get("assistant_message") or "",
+        "reflection": turn.get("reflection") or {},
+        "emotion": turn.get("emotion") or {},
+    }
+    text = json.dumps(payload, ensure_ascii=False, default=str)
+    non_ascii_chars = sum(1 for char in text if ord(char) > 127)
+    ascii_chars = len(text) - non_ascii_chars
+    # CJK is conservatively counted as one token per character; ASCII uses 4:1.
+    return max(1, non_ascii_chars + (ascii_chars + 3) // 4)
+
+
+def _log_run_summary(report: Dict[str, Any]) -> None:
+    """Log operational counts only; never log ids or conversation content."""
+    usage = report.get("usage") or {}
+    logger.info(
+        "night growth run summary status=%s dry_run=%s turns=%s "
+        "estimated_input_tokens=%s outputs=%s",
+        report.get("status"),
+        bool(report.get("dry_run")),
+        usage.get("turns_processed", 0),
+        usage.get("estimated_input_tokens", 0),
+        usage.get("outputs_total", 0),
+    )
+
+
 class NightGrowth:
     def __init__(
         self,
@@ -44,6 +93,9 @@ class NightGrowth:
         decision_engine: Optional[DecisionEngine] = None,
         identity_engine: Optional[IdentityEngine] = None,
         execution_store: Optional[NightGrowthExecutionStore] = None,
+        max_turns: Optional[int] = None,
+        max_conversations: Optional[int] = None,
+        max_input_tokens: Optional[int] = None,
     ):
         self.manager = memory_manager
         self.classifier = classifier or MemoryClassifier()
@@ -51,6 +103,23 @@ class NightGrowth:
         self.decisions = decision_engine or DecisionEngine()
         self.identity = identity_engine
         self.store = execution_store or NightGrowthExecutionStore()
+        self.max_turns = (
+            _bounded_positive_int(max_turns, 20, maximum=200)
+            if max_turns is not None
+            else _positive_int_env("NIGHT_GROWTH_MAX_TURNS", 20, maximum=200)
+        )
+        self.max_conversations = (
+            _bounded_positive_int(max_conversations, 5, maximum=50)
+            if max_conversations is not None
+            else _positive_int_env("NIGHT_GROWTH_MAX_CONVERSATIONS", 5, maximum=50)
+        )
+        self.max_input_tokens = (
+            _bounded_positive_int(max_input_tokens, 12000, maximum=100000)
+            if max_input_tokens is not None
+            else _positive_int_env(
+                "NIGHT_GROWTH_MAX_INPUT_TOKENS", 12000, maximum=100000
+            )
+        )
 
     async def run_once(
         self,
@@ -98,6 +167,7 @@ class NightGrowth:
             report["previous"] = prev
             report["finished_at"] = datetime.now(timezone.utc).isoformat()
             self.store.write_execution(report)
+            _log_run_summary(report)
             return report
 
         if not self.store.acquire_lock(user_id):
@@ -106,6 +176,7 @@ class NightGrowth:
             report["message"] = "another_run_in_progress"
             report["finished_at"] = datetime.now(timezone.utc).isoformat()
             self.store.write_execution(report)
+            _log_run_summary(report)
             return report
 
         self.store.write_execution(report)
@@ -128,6 +199,7 @@ class NightGrowth:
                 report["status"] = "completed"
             report["finished_at"] = datetime.now(timezone.utc).isoformat()
             self.store.write_execution(report)
+            _log_run_summary(report)
             return report
         except Exception as e:
             logger.exception("night growth failed: %s", e)
@@ -135,6 +207,7 @@ class NightGrowth:
             report["error"] = str(e)
             report["finished_at"] = datetime.now(timezone.utc).isoformat()
             self.store.write_execution(report)
+            _log_run_summary(report)
             return report
         finally:
             self.store.release_lock(user_id)
@@ -167,9 +240,16 @@ class NightGrowth:
         # load turns
         s_load = new_step("load_turns")
         try:
-            turns = recent_turns or await self._load_recent_turns(
-                user_id=user_id, conversation_id=conversation_id
+            loaded_turns = (
+                recent_turns
+                if recent_turns is not None
+                else await self._load_recent_turns(
+                    user_id=user_id,
+                    conversation_id=conversation_id,
+                    limit=self.max_turns,
+                )
             )
+            turns, usage = self._apply_budget(loaded_turns)
             finish_step(s_load, status="ok")
         except Exception as e:
             finish_step(s_load, status="failed", error=str(e))
@@ -183,7 +263,11 @@ class NightGrowth:
                 "decisions": [],
             }
         step_details.append(s_load)
-        steps_summary["load_turns"] = {"count": len(turns), "status": s_load["status"]}
+        steps_summary["load_turns"] = {
+            "count": len(turns),
+            "loaded": len(loaded_turns),
+            "status": s_load["status"],
+        }
 
         # 1 Reflection
         s_ref = new_step("reflection")
@@ -409,7 +493,62 @@ class NightGrowth:
             "identity_version_id": identity_version_id,
             "graph_edge_ids": graph_edge_ids,
             "turns_considered": len(turns),
+            "usage": {
+                **usage,
+                "outputs_total": (
+                    len(saved_ids)
+                    + len(archived_ids)
+                    + graph_edges
+                    + int(steps_summary.get("identity_candidates") or 0)
+                    + identity_patches
+                ),
+                "saved_count": len(saved_ids),
+                "archived_count": len(archived_ids),
+                "graph_edges_count": graph_edges,
+                "identity_candidates_count": int(
+                    steps_summary.get("identity_candidates") or 0
+                ),
+                "identity_patches_count": identity_patches,
+            },
             "fatal_error": None,
+        }
+
+    def _apply_budget(
+        self, turns: List[Dict[str, Any]]
+    ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        """Keep newest turns within conversation, turn, and estimated-token limits."""
+        selected_reversed: List[Dict[str, Any]] = []
+        conversations: set[str] = set()
+        estimated_tokens = 0
+
+        for turn in reversed(list(turns)):
+            if len(selected_reversed) >= self.max_turns:
+                break
+            conversation_key = str(turn.get("conversation_id") or "__unspecified__")
+            if (
+                conversation_key not in conversations
+                and len(conversations) >= self.max_conversations
+            ):
+                continue
+            turn_tokens = _estimate_turn_tokens(turn)
+            if estimated_tokens + turn_tokens > self.max_input_tokens:
+                continue
+            conversations.add(conversation_key)
+            selected_reversed.append(turn)
+            estimated_tokens += turn_tokens
+
+        selected = list(reversed(selected_reversed))
+        return selected, {
+            "turns_loaded": len(turns),
+            "turns_processed": len(selected),
+            "turns_dropped": len(turns) - len(selected),
+            "conversations_processed": len(conversations),
+            "estimated_input_tokens": estimated_tokens,
+            "limits": {
+                "max_turns": self.max_turns,
+                "max_conversations": self.max_conversations,
+                "max_input_tokens": self.max_input_tokens,
+            },
         }
 
     def _maybe_identity_update(

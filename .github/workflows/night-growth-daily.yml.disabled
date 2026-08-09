@@ -1,0 +1,54 @@
+# Gate 1 disabled template. GitHub ignores this file because it does not end in .yml/.yaml.
+# Gate 2 must review docs/RUNBOOK_NIGHT_GROWTH_GATE2.md before renaming it.
+name: Night Growth Daily
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Run without writes or daily idempotency consumption"
+        required: true
+        default: true
+        type: boolean
+  schedule:
+    # 03:17 Asia/Taipei (UTC+8). This schedule is NOT registered while file is .disabled.
+    - cron: "17 19 * * *"
+
+concurrency:
+  group: night-growth-daily
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    if: vars.NIGHT_GROWTH_DAILY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: night-growth
+    timeout-minutes: 10
+    steps:
+      - name: Trigger bounded run
+        env:
+          ENDPOINT: ${{ secrets.NIGHT_GROWTH_ENDPOINT }}
+          TOKEN: ${{ secrets.NIGHT_GROWTH_INTERNAL_TOKEN }}
+          USER_ID: ${{ secrets.NIGHT_GROWTH_USER_ID }}
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          test -n "$ENDPOINT"
+          test -n "$TOKEN"
+          test -n "$USER_ID"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$MANUAL_DRY_RUN" = "true" ]; then
+            DRY_RUN=true
+          else
+            DRY_RUN=false
+          fi
+          PAYLOAD="$(jq -n \
+            --arg user_id "$USER_ID" \
+            --argjson dry_run "$DRY_RUN" \
+            '{user_id: $user_id, dry_run: $dry_run, force: false}')"
+          curl --fail-with-body --silent --show-error \
+            --max-time 540 \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$PAYLOAD" \
+            "$ENDPOINT/internal/night-growth/run"

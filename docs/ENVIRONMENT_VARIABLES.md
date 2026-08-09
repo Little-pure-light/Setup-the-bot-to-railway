@@ -63,10 +63,13 @@
 | `TOKEN_LEDGER_PATH` | Token 會計 JSONL（與訊息正文分離） | `data/token_ledger.jsonl` |
 | `TOKEN_LEDGER_ENABLED` | 是否寫入 token ledger | `true` |
 | `EMBEDDING_MODEL` | Typed memory / retrieval 共用 embedding 模型 | `text-embedding-3-small` |
-| `NIGHT_GROWTH_ENABLED` | 允許 scheduler job 真正執行（預設關；勿多 replica 自動 start） | `false` |
+| `NIGHT_GROWTH_ENABLED` | 允許任何非 dry-run Night Growth 執行（預設關；勿多 replica 自動 start） | `false` |
 | `NIGHT_GROWTH_INTERNAL_TOKEN` | `POST /internal/night-growth/run` 內部 token | 空則回退 `API_SECRET` |
 | `NIGHT_GROWTH_ENDPOINT_ENABLED` | 是否開放內部 Night Growth endpoint | `true` |
 | `NIGHT_GROWTH_STORE_DIR` | Night Growth 執行紀錄／lock 目錄 | `data/night_growth` |
+| `NIGHT_GROWTH_MAX_TURNS` | 每次最多處理 turn 數（硬上限 200） | `20` |
+| `NIGHT_GROWTH_MAX_CONVERSATIONS` | 每次最多處理不同 conversation 數（硬上限 50） | `5` |
+| `NIGHT_GROWTH_MAX_INPUT_TOKENS` | 每次輸入 token 粗估上限（硬上限 100000；本地字元估算，不呼叫 API） | `12000` |
 | `REFLECTION_INCLUDE_STATUS` | `include_reflection=true` 時回傳 `reflection_status` | `true` |
 | `REFLECTION_INCLUDE_WAIT_MS` | 可選 bounded wait（毫秒）；0=立即 pending | `0` |
 | `REFLECTION_INCLUDE_WAIT_MAX_MS` | wait 上限 | `1500` |
