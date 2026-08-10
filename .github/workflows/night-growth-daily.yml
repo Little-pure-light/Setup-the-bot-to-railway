@@ -1,5 +1,5 @@
-# Gate 1 disabled template. GitHub ignores this file because it does not end in .yml/.yaml.
-# Gate 2 must review docs/RUNBOOK_NIGHT_GROWTH_GATE2.md before renaming it.
+# Gate 2 armed workflow. Manual dispatch is available; the daily schedule stays variable-gated.
+# See docs/RUNBOOK_NIGHT_GROWTH_GATE2.md before enabling scheduled runs.
 name: Night Growth Daily
 
 on:
@@ -11,7 +11,7 @@ on:
         default: true
         type: boolean
   schedule:
-    # 03:17 Asia/Taipei (UTC+8). This schedule is NOT registered while file is .disabled.
+    # 03:17 Asia/Taipei (UTC+8). The scheduled job runs only when the gate variable is true.
     - cron: "17 19 * * *"
 
 concurrency:
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   trigger:
-    if: vars.NIGHT_GROWTH_DAILY_ENABLED == 'true'
+    if: ${{ github.event_name == 'workflow_dispatch' || vars.NIGHT_GROWTH_DAILY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment: night-growth
     timeout-minutes: 10
